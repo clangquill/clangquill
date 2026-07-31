@@ -13,6 +13,8 @@ Every knob is a ``clangquill_*`` config value mirroring a field of
 
 from __future__ import annotations
 
+import glob
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sphinx.errors import ExtensionError
@@ -45,6 +47,47 @@ def _warn_unknown_config(app: Sphinx, config: SphinxConfig) -> None:  # noqa: AR
                 name,
                 type="clangquill",
                 subtype="config",
+            )
+
+
+def _warn_unresolved_paths(app: Sphinx, sphinx_config: SphinxConfig) -> None:
+    """``config-inited`` hook: flag ``clangquill_input``/``include_dirs`` entries missing on disk.
+
+    Paths are checked relative to the srcdir. This is a warning rather than a build failure: ``_run`` already raises a
+    clean :class:`ExtensionError` for an input pattern that matches no files
+    once parsing is attempted, and a dangling ``include_dirs`` entry is often
+    harmless (e.g. an optional vendor directory). Suppressible via
+    ``suppress_warnings = ["clangquill.paths"]``.
+    """
+    config = Config.from_mapping({name: getattr(sphinx_config, name) for name, _ in CONFIG_FIELDS})
+    base = Path(app.srcdir)
+
+    for pattern in config.input:
+        candidate = Path(pattern)
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        if candidate.is_file() or any(
+            Path(match).is_file()
+            for match in glob.iglob(str(candidate), recursive=True)  # noqa: PTH207
+        ):
+            continue
+        logger.warning(
+            "clangquill_input entry does not resolve to an existing file: %r",
+            pattern,
+            type="clangquill",
+            subtype="paths",
+        )
+
+    for entry in config.include_dirs:
+        candidate = Path(entry)
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        if not candidate.is_dir():
+            logger.warning(
+                "clangquill_include_dirs entry does not exist: %r",
+                entry,
+                type="clangquill",
+                subtype="paths",
             )
 
 
@@ -89,8 +132,6 @@ def _run(app: Sphinx) -> None:
 
 def _write_placeholder(app: Sphinx, config: Config) -> None:
     """Write a stub root document so a toctree referencing the output resolves."""
-    from pathlib import Path  # noqa: PLC0415
-
     out = Path(app.srcdir) / config.output_dir
     out.mkdir(parents=True, exist_ok=True)
     (out / f"{config.root_document}.md").write_text(
@@ -128,6 +169,7 @@ def setup(app: Sphinx) -> dict[str, Any]:
         app.add_config_value(name, default, "env")
 
     app.connect("config-inited", _warn_unknown_config)
+    app.connect("config-inited", _warn_unresolved_paths)
     app.connect("builder-inited", _run)
     app.connect("build-finished", _cleanup)
 
