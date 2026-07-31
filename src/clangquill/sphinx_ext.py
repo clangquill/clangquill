@@ -66,7 +66,10 @@ def _warn_unresolved_paths(app: Sphinx, sphinx_config: SphinxConfig) -> None:
         candidate = Path(pattern)
         if not candidate.is_absolute():
             candidate = base / candidate
-        if candidate.exists() or glob.glob(str(candidate), recursive=True):  # noqa: PTH207
+        if candidate.is_file() or any(
+            Path(match).is_file()
+            for match in glob.iglob(str(candidate), recursive=True)  # noqa: PTH207
+        ):
             continue
         logger.warning(
             "clangquill_input entry does not resolve to an existing file: %r",

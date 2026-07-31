@@ -247,6 +247,43 @@ def test_unresolved_input_pattern_warns_before_the_build_error(tmp_path: Path) -
     assert "clangquill_input entry does not resolve to an existing file: 'missing_*.hpp'" in warnings.read_text()
 
 
+def test_directory_only_input_entries_still_warn(tmp_path: Path) -> None:
+    """A literal directory, or a glob matching only directories, isn't a resolved input."""
+    pytest.importorskip("sphinx")
+    pytest.importorskip("myst_parser")
+    from sphinx.application import Sphinx  # noqa: PLC0415
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "geo.hpp").write_text(HEADER)
+    (src / "empty_dir").mkdir()
+    (src / "dirs_only" / "subdir").mkdir(parents=True)
+    (src / "conf.py").write_text(
+        'extensions = ["clangquill.sphinx_ext"]\nmaster_doc = "index"\n'
+        'clangquill_input = ["geo.hpp", "empty_dir", "dirs_only/*"]\n'
+        'clangquill_output_dir = "api"\n',
+    )
+    (src / "index.md").write_text(ROOT_INDEX)
+
+    warnings = tmp_path / "warnings.txt"
+    app = Sphinx(
+        str(src),
+        str(src),
+        str(tmp_path / "out"),
+        str(tmp_path / "doctree"),
+        "html",
+        status=None,
+        warning=warnings.open("w", encoding="utf-8"),
+    )
+    app.build()
+    warning_text = warnings.read_text()
+    assert "clangquill_input entry does not resolve to an existing file: 'empty_dir'" in warning_text
+    assert "clangquill_input entry does not resolve to an existing file: 'dirs_only/*'" in warning_text
+    # The valid entry alongside the bogus ones must not spuriously warn, and the build still succeeds.
+    assert "'geo.hpp'" not in warning_text
+    assert (src / "api" / "geo.md").is_file()
+
+
 def test_coexists_with_a_preconfigured_myst_parser(tmp_path: Path) -> None:
     """A pre-configured MyST parser must not be double-registered.
 
