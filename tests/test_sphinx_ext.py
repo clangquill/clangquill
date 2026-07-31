@@ -187,6 +187,66 @@ def test_invalid_config_value_raises_a_clean_extension_error(tmp_path: Path) -> 
         )
 
 
+def test_missing_include_dir_warns(tmp_path: Path) -> None:
+    """A ``clangquill_include_dirs`` entry that doesn't exist must warn, not fail."""
+    pytest.importorskip("sphinx")
+    pytest.importorskip("myst_parser")
+    from sphinx.application import Sphinx  # noqa: PLC0415
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "geo.hpp").write_text(HEADER)
+    (src / "conf.py").write_text(
+        'extensions = ["clangquill.sphinx_ext"]\nmaster_doc = "index"\n'
+        'clangquill_input = ["geo.hpp"]\nclangquill_output_dir = "api"\n'
+        'clangquill_include_dirs = ["does_not_exist"]\n',
+    )
+    (src / "index.md").write_text(ROOT_INDEX)
+
+    warnings = tmp_path / "warnings.txt"
+    app = Sphinx(
+        str(src),
+        str(src),
+        str(tmp_path / "out"),
+        str(tmp_path / "doctree"),
+        "html",
+        status=None,
+        warning=warnings.open("w", encoding="utf-8"),
+    )
+    app.build()
+    assert "clangquill_include_dirs entry does not exist: 'does_not_exist'" in warnings.read_text()
+    # The build itself still succeeds despite the dangling include dir.
+    assert (src / "api" / "geo.md").is_file()
+
+
+def test_unresolved_input_pattern_warns_before_the_build_error(tmp_path: Path) -> None:
+    """An unresolved ``clangquill_input`` entry warns at config time too."""
+    pytest.importorskip("sphinx")
+    pytest.importorskip("myst_parser")
+    from sphinx.application import Sphinx  # noqa: PLC0415
+    from sphinx.errors import ExtensionError  # noqa: PLC0415
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "conf.py").write_text(
+        'extensions = ["clangquill.sphinx_ext"]\nmaster_doc = "index"\nclangquill_input = ["missing_*.hpp"]\n',
+    )
+    (src / "index.md").write_text("# Project\n")
+
+    warnings = tmp_path / "warnings.txt"
+    with pytest.raises(ExtensionError, match="clangquill input matched no files"):
+        Sphinx(
+            str(src),
+            str(src),
+            str(tmp_path / "out"),
+            str(tmp_path / "doctree"),
+            "html",
+            status=None,
+            warning=warnings.open("w", encoding="utf-8"),
+        )
+    assert "clangquill_input entry does not resolve to an existing file: 'missing_*.hpp'" in warnings.read_text()
+
+
 def test_coexists_with_a_preconfigured_myst_parser(tmp_path: Path) -> None:
     """A pre-configured MyST parser must not be double-registered.
 
