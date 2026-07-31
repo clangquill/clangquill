@@ -239,6 +239,14 @@ std::vector<std::string> Parser::build_args(const std::string& path) const {
     }
     if (compile_db_->loaded()) {
       auto from_db = compile_db_->args_for(path);
+      if (from_db.empty()) {
+        // Headers are rarely their own compile_commands.json entry. Fall back
+        // to the same-directory .cpp of the same name, e.g. foo.hpp ->
+        // foo.cpp, which usually shares the header's include dirs/defines.
+        std::filesystem::path sibling =
+            std::filesystem::path(path).replace_extension(".cpp");
+        from_db = compile_db_->args_for(sibling.string());
+      }
       args.insert(args.end(), from_db.begin(), from_db.end());
     }
   }

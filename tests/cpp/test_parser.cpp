@@ -309,6 +309,41 @@ TEST_CASE("umbrella batching attributes dependencies per member exactly",
   }
 }
 
+TEST_CASE("compile_commands_dir falls back to the sibling .cpp for a header",
+          "[parser]") {
+  // compile_commands.json only ever lists translation units (.cpp), never the
+  // headers they include. A header with no entry of its own should still pick
+  // up its sibling .cpp's flags (e.g. the -I it needs to resolve an include),
+  // rather than falling through to the parser's bare defaults.
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "clangquill-sibling-cc-test";
+  fs::remove_all(dir);
+  fs::create_directories(dir / "extra");
+
+  std::ofstream(dir / "extra" / "dep.hpp") << "inline int dep_value() { return 7; }\n";
+  std::ofstream(dir / "widget.hpp")
+      << "#include \"dep.hpp\"\ninline int widget_value() { return dep_value(); }\n";
+  std::ofstream(dir / "widget.cpp") << "#include \"widget.hpp\"\n";
+
+  {
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"" << (dir / "widget.cpp").string()
+       << "\", \"arguments\": [\"c++\", \"-I" << (dir / "extra").string()
+       << "\", \"-c\", \"" << (dir / "widget.cpp").string() << "\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+  CHECK(mod.diagnostics.empty());
+  CHECK(find(mod, "widget_value") != nullptr);
+
+  fs::remove_all(dir);
+}
+
 #else  // !CLANGQUILL_HAVE_LIBCLANG
 
 TEST_CASE("parser tests skipped without libclang", "[parser][!mayfail]") {
