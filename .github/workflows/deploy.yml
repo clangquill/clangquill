@@ -32,7 +32,7 @@ jobs:
               # A plain `python -m build --wheel` tags the artefact
               # linux_<arch>, which PyPI rejects. cibuildwheel produces the
               # manylinux-tagged wheels PyPI accepts.
-        uses: pypa/cibuildwheel@v4.1.0
+        uses: pypa/cibuildwheel@v4.1.1
         env:
                   # The core links sqlite3 + nlohmann-json, sourced via vcpkg
                   # inside the manylinux image (apt is unavailable there). vcpkg
