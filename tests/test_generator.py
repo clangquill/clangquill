@@ -113,7 +113,9 @@ def test_generate_avoids_root_document_and_case_collisions(collision_db: Path, t
     index = (out / "index.md").read_text()
     assert index.startswith("# API Reference")
     assert "index_" in index
-    assert "{cpp:function} void index()" in (out / "index_.md").read_text()
+    index_page = (out / "index_.md").read_text()
+    assert index_page.startswith("# Function `index`")
+    assert "{cpp:function} void index()" in index_page
     assert "{cpp:function} void foo()" in (out / "foo_.md").read_text()
 
 
