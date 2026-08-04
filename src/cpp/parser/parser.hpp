@@ -89,6 +89,16 @@ class Parser {
   // Lazily-loaded compile_commands.json reader, shared across this parser's
   // translation units (mutable: caching it does not change observable state).
   mutable std::unique_ptr<class CompileDb> compile_db_;
+  // Set once the load above has been attempted and failed, so the "database
+  // could not be loaded" diagnostic is reported once per parser rather than
+  // once per translation unit.
+  mutable bool compile_db_failed_ = false;
+  mutable bool compile_db_reported_ = false;
+
+  // Appends the one-shot compile-database failure diagnostic to @p out, naming
+  // the path that was searched. No-op when the database loaded (or none was
+  // configured), and after the first report.
+  void report_compile_db_failure(model::ParsedModule& out) const;
 };
 
 /// @brief Parses every input file and merges the per-batch IR into one module.

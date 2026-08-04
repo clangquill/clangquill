@@ -59,10 +59,16 @@ build time, regenerating pages into your source tree before Sphinx reads them.
 extensions = ["clangquill.sphinx_ext"]  # pulls in myst_parser automatically
 
 clangquill_input = ["../include/**/*.hpp"]
-clangquill_output_dir = "api"          # written under the Sphinx srcdir
-clangquill_std = "c++20"
-clangquill_include_dirs = ["../include"]
+clangquill_compile_commands = "../build"  # dir holding compile_commands.json
+clangquill_output_dir = "api"             # written under the Sphinx srcdir
 ```
+
+`clangquill_compile_commands` is **required** by the extension: it parses with
+the flags your build system actually uses instead of guessing them, so a
+`conf.py` without it fails the build. Generate the database with
+`cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, `meson setup` or
+[Bear](https://github.com/rizsotto/Bear). The CLI and Python API still accept
+manual `--std`/`-I`/`-D` flags.
 
 Then reference the generated toctree from your root document:
 
@@ -73,7 +79,7 @@ api/index
 ````
 
 Every knob is a `clangquill_*` config value mirroring a field of
-`clangquill.config.Config` — including `clangquill_compile_commands`,
+`clangquill.config.Config` — including
 `clangquill_template_dirs`, `clangquill_include_undocumented`,
 `clangquill_comment_parser` and `clangquill_group_by`. See the
 [configuration guide](https://github.com/renefritze/clangquill/blob/main/docs/guides/configuration.md)

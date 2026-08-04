@@ -45,10 +45,18 @@ before Sphinx reads them.
 extensions = ["clangquill.sphinx_ext"]  # pulls in myst_parser automatically
 
 clangquill_input = ["../include/**/*.hpp"]
-clangquill_output_dir = "api"          # written under the Sphinx srcdir
-clangquill_std = "c++20"
-clangquill_include_dirs = ["../include"]
+clangquill_compile_commands = "../build"  # dir holding compile_commands.json
+clangquill_output_dir = "api"             # written under the Sphinx srcdir
 ```
+
+`clangquill_compile_commands` is **required**: the extension parses with the
+flags your build system actually uses rather than guessing them, so a `conf.py`
+without it fails the build. Generate the database with
+`cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` (Meson writes one by default, and
+[Bear](https://github.com/rizsotto/Bear) records one for anything else), and see
+the [compile-database guide](guides/configuration.md#compile-databases) for what
+happens when the file is missing or unloadable, and for header-only projects
+whose headers have no entry of their own.
 
 Then reference the generated toctree from your root document:
 
@@ -59,7 +67,7 @@ api/index
 ````
 
 Every knob is a `clangquill_*` config value mirroring a field of
-`clangquill.config.Config`, including `clangquill_compile_commands`,
+`clangquill.config.Config`, including
 `clangquill_defines`, `clangquill_template_dirs`, `clangquill_templates`
 (per-kind overrides), `clangquill_include_undocumented`,
 `clangquill_comment_parser`, `clangquill_group_by` (`symbol`, `file`, `class` or

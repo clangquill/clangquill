@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 
 from clangquill import _core
 from clangquill.cache import BuildCache, OutputRecord, ParseStatus, file_sha256, fingerprint, hash_text
+from clangquill.config import CONFIG_PREFIX
 from clangquill.generator import Generator
 from clangquill.store import Store
 
@@ -52,6 +53,9 @@ if TYPE_CHECKING:
 # Name of the manifest tracking generated pages, written into ``output_dir`` so
 # stale pages from a previous build can be pruned on the next one.
 MANIFEST_NAME = ".clangquill-manifest.json"
+
+# The file libclang looks for inside a compilation-database directory.
+COMPILE_COMMANDS_NAME = "compile_commands.json"
 
 # Filename of the persisted SQLite IR within a configured cache directory.
 IR_NAME = "clangquill.sqlite"
@@ -66,6 +70,15 @@ IR_NAME = "clangquill.sqlite"
 # determinism rationale for the fixed cold batch (see ``kDefaultTuBatch`` in
 # ``parser.cpp``) does not bind on this path.
 _INCREMENTAL_TU_BATCH = 8
+
+
+class CompileCommandsError(FileNotFoundError):
+    """Raised when the configured compilation database cannot be used.
+
+    Subclasses :class:`FileNotFoundError` so both front ends keep reporting it
+    the way they already report a bad input pattern: the CLI prints it and exits
+    non-zero, the Sphinx extension turns it into a clean ``ExtensionError``.
+    """
 
 
 @dataclass
@@ -129,6 +142,70 @@ def _resolve_inputs(patterns: list[str], base_dir: Path) -> list[str]:
     return resolved
 
 
+def _compile_commands_candidates(value: str, base_dir: Path) -> list[Path]:
+    """Paths searched for the compilation database configured as ``value``.
+
+    ``compile_commands`` names the *directory* holding a ``compile_commands.json``
+    (that is what libclang's ``clang_CompilationDatabase_fromDirectory`` takes),
+    but pointing it straight at the JSON file is the obvious slip, so that
+    spelling is accepted too. Relative values resolve against ``base_dir``.
+    """
+    configured = Path(value).expanduser()
+    if not configured.is_absolute():
+        configured = base_dir / configured
+    if configured.name == COMPILE_COMMANDS_NAME:
+        return [configured]
+    return [configured / COMPILE_COMMANDS_NAME]
+
+
+def resolve_compile_commands(value: str, base_dir: Path) -> Path:
+    """Return the usable ``compile_commands.json`` configured as ``value``.
+
+    libclang reports a database it cannot open only as "no flags for this file",
+    which then degrades silently into the ``std``/``include_dirs``/``defines``
+    fallback. Checking it here instead means a database that is missing,
+    unreadable, malformed or empty fails loudly — and the message lists every
+    path that was searched, so a misconfigured directory is obvious.
+
+    Raises :class:`CompileCommandsError` if no candidate path holds a loadable
+    database.
+    """
+    candidates = _compile_commands_candidates(value, base_dir)
+    for candidate in candidates:
+        if candidate.is_file():
+            _check_compile_commands(candidate)
+            return candidate
+    looked = "\n".join(f"  {candidate}" for candidate in candidates)
+    msg = (
+        f"{CONFIG_PREFIX}compile_commands={value!r} does not point at a "
+        f"{COMPILE_COMMANDS_NAME} (relative paths resolve against {base_dir}); looked for:\n{looked}"
+    )
+    raise CompileCommandsError(msg)
+
+
+def _check_compile_commands(path: Path) -> None:
+    """Raise :class:`CompileCommandsError` unless ``path`` is a loadable database."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        msg = f"compilation database {path} could not be read: {exc}"
+        raise CompileCommandsError(msg) from exc
+    try:
+        entries = json.loads(text)
+    except ValueError as exc:
+        msg = f"compilation database {path} is not valid JSON: {exc}"
+        raise CompileCommandsError(msg) from exc
+    if not isinstance(entries, list):
+        msg = f"compilation database {path} must hold a JSON array of compile commands"
+        raise CompileCommandsError(msg)
+    if not entries:
+        msg = (
+            f"compilation database {path} is empty, so it supplies flags for no file at all — "
+            "regenerate it (e.g. cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON)"
+        )
+        raise CompileCommandsError(msg)
+
+
 def _parse_options(config: Config, base_dir: Path) -> _core.ParseOptions:
     """Translate a :class:`Config` into core :class:`ParseOptions`."""
     opt = _core.ParseOptions()
@@ -142,7 +219,9 @@ def _parse_options(config: Config, base_dir: Path) -> _core.ParseOptions:
     opt.jobs = config.jobs
     opt.tu_batch = config.tu_batch
     if config.compile_commands:
-        opt.compile_commands_dir = str((base_dir / config.compile_commands).resolve())
+        # libclang takes the *directory*; the resolver has already proven a
+        # loadable compile_commands.json sits inside it.
+        opt.compile_commands_dir = str(resolve_compile_commands(config.compile_commands, base_dir).parent)
     return opt
 
 
@@ -158,10 +237,11 @@ def _parse_fingerprint(config: Config, base_dir: Path, inputs: list[str]) -> str
     if config.compile_commands:
         # ``compile_commands`` names the *directory* holding compile_commands.json
         # (it is handed to clang_CompilationDatabase_fromDirectory), so hash the
-        # JSON file inside it rather than the directory.
-        cc = (base_dir / config.compile_commands / "compile_commands.json").resolve()
+        # JSON file inside it rather than the directory. ``build`` has already
+        # rejected a database that cannot be loaded, so the guard here only
+        # covers a file that vanished mid-run.
         try:
-            compile_commands_hash = file_sha256(cc)
+            compile_commands_hash = file_sha256(resolve_compile_commands(config.compile_commands, base_dir))
         except OSError:
             compile_commands_hash = "missing"
     return fingerprint(
@@ -317,6 +397,10 @@ def build(config: Config, *, base_dir: str | Path) -> BuildResult:
     """
     config.validate()
     base = Path(base_dir).resolve()
+    if config.compile_commands:
+        # Resolved up front so a missing/unloadable database fails before any
+        # parsing, cache bookkeeping or page writing happens.
+        resolve_compile_commands(config.compile_commands, base)
     inputs = _resolve_inputs(config.input, base)
     output_dir = (base / config.output_dir).resolve()
     if config.cache_dir:
@@ -658,4 +742,12 @@ def _prune_stale(output_dir: Path, kept: list[str]) -> list[str]:
     return sorted(deleted)
 
 
-__all__ = ["IR_NAME", "MANIFEST_NAME", "BuildResult", "build"]
+__all__ = [
+    "COMPILE_COMMANDS_NAME",
+    "IR_NAME",
+    "MANIFEST_NAME",
+    "BuildResult",
+    "CompileCommandsError",
+    "build",
+    "resolve_compile_commands",
+]

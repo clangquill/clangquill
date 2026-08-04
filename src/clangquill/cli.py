@@ -98,7 +98,12 @@ def build(  # noqa: PLR0913
     ] = None,
     compile_commands: Annotated[
         Path | None,
-        typer.Option("--compile-commands", help="Directory with a compile_commands.json."),
+        typer.Option(
+            "--compile-commands",
+            help="Directory with a compile_commands.json (the file itself works too). "
+            "Optional here, unlike in the Sphinx extension, but it overrides --std/-I/-D "
+            "with the flags your build system actually uses.",
+        ),
     ] = None,
     compile_arg: Annotated[
         list[str] | None,

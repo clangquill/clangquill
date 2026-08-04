@@ -135,6 +135,55 @@ from clangquill._libclang import libclang_major  # noqa: E402
 if (libclang_major() or 0) >= LIBCLANG_PIN_MAJOR:
     clangquill_std = "c++26"
     clangquill_input = [*clangquill_input, "examples/cpp23_features.hpp"]
+
+
+def _write_compile_commands():
+    """Write a compile_commands.json covering the inputs and return its directory.
+
+    The Sphinx extension requires a compilation database -- it will not guess
+    compile flags. clangquill has no CMake build tree that would cover *these*
+    inputs: a real compile_commands.json lists translation units (.cpp), and
+    most of the headers documented here have no .cpp of their own. So we
+    generate the database, giving every input exactly the command line the
+    flags above describe. A project that already builds with
+    `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` just points at its build directory
+    instead.
+    """
+    import glob  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    flags = [f"-std={clangquill_std}"]
+    flags += [f"-I{(this_dir / d).resolve()}" for d in clangquill_include_dirs]
+    flags += clangquill_compile_args
+    flags.append("-xc++")  # the inputs are headers, not .cpp files
+
+    entries = []
+    seen = set()
+    for pattern in clangquill_input:
+        for hit in sorted(glob.glob(str(this_dir / pattern), recursive=True)):
+            # Resolved, because that is how the pipeline spells its inputs.
+            match = str(Path(hit).resolve())
+            if not os.path.isfile(match) or match in seen:
+                continue
+            seen.add(match)
+            entries.append(
+                {
+                    "directory": str(this_dir),
+                    "file": match,
+                    "arguments": ["c++", *flags, "-c", match],
+                }
+            )
+
+    directory = this_dir / "_build" / "clangquill"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "compile_commands.json").write_text(
+        json.dumps(entries, indent=2), encoding="utf-8"
+    )
+    return str(directory)
+
+
+clangquill_compile_commands = _write_compile_commands()
+
 # this enables:
 # substitutions-with-jinja2, direct-latex-math and definition-lists
 # ref: https://myst-parser.readthedocs.io/en/latest/using/syntax-optional.html

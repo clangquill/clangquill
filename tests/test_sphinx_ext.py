@@ -6,6 +6,7 @@ that the generated ``cpp:`` domain objects appear in ``objects.inv``.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 from clangquill import _core
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
 
 pytestmark = pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
@@ -50,6 +52,7 @@ extensions = ["clangquill.sphinx_ext"]
 master_doc = "index"
 clangquill_input = ["geo.hpp"]
 clangquill_output_dir = "api"
+clangquill_compile_commands = "."
 """
 
 ROOT_INDEX = """
@@ -61,6 +64,29 @@ ROOT_INDEX = """
 api/index
 ```
 """
+
+# Every conf.py below sets ``clangquill_compile_commands``: the extension now
+# refuses to guess compile flags, so a project without a database is an error
+# (covered by ``test_missing_compile_commands_raises_a_clean_extension_error``).
+CONF_WITHOUT_COMPILE_COMMANDS = """
+extensions = ["clangquill.sphinx_ext"]
+master_doc = "index"
+clangquill_input = ["geo.hpp"]
+clangquill_output_dir = "api"
+"""
+
+
+def _write_compile_commands(directory: Path, sources: Iterable[str], *, std: str = "c++20") -> None:
+    """Write a ``compile_commands.json`` covering ``sources`` into ``directory``."""
+    entries = [
+        {
+            "directory": str(directory),
+            "file": str(directory / name),
+            "arguments": ["c++", f"-std={std}", "-xc++", "-c", str(directory / name)],
+        }
+        for name in sources
+    ]
+    (directory / "compile_commands.json").write_text(json.dumps(entries), encoding="utf-8")
 
 
 def test_minimal_sphinx_project_builds(tmp_path: Path) -> None:
@@ -74,6 +100,7 @@ def test_minimal_sphinx_project_builds(tmp_path: Path) -> None:
     (src / "geo.hpp").write_text(HEADER)
     (src / "conf.py").write_text(CONF)
     (src / "index.md").write_text(ROOT_INDEX)
+    _write_compile_commands(src, ["geo.hpp"])
 
     out = tmp_path / "out"
     warnings = tmp_path / "warnings.txt"
@@ -143,9 +170,11 @@ def test_missing_input_raises_a_clean_extension_error(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
     (src / "conf.py").write_text(
-        'extensions = ["clangquill.sphinx_ext"]\nmaster_doc = "index"\nclangquill_input = ["missing_*.hpp"]\n',
+        'extensions = ["clangquill.sphinx_ext"]\nmaster_doc = "index"\n'
+        'clangquill_input = ["missing_*.hpp"]\nclangquill_compile_commands = "."\n',
     )
     (src / "index.md").write_text("# Project\n")
+    _write_compile_commands(src, ["geo.hpp"])
 
     with pytest.raises(ExtensionError, match="clangquill input matched no files"):
         Sphinx(
@@ -171,9 +200,11 @@ def test_invalid_config_value_raises_a_clean_extension_error(tmp_path: Path) -> 
     (src / "geo.hpp").write_text(HEADER)
     (src / "conf.py").write_text(
         'extensions = ["clangquill.sphinx_ext"]\nmaster_doc = "index"\n'
-        'clangquill_input = ["geo.hpp"]\nclangquill_group_by = "nonsense"\n',
+        'clangquill_input = ["geo.hpp"]\nclangquill_group_by = "nonsense"\n'
+        'clangquill_compile_commands = "."\n',
     )
     (src / "index.md").write_text(ROOT_INDEX)
+    _write_compile_commands(src, ["geo.hpp"])
 
     with pytest.raises(ExtensionError, match="clangquill_group_by must be one of"):
         Sphinx(
@@ -199,9 +230,10 @@ def test_missing_include_dir_warns(tmp_path: Path) -> None:
     (src / "conf.py").write_text(
         'extensions = ["clangquill.sphinx_ext"]\nmaster_doc = "index"\n'
         'clangquill_input = ["geo.hpp"]\nclangquill_output_dir = "api"\n'
-        'clangquill_include_dirs = ["does_not_exist"]\n',
+        'clangquill_include_dirs = ["does_not_exist"]\nclangquill_compile_commands = "."\n',
     )
     (src / "index.md").write_text(ROOT_INDEX)
+    _write_compile_commands(src, ["geo.hpp"])
 
     warnings = tmp_path / "warnings.txt"
     app = Sphinx(
@@ -229,9 +261,11 @@ def test_unresolved_input_pattern_warns_before_the_build_error(tmp_path: Path) -
     src = tmp_path / "src"
     src.mkdir()
     (src / "conf.py").write_text(
-        'extensions = ["clangquill.sphinx_ext"]\nmaster_doc = "index"\nclangquill_input = ["missing_*.hpp"]\n',
+        'extensions = ["clangquill.sphinx_ext"]\nmaster_doc = "index"\n'
+        'clangquill_input = ["missing_*.hpp"]\nclangquill_compile_commands = "."\n',
     )
     (src / "index.md").write_text("# Project\n")
+    _write_compile_commands(src, ["geo.hpp"])
 
     warnings = tmp_path / "warnings.txt"
     with pytest.raises(ExtensionError, match="clangquill input matched no files"):
@@ -261,9 +295,10 @@ def test_directory_only_input_entries_still_warn(tmp_path: Path) -> None:
     (src / "conf.py").write_text(
         'extensions = ["clangquill.sphinx_ext"]\nmaster_doc = "index"\n'
         'clangquill_input = ["geo.hpp", "empty_dir", "dirs_only/*"]\n'
-        'clangquill_output_dir = "api"\n',
+        'clangquill_output_dir = "api"\nclangquill_compile_commands = "."\n',
     )
     (src / "index.md").write_text(ROOT_INDEX)
+    _write_compile_commands(src, ["geo.hpp"])
 
     warnings = tmp_path / "warnings.txt"
     app = Sphinx(
@@ -284,6 +319,62 @@ def test_directory_only_input_entries_still_warn(tmp_path: Path) -> None:
     assert (src / "api" / "geo.md").is_file()
 
 
+def test_missing_compile_commands_raises_a_clean_extension_error(tmp_path: Path) -> None:
+    """The extension refuses to guess compile flags: no database is a build error."""
+    pytest.importorskip("sphinx")
+    pytest.importorskip("myst_parser")
+    from sphinx.application import Sphinx  # noqa: PLC0415
+    from sphinx.errors import ExtensionError  # noqa: PLC0415
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "geo.hpp").write_text(HEADER)
+    (src / "conf.py").write_text(CONF_WITHOUT_COMPILE_COMMANDS)
+    (src / "index.md").write_text(ROOT_INDEX)
+
+    with pytest.raises(ExtensionError, match="clangquill_compile_commands is not configured"):
+        Sphinx(
+            str(src),
+            str(src),
+            str(tmp_path / "out"),
+            str(tmp_path / "doctree"),
+            "html",
+            status=None,
+            warning=(tmp_path / "warnings.txt").open("w", encoding="utf-8"),
+        )
+
+
+def test_unloadable_compile_commands_reports_where_it_looked(tmp_path: Path) -> None:
+    """A database that isn't there names every path that was searched."""
+    pytest.importorskip("sphinx")
+    pytest.importorskip("myst_parser")
+    from sphinx.application import Sphinx  # noqa: PLC0415
+    from sphinx.errors import ExtensionError  # noqa: PLC0415
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "geo.hpp").write_text(HEADER)
+    (src / "conf.py").write_text(
+        CONF_WITHOUT_COMPILE_COMMANDS + 'clangquill_compile_commands = "build"\n',
+    )
+    (src / "index.md").write_text(ROOT_INDEX)
+
+    with pytest.raises(ExtensionError) as excinfo:
+        Sphinx(
+            str(src),
+            str(src),
+            str(tmp_path / "out"),
+            str(tmp_path / "doctree"),
+            "html",
+            status=None,
+            warning=(tmp_path / "warnings.txt").open("w", encoding="utf-8"),
+        )
+    message = str(excinfo.value)
+    assert "looked for:" in message
+    # The searched path is spelled out in full, resolved against the srcdir.
+    assert str(src / "build" / "compile_commands.json") in message
+
+
 def test_coexists_with_a_preconfigured_myst_parser(tmp_path: Path) -> None:
     """A pre-configured MyST parser must not be double-registered.
 
@@ -300,9 +391,11 @@ def test_coexists_with_a_preconfigured_myst_parser(tmp_path: Path) -> None:
     # myst_parser listed explicitly, before the clangquill extension.
     (src / "conf.py").write_text(
         'extensions = ["myst_parser", "clangquill.sphinx_ext"]\n'
-        'master_doc = "index"\nclangquill_input = ["geo.hpp"]\nclangquill_output_dir = "api"\n',
+        'master_doc = "index"\nclangquill_input = ["geo.hpp"]\nclangquill_output_dir = "api"\n'
+        'clangquill_compile_commands = "."\n',
     )
     (src / "index.md").write_text(ROOT_INDEX)
+    _write_compile_commands(src, ["geo.hpp"])
 
     app = Sphinx(
         str(src),

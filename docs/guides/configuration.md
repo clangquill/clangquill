@@ -16,7 +16,7 @@ The field-name-to-front-end mapping is mechanical:
 | Field | Sphinx value | Default | Description |
 |-------|--------------|---------|-------------|
 | `input` | `clangquill_input` | `[]` | Header/source paths (or globs) to parse, relative to the base directory (the Sphinx srcdir or CWD). |
-| `compile_commands` | `clangquill_compile_commands` | `None` | Directory holding a `compile_commands.json`. When set it supplies the compiler flags and **overrides** `std`/`include_dirs`/`defines`. Headers usually have no entry of their own; if `foo.hpp` isn't listed, clangquill falls back to the same-directory `foo.cpp`'s entry before giving up and using `std`/`include_dirs`/`defines`. |
+| `compile_commands` | `clangquill_compile_commands` | `None` | Directory holding a `compile_commands.json` (the file itself is accepted too). **Required by the Sphinx extension**; optional for the CLI and the Python API. When set it supplies the compiler flags and **overrides** `std`/`include_dirs`/`defines`. Headers usually have no entry of their own; if `foo.hpp` isn't listed, clangquill falls back to the same-directory `foo.cpp`'s entry before giving up and using `std`/`include_dirs`/`defines`. See [compile databases](#compile-databases). |
 | `compile_args` | `clangquill_compile_args` | `[]` | Extra compiler arguments appended verbatim when no compile database is used. |
 | `include_dirs` | `clangquill_include_dirs` | `[]` | `-I` include directories. |
 | `std` | `clangquill_std` | `"c++20"` | C++ standard, passed verbatim as `-std=<std>` (see note). |
@@ -37,6 +37,77 @@ The field-name-to-front-end mapping is mechanical:
 | `comment_parser` | `clangquill_comment_parser` | `None` | Comment-parser override: a registered name or a dotted import path. See the [comment-parser guide](comment-parsers.md). |
 | `group_by` | `clangquill_group_by` | `"symbol"` | How to partition output pages: `"symbol"` (one page per top-level symbol), `"file"` (one page per parsed source file), `"class"` (one page per documented class/namespace — descends through namespaces so a single huge namespace becomes one page per member class, keeping Sphinx's C++ domain resolver fast and giving each class its own URL), or `"namespace"` (a browsable index → namespace → per-symbol hierarchy). For namespace-rooted libraries — everything under one root namespace — prefer `"namespace"` or `"class"`: with `"symbol"`, the single root collapses the entire subtree onto one page, which renders slowest, serialises Sphinx's read phase (one giant document cannot be parsed in parallel), and is re-rendered on every symbol change. Splitting it into balanced pages parallelises the Sphinx build and keeps incremental rebuilds proportional to the edit. |
 | `path_base` | `clangquill_path_base` | `None` | Directory (resolved against the srcdir / CWD) that the file paths in generated "File" headings are shown relative to. `None` keeps the absolute paths libclang reports, which leak the build-machine layout; set e.g. the project root for stable, reproducible headings. Files outside the base keep their absolute path. |
+
+## Compile databases
+
+A `compile_commands.json` records the exact command line the build system uses
+for each translation unit. Handing clangquill that file — rather than a
+hand-maintained `std`/`include_dirs`/`defines` triple — is what makes the parse
+see the same code the compiler sees.
+
+**The Sphinx extension requires it.** A `conf.py` with `clangquill_input` set but
+no `clangquill_compile_commands` fails the build:
+
+```text
+Extension error:
+clangquill: clangquill_compile_commands is not configured — the Sphinx extension
+requires a compilation database. Set it to the directory holding your
+compile_commands.json (e.g. a CMake build tree configured with
+-DCMAKE_EXPORT_COMPILE_COMMANDS=ON), or drop clangquill_input to disable
+generation.
+```
+
+Guessed flags do not fail loudly: they parse *something*, just not the same
+thing the compiler sees, and the difference surfaces as missing or subtly wrong
+API pages. The CLI and the Python API still accept the manual flags, which is
+useful for previewing a project that has no database yet.
+
+Most build systems can emit one:
+
+```bash
+cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON   # CMake
+meson setup build                                        # Meson writes one by default
+bear -- make                                             # anything else, via Bear
+```
+
+Then point at the directory that holds it (pointing at the JSON file itself
+works too):
+
+```python
+# conf.py
+clangquill_compile_commands = "../build"
+```
+
+Relative values resolve against the Sphinx srcdir (the CWD for the CLI).
+
+### When the database cannot be loaded
+
+libclang reports a database it cannot open exactly like it reports "no entry for
+this file" — by handing back no flags — which would silently degrade into the
+`std`/`include_dirs`/`defines` fallback. clangquill checks the database itself
+instead, and a missing, unreadable, malformed or empty one is an error naming
+every path that was searched:
+
+```text
+clangquill: clangquill_compile_commands='build' does not point at a
+compile_commands.json (relative paths resolve against /home/me/project/docs);
+looked for:
+  /home/me/project/docs/build/compile_commands.json
+```
+
+If libclang still rejects a database that passed those checks, the parse
+carries on with the fallback flags and reports a diagnostic naming the same
+path, so the degraded run is visible rather than silent.
+
+### Headers with no entry of their own
+
+A compile database lists translation units (`.cpp`), never the headers they
+include, so most documented headers have no entry. clangquill tries the
+same-directory `.cpp` of the same name (`foo.hpp` → `foo.cpp`), which usually
+shares the header's include dirs and defines, before falling back to
+`std`/`include_dirs`/`defines`. Header-only libraries, where that sibling does
+not exist either, are the case for generating a database that lists the headers
+themselves — `docs/conf.py` in this repository does exactly that.
 
 ## Toctree / root
 
