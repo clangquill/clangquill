@@ -235,7 +235,7 @@ std::vector<std::string> Parser::build_args(const std::string& path) const {
     // mid-run and reloading it for every translation unit is pure overhead.
     if (compile_db_ == nullptr) {
       compile_db_ = std::make_unique<CompileDb>();
-      compile_db_->load(*options_.compile_commands_dir);
+      compile_db_failed_ = !compile_db_->load(*options_.compile_commands_dir);
     }
     if (compile_db_->loaded()) {
       auto from_db = compile_db_->args_for(path);
@@ -263,6 +263,21 @@ std::vector<std::string> Parser::build_args(const std::string& path) const {
   return args;
 }
 
+void Parser::report_compile_db_failure(model::ParsedModule& out) const {
+  if (!compile_db_failed_ || compile_db_reported_) return;
+  compile_db_reported_ = true;
+  // libclang reports an unloadable database the same way it reports "no entry
+  // for this file" — by handing back no flags — so without this the run would
+  // quietly fall back to the -std/-I/-D defaults and produce plausible but
+  // wrong output. Name the directory that was searched so the misconfiguration
+  // is obvious.
+  const std::filesystem::path dir(*options_.compile_commands_dir);
+  out.diagnostics.push_back(
+      "could not load a compilation database from '" + dir.string() +
+      "'; looked for '" + (dir / "compile_commands.json").string() +
+      "'. Falling back to -std/-I/-D flags.");
+}
+
 namespace {
 
 // Collects libclang error diagnostics from `tu` into `out.diagnostics`.
@@ -283,6 +298,7 @@ void collect_diagnostics(CXTranslationUnit tu, model::ParsedModule& out) {
 bool Parser::parse_file(const std::string& path, model::ParsedModule& out,
                         std::vector<std::string>* tu_files) {
   std::vector<std::string> args = build_args(path);
+  report_compile_db_failure(out);
   std::vector<const char*> argv;
   argv.reserve(args.size());
   for (const auto& a : args) argv.push_back(a.c_str());
@@ -342,6 +358,7 @@ bool Parser::parse_batch(const std::vector<std::string>& paths,
   for (const auto& p : abs) contents += "#include \"" + p + "\"\n";
 
   std::vector<std::string> args = build_args(abs.front());
+  report_compile_db_failure(out);
   std::vector<const char*> argv;
   argv.reserve(args.size());
   for (const auto& a : args) argv.push_back(a.c_str());

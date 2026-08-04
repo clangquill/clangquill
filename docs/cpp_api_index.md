@@ -6,7 +6,11 @@ clangquill Sphinx extension over the project's public IR data-model headers
 tool producing C++-domain API docs for a real codebase.
 
 The configuration that drives this lives in `docs/conf.py` (`clangquill_input`,
-`clangquill_include_dirs`, `clangquill_output_dir`, `clangquill_std`).
+`clangquill_compile_commands`, `clangquill_include_dirs`,
+`clangquill_output_dir`, `clangquill_std`). The extension requires a
+`compile_commands.json`, and these headers have no translation unit of their
+own, so `conf.py` generates a small database listing them — see the
+[compile-database guide](guides/configuration.md#compile-databases).
 
 ```{toctree}
 :maxdepth: 2

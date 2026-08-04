@@ -9,6 +9,7 @@ xrefs, and that a cached re-run reuses the IR instead of re-parsing.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ master_doc = "index"
 clangquill_input = ["m7.hpp"]
 clangquill_output_dir = "api"
 clangquill_cache_dir = {cache!r}
+clangquill_compile_commands = "."
 """
 
 ROOT_INDEX = """
@@ -44,6 +46,14 @@ def _make_project(tmp_path: Path, cache: Path) -> Path:
     (src / "m7.hpp").write_text(FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
     (src / "conf.py").write_text(CONF.format(cache=str(cache)), encoding="utf-8")
     (src / "index.md").write_text(ROOT_INDEX, encoding="utf-8")
+    # The Sphinx extension requires a compilation database; the fixture needs no
+    # flags beyond the standard, so a one-entry database is enough.
+    entry = {
+        "directory": str(src),
+        "file": str(src / "m7.hpp"),
+        "arguments": ["c++", "-std=c++20", "-xc++", "-c", str(src / "m7.hpp")],
+    }
+    (src / "compile_commands.json").write_text(json.dumps([entry]), encoding="utf-8")
     return src
 
 

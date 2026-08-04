@@ -344,6 +344,88 @@ TEST_CASE("compile_commands_dir falls back to the sibling .cpp for a header",
   fs::remove_all(dir);
 }
 
+TEST_CASE("a differently spelled source path is still dropped from the args",
+          "[parser]") {
+  // A generated compile_commands.json may spell its file relative to the
+  // entry's `directory`, or with unresolved `..` segments, while we look the
+  // entry up by resolved path. Leaving that token in the argument list hands
+  // libclang two input files and the translation unit fails outright.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-spelling-test";
+  fs::remove_all(dir);
+  fs::create_directories(dir / "sub");
+  std::ofstream(dir / "sub" / "widget.hpp")
+      << "inline int widget_value() { return 3; }\n";
+
+  {
+    // "file" is relative to "directory"; the argument list spells the same file
+    // a third way, with a `..` hop through the parent.
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"sub/widget.hpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-xc++\", \"-c\", \""
+       << (dir / "sub" / ".." / "sub" / "widget.hpp").string() << "\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file((dir / "sub" / "widget.hpp").string(),
+                                          mod));
+  CHECK(mod.diagnostics.empty());
+  CHECK(find(mod, "widget_value") != nullptr);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("an unloadable compile database is reported with the path searched",
+          "[parser]") {
+  // libclang reports a database it cannot open exactly like "no entry for this
+  // file" -- by returning no flags -- so the fallback to -std/-I/-D would
+  // otherwise kick in silently and yield plausible but wrong output.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-missing-cc-test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.hpp") << "inline int widget_value() { return 1; }\n";
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();  // holds no compile_commands.json
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+
+  REQUIRE(mod.diagnostics.size() == 1);
+  CHECK(mod.diagnostics[0].find("could not load a compilation database") !=
+        std::string::npos);
+  CHECK(mod.diagnostics[0].find((dir / "compile_commands.json").string()) !=
+        std::string::npos);
+  // The parse still succeeds on the fallback flags.
+  CHECK(find(mod, "widget_value") != nullptr);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("the compile-database failure is reported once per parser",
+          "[parser]") {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-missing-cc-once";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "a.hpp") << "inline int a_value() { return 1; }\n";
+  std::ofstream(dir / "b.hpp") << "inline int b_value() { return 2; }\n";
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  parser::Parser parser(opts);
+  model::ParsedModule mod;
+  REQUIRE(parser.parse_file((dir / "a.hpp").string(), mod));
+  REQUIRE(parser.parse_file((dir / "b.hpp").string(), mod));
+
+  CHECK(mod.diagnostics.size() == 1);
+
+  fs::remove_all(dir);
+}
+
 #else  // !CLANGQUILL_HAVE_LIBCLANG
 
 TEST_CASE("parser tests skipped without libclang", "[parser][!mayfail]") {

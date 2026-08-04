@@ -553,13 +553,65 @@ def test_parse_fingerprint_tracks_compile_commands_file(tmp_path: Path) -> None:
     cc_dir = tmp_path / "build"
     cc_dir.mkdir()
     db = cc_dir / "compile_commands.json"
-    db.write_text("[]", encoding="utf-8")
+    db.write_text('[{"directory": ".", "command": "c++ a.cpp", "file": "a.cpp"}]', encoding="utf-8")
     config = Config(input=["a.hpp"], compile_commands="build")
 
     before = pipeline._parse_fingerprint(config, tmp_path, ["a.hpp"])  # noqa: SLF001
-    db.write_text('[{"directory": ".", "command": "c++ a.cpp", "file": "a.cpp"}]', encoding="utf-8")
+    db.write_text('[{"directory": ".", "command": "c++ -DX a.cpp", "file": "a.cpp"}]', encoding="utf-8")
     after = pipeline._parse_fingerprint(config, tmp_path, ["a.hpp"])  # noqa: SLF001
     assert before != after
+
+
+def test_missing_compile_commands_names_every_path_searched(tmp_path: Path) -> None:
+    """A database that isn't on disk fails with the full path that was searched."""
+    (tmp_path / "a.hpp").write_text(FIXTURE, encoding="utf-8")
+    config = Config(input=["a.hpp"], compile_commands="build")
+
+    with pytest.raises(pipeline.CompileCommandsError) as excinfo:
+        build(config, base_dir=tmp_path)
+
+    message = str(excinfo.value)
+    assert "looked for:" in message
+    assert str(tmp_path / "build" / "compile_commands.json") in message
+    # Relative values are ambiguous without the base they resolve against.
+    assert str(tmp_path) in message
+
+
+def test_compile_commands_may_name_the_json_file_itself(tmp_path: Path) -> None:
+    """Pointing at the file rather than its directory is accepted, not an error."""
+    cc_dir = tmp_path / "build"
+    cc_dir.mkdir()
+    db = cc_dir / "compile_commands.json"
+    db.write_text('[{"directory": ".", "command": "c++ a.cpp", "file": "a.cpp"}]', encoding="utf-8")
+    config = Config(input=["a.hpp"], compile_commands="build/compile_commands.json")
+
+    assert pipeline.resolve_compile_commands(config.compile_commands, tmp_path) == db
+    # libclang is handed the containing directory either way.
+    assert pipeline._parse_options(config, tmp_path).compile_commands_dir == str(cc_dir)  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected"),
+    [
+        ("not json at all", "is not valid JSON"),
+        ('{"file": "a.cpp"}', "must hold a JSON array"),
+        ("[]", "is empty"),
+    ],
+)
+def test_unloadable_compile_commands_is_an_error(tmp_path: Path, contents: str, expected: str) -> None:
+    """Libclang degrades silently on a bad database; the pipeline must not."""
+    cc_dir = tmp_path / "build"
+    cc_dir.mkdir()
+    db = cc_dir / "compile_commands.json"
+    db.write_text(contents, encoding="utf-8")
+    config = Config(input=["a.hpp"], compile_commands="build")
+
+    with pytest.raises(pipeline.CompileCommandsError) as excinfo:
+        build(config, base_dir=tmp_path)
+
+    message = str(excinfo.value)
+    assert expected in message
+    assert str(db) in message
 
 
 @requires_libclang

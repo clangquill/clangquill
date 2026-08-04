@@ -1,7 +1,9 @@
 """Sphinx extension that runs the clangquill pipeline at build time.
 
-Enable it with ``extensions = ["clangquill.sphinx_ext"]`` and point
-``clangquill_input`` at your headers. On ``builder-inited`` the extension
+Enable it with ``extensions = ["clangquill.sphinx_ext"]``, point
+``clangquill_input`` at your headers and ``clangquill_compile_commands`` at the
+directory holding your ``compile_commands.json`` — the extension refuses to
+guess compile flags, so that database is required. On ``builder-inited`` the extension
 parses the C++, renders MyST pages into ``clangquill_output_dir`` (under the
 Sphinx srcdir), and writes a toctree index — so the generated ``cpp:`` domain
 objects participate in cross-references and ``objects.inv`` like any other
@@ -22,7 +24,7 @@ from sphinx.util import logging
 
 from clangquill import __version__, _core
 from clangquill.config import CONFIG_FIELDS, CONFIG_PREFIX, Config, ConfigError
-from clangquill.pipeline import build
+from clangquill.pipeline import COMPILE_COMMANDS_NAME, build
 
 if TYPE_CHECKING:
     from sphinx.application import Sphinx
@@ -97,6 +99,20 @@ def _run(app: Sphinx) -> None:
     if not config.input:
         logger.info("clangquill: no clangquill_input configured; skipping generation")
         return
+    if not config.compile_commands:
+        # Guessing the flags from clangquill_std/include_dirs/defines parses
+        # something, but rarely the same thing the compiler sees, and the
+        # difference shows up as missing or wrong API pages rather than as an
+        # error. A Sphinx build therefore requires the real flags. The CLI still
+        # accepts the manual flags, for previewing a project that has no
+        # database yet.
+        msg = (
+            f"clangquill: {CONFIG_PREFIX}compile_commands is not configured — the Sphinx extension "
+            f"requires a compilation database. Set it to the directory holding your "
+            f"{COMPILE_COMMANDS_NAME} (e.g. a CMake build tree configured with "
+            f"-DCMAKE_EXPORT_COMPILE_COMMANDS=ON), or drop {CONFIG_PREFIX}input to disable generation."
+        )
+        raise ExtensionError(msg)
     if not _core.have_libclang():
         # Degrade gracefully where the core was built without libclang (e.g. a
         # docs environment lacking the dev headers) rather than failing the
