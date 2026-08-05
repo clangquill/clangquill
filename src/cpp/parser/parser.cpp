@@ -272,22 +272,70 @@ void Parser::report_compile_db_failure(model::ParsedModule& out) const {
   // wrong output. Name the directory that was searched so the misconfiguration
   // is obvious.
   const std::filesystem::path dir(*options_.compile_commands_dir);
-  out.diagnostics.push_back(
-      "could not load a compilation database from '" + dir.string() +
-      "'; looked for '" + (dir / "compile_commands.json").string() +
-      "'. Falling back to -std/-I/-D flags.");
+  out.diagnostics.push_back(model::Diagnostic{
+      .text = "could not load a compilation database from '" + dir.string() +
+              "'; looked for '" + (dir / "compile_commands.json").string() +
+              "'. Falling back to -std/-I/-D flags."});
 }
 
 namespace {
 
-// Collects libclang error diagnostics from `tu` into `out.diagnostics`.
-void collect_diagnostics(CXTranslationUnit tu, model::ParsedModule& out) {
+// Deepest note chain followed; libclang nests at most a couple of levels, so
+// this only guards against a pathological (or malicious) diagnostic tree.
+constexpr int kMaxDiagnosticDepth = 8;
+
+// Appends `d` to `out.diagnostics` at nesting level `depth`, then recurses
+// into its attached `note:` diagnostics.
+void collect_one(CXDiagnostic d, int depth, model::ParsedModule& out) {
+  model::Diagnostic record;
+  record.severity = static_cast<int>(clang_getDiagnosticSeverity(d));
+  record.depth = depth;
+  // The default display options already include file:line:col, the severity
+  // word and CXDiagnostic_DisplayOption (the `[-Wunused-variable]` suffix), so
+  // the formatted text stands on its own in a log.
+  record.text = to_string(
+      clang_formatDiagnostic(d, clang_defaultDiagnosticDisplayOptions()));
+
+  // Presumed rather than spelling location, so a `#line` directive maps the
+  // diagnostic back to the file the author would recognise.
+  CXString filename{};
+  unsigned line = 0;
+  unsigned column = 0;
+  clang_getPresumedLocation(clang_getDiagnosticLocation(d), &filename, &line,
+                            &column);
+  record.file = to_string(filename);
+  record.line = static_cast<int>(line);
+  record.column = static_cast<int>(column);
+  out.diagnostics.push_back(std::move(record));
+
+  if (depth >= kMaxDiagnosticDepth) return;
+  // The child set is owned by `d` — it must NOT be disposed, only the
+  // individual diagnostics taken out of it.
+  CXDiagnosticSet children = clang_getChildDiagnostics(d);
+  unsigned n = clang_getNumDiagnosticsInSet(children);
+  for (unsigned i = 0; i < n; ++i) {
+    CXDiagnostic child = clang_getDiagnosticInSet(children, i);
+    collect_one(child, depth + 1, out);
+    clang_disposeDiagnostic(child);
+  }
+}
+
+// Collects `tu`'s diagnostics into `out.diagnostics`: errors only, or every
+// severity plus each diagnostic's attached notes when `all` is set.
+void collect_diagnostics(CXTranslationUnit tu, model::ParsedModule& out,
+                         bool all) {
   unsigned n = clang_getNumDiagnostics(tu);
   for (unsigned i = 0; i < n; ++i) {
     CXDiagnostic d = clang_getDiagnostic(tu, i);
-    if (clang_getDiagnosticSeverity(d) >= CXDiagnostic_Error) {
-      out.diagnostics.push_back(to_string(clang_formatDiagnostic(
-          d, clang_defaultDiagnosticDisplayOptions())));
+    if (all) {
+      collect_one(d, 0, out);
+    } else if (clang_getDiagnosticSeverity(d) >= CXDiagnostic_Error) {
+      // Deliberately flat: without `all`, notes are dropped and only the
+      // top-level message is kept, exactly as before this option existed.
+      out.diagnostics.push_back(model::Diagnostic{
+          .severity = static_cast<int>(clang_getDiagnosticSeverity(d)),
+          .text = to_string(clang_formatDiagnostic(
+              d, clang_defaultDiagnosticDisplayOptions()))});
     }
     clang_disposeDiagnostic(d);
   }
@@ -312,13 +360,14 @@ bool Parser::parse_file(const std::string& path, model::ParsedModule& out,
       as_index(index_), path.c_str(), argv.data(),
       static_cast<int>(argv.size()), nullptr, 0, flags, &tu);
   if (rc != CXError_Success || tu == nullptr) {
-    out.diagnostics.push_back("failed to parse: " + path);
+    out.diagnostics.push_back(
+        model::Diagnostic{.text = "failed to parse: " + path});
     if (tu) clang_disposeTranslationUnit(tu);
     return false;
   }
   TuGuard guard{tu};
 
-  collect_diagnostics(tu, out);
+  collect_diagnostics(tu, out, options_.capture_all_diagnostics);
 
   std::unordered_set<std::string> seen = seen_from(out);
   record_file(path, out, seen);
@@ -388,7 +437,7 @@ bool Parser::parse_batch(const std::vector<std::string>& paths,
   }
   TuGuard guard{tu};
 
-  collect_diagnostics(tu, out);
+  collect_diagnostics(tu, out, options_.capture_all_diagnostics);
 
   // Record every file the batch pulled in, minus the synthetic umbrella.
   std::unordered_set<std::string> seen = seen_from(out);
@@ -433,13 +482,60 @@ void append(std::vector<T>& dst, std::vector<T>& src) {
              std::make_move_iterator(src.end()));
 }
 
+// Merges `part`'s diagnostics into `out`, skipping any whose top-level message
+// was already merged from an earlier batch.
+//
+// Every batch re-parses the shared `#include` closure, so one bad header is
+// reported once per batch that reaches it — noise that grows with the input
+// count. The formatted text already embeds `file:line:col`, so equal
+// (severity, text) means genuinely the same diagnostic.
+//
+// Notes travel with their parent: a group is taken or skipped whole, because
+// dropping a duplicated parent while keeping its `note:` children would leave
+// them orphaned.
+//
+// The key covers the parent only, deliberately. libclang prepends an
+// "in file included from <includer>:<line>:" note to a diagnostic raised inside
+// an `#include`d file, and that note names the *including* translation unit —
+// so the same bad header reached from two batches produces groups whose note
+// chains differ by construction. Keying on the whole chain would therefore
+// never collapse anything, which is the one case dedup exists for. The include
+// stack says how the parse got there, not what is wrong; keeping the first
+// group's copy of it is the intended trade.
+//
+// One accepted collision: the synthetic umbrella main file is named
+// `.clangquill-umbrella.cpp` in the same directory for every batch rooted
+// there, so two genuinely distinct diagnostics reported *at the umbrella
+// itself* with identical text and line would merge into one. Only `#include`
+// resolution failures are attributed to the umbrella, so that is a fair trade
+// for dropping the per-batch repetition.
+void merge_diagnostics(model::ParsedModule& out, model::ParsedModule& part,
+                       std::unordered_set<std::string>& seen) {
+  for (std::size_t i = 0; i < part.diagnostics.size();) {
+    std::size_t end = i + 1;
+    while (end < part.diagnostics.size() && part.diagnostics[end].depth > 0) {
+      ++end;
+    }
+    const auto& parent = part.diagnostics[i];
+    if (seen.insert(std::to_string(parent.severity) + '\0' + parent.text)
+            .second) {
+      for (std::size_t j = i; j < end; ++j) {
+        out.diagnostics.push_back(std::move(part.diagnostics[j]));
+      }
+    }
+    i = end;
+  }
+}
+
 // Merges `part` into `out` in place, deduplicating source files by path
-// (`files.path` is UNIQUE in the schema). All other rows are concatenated:
-// each translation unit only emits symbols/references physically located in its
-// own member files, so distinct batches never collide, and symbol-keyed tables
-// use INSERT OR REPLACE on write to absorb any genuine cross-file duplicates.
+// (`files.path` is UNIQUE in the schema) and diagnostics by message. All other
+// rows are concatenated: each translation unit only emits symbols/references
+// physically located in its own member files, so distinct batches never
+// collide, and symbol-keyed tables use INSERT OR REPLACE on write to absorb any
+// genuine cross-file duplicates.
 void merge_into(model::ParsedModule& out, model::ParsedModule& part,
-                std::unordered_set<std::string>& seen_files) {
+                std::unordered_set<std::string>& seen_files,
+                std::unordered_set<std::string>& seen_diagnostics) {
   for (auto& f : part.files) {
     if (seen_files.insert(f.path).second) out.files.push_back(std::move(f));
   }
@@ -452,7 +548,7 @@ void merge_into(model::ParsedModule& out, model::ParsedModule& part,
   append(out.comment_fields, part.comment_fields);
   append(out.groups, part.groups);
   append(out.group_members, part.group_members);
-  append(out.diagnostics, part.diagnostics);
+  merge_diagnostics(out, part, seen_diagnostics);
 }
 
 }  // namespace
@@ -524,12 +620,13 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
         parts[b] = std::move(part);
       } catch (const std::exception& e) {
         parts[b] = model::ParsedModule{};
-        parts[b].diagnostics.push_back("exception parsing batch of " +
-                                       inputs[begin] + ": " + e.what());
+        parts[b].diagnostics.push_back(model::Diagnostic{
+            .text = "exception parsing batch of " + inputs[begin] + ": " +
+                    e.what()});
       } catch (...) {
         parts[b] = model::ParsedModule{};
-        parts[b].diagnostics.push_back("unknown exception parsing batch of " +
-                                       inputs[begin]);
+        parts[b].diagnostics.push_back(model::Diagnostic{
+            .text = "unknown exception parsing batch of " + inputs[begin]});
       }
     }
   };
@@ -566,7 +663,10 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
 
   model::ParsedModule merged;
   std::unordered_set<std::string> seen_files;
-  for (auto& part : parts) merge_into(merged, part, seen_files);
+  std::unordered_set<std::string> seen_diagnostics;
+  for (auto& part : parts) {
+    merge_into(merged, part, seen_files, seen_diagnostics);
+  }
   return merged;
 }
 

@@ -409,3 +409,83 @@ def test_coexists_with_a_preconfigured_myst_parser(tmp_path: Path) -> None:
     )
     app.build()
     assert (src / "api" / "geo.md").is_file()
+
+
+# A warning clang always emits under the default flags. Unlike an error it must
+# never reach the Sphinx warning stream, so a -W build stays green.
+WARNING_HEADER = '#warning "geo is on its way out"\n' + HEADER
+
+# A redefinition: an error, which *does* still reach the warning stream.
+ERROR_HEADER = HEADER + "\nnamespace geo { struct Circle { int x; }; }\n"
+
+DIAGNOSTICS_LOG_CONF = CONF + 'clangquill_diagnostics_log = "_build/parse.log"\n'
+
+
+def _build_project(tmp_path: Path, header: str, conf: str, *, strict: bool = True) -> tuple[Path, str]:
+    """Build a one-header Sphinx project, returning ``(srcdir, warnings text)``."""
+    pytest.importorskip("sphinx")
+    pytest.importorskip("myst_parser")
+    from sphinx.application import Sphinx  # noqa: PLC0415
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "geo.hpp").write_text(header)
+    (src / "conf.py").write_text(conf)
+    (src / "index.md").write_text(ROOT_INDEX)
+    _write_compile_commands(src, ["geo.hpp"])
+
+    warnings = tmp_path / "warnings.txt"
+    app = Sphinx(
+        str(src),
+        str(src),
+        str(tmp_path / "out"),
+        str(tmp_path / "doctree"),
+        "html",
+        warningiserror=strict,
+        status=None,
+        warning=warnings.open("w", encoding="utf-8"),
+    )
+    app.build()
+    return src, warnings.read_text()
+
+
+def test_diagnostics_log_config_value_is_recognised(tmp_path: Path) -> None:
+    """``clangquill_diagnostics_log`` must not trip our own unknown-config hook.
+
+    The option is a ``Config`` dataclass field, so it lands in ``CONFIG_FIELDS``
+    and ``_warn_unknown_config`` knows about it. Registering it directly with
+    ``app.add_config_value`` instead would have it flagged as a typo.
+    """
+    src, warnings = _build_project(tmp_path, HEADER, DIAGNOSTICS_LOG_CONF)
+
+    assert "unknown config value" not in warnings
+    assert (src / "_build" / "parse.log").is_file()
+
+
+def test_warnings_go_to_the_log_and_never_fail_a_strict_build(tmp_path: Path) -> None:
+    """The end-to-end guarantee: full detail on disk, an unchanged -W build."""
+    src, warnings = _build_project(tmp_path, WARNING_HEADER, DIAGNOSTICS_LOG_CONF)
+
+    # warningiserror=True did not trip: the clang warning never became a Sphinx
+    # warning, so it cannot fail a strict docs build.
+    assert "clangquill" not in warnings
+    assert "geo is on its way out" in (src / "_build" / "parse.log").read_text()
+
+
+def test_errors_still_reach_the_warning_stream(tmp_path: Path) -> None:
+    """Enabling the log must not quietly silence the errors a build reports."""
+    src, warnings = _build_project(tmp_path, ERROR_HEADER, DIAGNOSTICS_LOG_CONF, strict=False)
+
+    assert "redefinition" in warnings
+    # And the log carries the same error plus the note explaining it.
+    log = (src / "_build" / "parse.log").read_text()
+    assert "redefinition" in log
+    assert "previous definition" in log
+
+
+def test_errors_stay_suppressible_with_the_log_enabled(tmp_path: Path) -> None:
+    conf = DIAGNOSTICS_LOG_CONF + 'suppress_warnings = ["clangquill.parse"]\n'
+    src, warnings = _build_project(tmp_path, ERROR_HEADER, conf)
+
+    assert "redefinition" not in warnings
+    assert "redefinition" in (src / "_build" / "parse.log").read_text()

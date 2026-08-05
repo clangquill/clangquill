@@ -395,12 +395,191 @@ TEST_CASE("an unloadable compile database is reported with the path searched",
   REQUIRE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
 
   REQUIRE(mod.diagnostics.size() == 1);
-  CHECK(mod.diagnostics[0].find("could not load a compilation database") !=
+  CHECK(mod.diagnostics[0].severity == model::kSeverityError);
+  CHECK(mod.diagnostics[0].text.find("could not load a compilation database") !=
         std::string::npos);
-  CHECK(mod.diagnostics[0].find((dir / "compile_commands.json").string()) !=
-        std::string::npos);
+  CHECK(mod.diagnostics[0].text.find(
+            (dir / "compile_commands.json").string()) != std::string::npos);
   // The parse still succeeds on the fallback flags.
   CHECK(find(mod, "widget_value") != nullptr);
+
+  fs::remove_all(dir);
+}
+
+namespace {
+
+// Writes `contents` into a fresh scratch directory and returns the file path.
+std::filesystem::path write_scratch(const std::string& dir_name,
+                                    const std::string& file_name,
+                                    const std::string& contents) {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / dir_name;
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  const fs::path file = dir / file_name;
+  std::ofstream(file) << contents;
+  return file;
+}
+
+// A warning clang always emits under the default flags (-W#warnings is on by
+// default, and unlike the unused-* families it does not depend on function
+// bodies, which the parser skips).
+constexpr const char* kWarningSource =
+    "#warning \"widget is on its way out\"\n"
+    "inline int widget_value() { return 2; }\n";
+
+// A redefinition, which libclang reports as an error carrying a
+// "previous definition is here" note.
+constexpr const char* kErrorWithNoteSource =
+    "struct Widget { int a; };\n"
+    "struct Widget { int b; };\n";
+
+int count_severity(const model::ParsedModule& m, int severity) {
+  int n = 0;
+  for (const auto& d : m.diagnostics) {
+    if (d.severity == severity) ++n;
+  }
+  return n;
+}
+
+}  // namespace
+
+TEST_CASE("warnings are dropped unless full capture is requested", "[parser]") {
+  const auto file = write_scratch("clangquill-diag-default", "widget.hpp",
+                                  kWarningSource);
+
+  parser::ParseOptions opts;  // capture_all_diagnostics defaults to false
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file(file.string(), mod));
+
+  // Nothing below error severity survives, so the console stream stays quiet.
+  for (const auto& d : mod.diagnostics) {
+    CHECK(d.severity >= model::kSeverityError);
+  }
+  CHECK(count_severity(mod, model::kSeverityWarning) == 0);
+
+  std::filesystem::remove_all(file.parent_path());
+}
+
+TEST_CASE("capture_all_diagnostics keeps warnings with their location",
+          "[parser]") {
+  const auto file =
+      write_scratch("clangquill-diag-all", "widget.hpp", kWarningSource);
+
+  parser::ParseOptions opts;
+  opts.capture_all_diagnostics = true;
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file(file.string(), mod));
+
+  REQUIRE(count_severity(mod, model::kSeverityWarning) >= 1);
+  const model::Diagnostic* warning = nullptr;
+  for (const auto& d : mod.diagnostics) {
+    if (d.severity == model::kSeverityWarning) {
+      warning = &d;
+      break;
+    }
+  }
+  REQUIRE(warning != nullptr);
+  CHECK(warning->text.find("widget is on its way out") != std::string::npos);
+  CHECK(warning->file == file.string());
+  CHECK(warning->line == 1);
+  CHECK(warning->column > 0);
+  CHECK(warning->depth == 0);
+
+  std::filesystem::remove_all(file.parent_path());
+}
+
+TEST_CASE("attached notes are captured one level below their parent",
+          "[parser]") {
+  const auto file = write_scratch("clangquill-diag-notes", "widget.hpp",
+                                  kErrorWithNoteSource);
+
+  parser::ParseOptions opts;
+  opts.capture_all_diagnostics = true;
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file(file.string(), mod));
+
+  // The redefinition error, immediately followed by its "previous definition
+  // is here" note at depth 1 — the explanatory half that plain error-only
+  // capture throws away.
+  std::size_t error_at = mod.diagnostics.size();
+  for (std::size_t i = 0; i < mod.diagnostics.size(); ++i) {
+    if (mod.diagnostics[i].severity >= model::kSeverityError &&
+        mod.diagnostics[i].depth == 0) {
+      error_at = i;
+      break;
+    }
+  }
+  REQUIRE(error_at + 1 < mod.diagnostics.size());
+  CHECK(mod.diagnostics[error_at].text.find("redefinition") !=
+        std::string::npos);
+  CHECK(mod.diagnostics[error_at + 1].depth == 1);
+  CHECK(mod.diagnostics[error_at + 1].severity == model::kSeverityNote);
+  CHECK(mod.diagnostics[error_at + 1].text.find("previous definition") !=
+        std::string::npos);
+
+  std::filesystem::remove_all(file.parent_path());
+}
+
+TEST_CASE("notes are dropped when full capture is off", "[parser]") {
+  const auto file = write_scratch("clangquill-diag-nonotes", "widget.hpp",
+                                  kErrorWithNoteSource);
+
+  parser::ParseOptions opts;
+  model::ParsedModule mod;
+  parser::Parser(opts).parse_file(file.string(), mod);
+
+  REQUIRE_FALSE(mod.diagnostics.empty());
+  for (const auto& d : mod.diagnostics) {
+    CHECK(d.depth == 0);
+    CHECK(d.severity >= model::kSeverityError);
+  }
+
+  std::filesystem::remove_all(file.parent_path());
+}
+
+TEST_CASE("a diagnostic shared by several batches is merged once", "[parser]") {
+  // Two inputs in separate umbrella batches both pull in the same bad header.
+  // Without dedup its error — and its note — would be reported once per batch.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-diag-dedup";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "shared.hpp") << "#pragma once\n" << kErrorWithNoteSource;
+  std::ofstream(dir / "a.hpp")
+      << "#include \"shared.hpp\"\ninline int a_value() { return 1; }\n";
+  std::ofstream(dir / "b.hpp")
+      << "#include \"shared.hpp\"\ninline int b_value() { return 2; }\n";
+
+  parser::ParseOptions opts;
+  opts.capture_all_diagnostics = true;
+  opts.tu_batch = 1;  // one batch per input, so the header is parsed twice
+  opts.jobs = 1;
+  model::ParsedModule mod = parser::parse_files(
+      {(dir / "a.hpp").string(), (dir / "b.hpp").string()}, opts);
+
+  int redefinitions = 0;
+  int previous_definitions = 0;
+  int include_stacks = 0;
+  for (const auto& d : mod.diagnostics) {
+    if (d.text.find("redefinition") != std::string::npos) ++redefinitions;
+    if (d.text.find("previous definition") != std::string::npos) {
+      ++previous_definitions;
+    }
+    if (d.text.find("in file included from") != std::string::npos) {
+      ++include_stacks;
+    }
+  }
+  CHECK(redefinitions == 1);
+  // The note survived alongside the parent it explains rather than being
+  // orphaned or dropped with the duplicate.
+  CHECK(previous_definitions == 1);
+  // Exactly one include stack survives, from whichever batch got there first.
+  // libclang names the *including* TU in that note, so the two groups differ
+  // by construction — which is why merge_diagnostics keys on the parent alone.
+  // Widening the key to the whole note chain would make this 2 and defeat the
+  // dedup entirely.
+  CHECK(include_stacks == 1);
 
   fs::remove_all(dir);
 }

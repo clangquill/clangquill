@@ -37,7 +37,9 @@ import glob
 import json
 import shutil
 import tempfile
+from collections import Counter
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -72,6 +74,33 @@ IR_NAME = "clangquill.sqlite"
 _INCREMENTAL_TU_BATCH = 8
 
 
+#: Severity levels as libclang reports them (mirrors ``CXDiagnosticSeverity``).
+SEVERITY_NAMES = {0: "ignored", 1: "note", 2: "warning", 3: "error", 4: "fatal"}
+
+
+@dataclass(frozen=True)
+class Diagnostic:
+    """One libclang diagnostic captured during a parse.
+
+    libclang nests explanatory ``note:`` diagnostics under the diagnostic they
+    belong to; they arrive here flattened, each following its parent with a
+    :attr:`depth` one greater.
+    """
+
+    #: One of the :data:`SEVERITY_NAMES` keys.
+    severity: int
+    #: 0 for a top-level diagnostic, ``n`` for a note under the nearest
+    #: preceding record of depth ``n - 1``.
+    depth: int
+    #: Message as libclang formats it, already carrying ``file:line:col``, the
+    #: severity word and any ``[-Wflag]`` suffix.
+    text: str
+    #: Presumed location of the diagnostic; empty/zero when it has none.
+    file: str = ""
+    line: int = 0
+    column: int = 0
+
+
 class CompileCommandsError(FileNotFoundError):
     """Raised when the configured compilation database cannot be used.
 
@@ -99,8 +128,18 @@ class BuildResult:
     reference_count: int = 0
     #: Number of source files parsed.
     file_count: int = 0
-    #: Non-fatal diagnostics emitted by libclang.
+    #: Error-severity diagnostics, without their notes: what the front ends
+    #: print. Unaffected by ``diagnostics_log``, so enabling the log never
+    #: changes what a build reports on the console.
     diagnostics: list[str] = field(default_factory=list)
+    #: Every diagnostic captured this run, in parse order, notes flattened
+    #: behind their parent. Empty unless ``clangquill_diagnostics_log`` asked
+    #: for full capture.
+    diagnostic_records: list[Diagnostic] = field(default_factory=list)
+    #: Path of the diagnostics log this run wrote, or ``None`` — either because
+    #: none was configured, or because a fully cached build deliberately left
+    #: the previous run's log in place.
+    diagnostics_log: Path | None = None
     #: Whether libclang re-parsed this run (``False`` = served from the cache).
     parsed: bool = True
     #: Output filenames actually (re)written this run (incremental builds only
@@ -218,6 +257,10 @@ def _parse_options(config: Config, base_dir: Path) -> _core.ParseOptions:
     opt.extra_args = extra
     opt.jobs = config.jobs
     opt.tu_batch = config.tu_batch
+    # One knob: asking for the log is what asks the core to capture more than
+    # errors. Nothing else consumes the extra records, so capturing them
+    # without a log to write would be pure cost.
+    opt.capture_all_diagnostics = bool(config.diagnostics_log)
     if config.compile_commands:
         # libclang takes the *directory*; the resolver has already proven a
         # loadable compile_commands.json sits inside it.
@@ -252,12 +295,104 @@ def _parse_fingerprint(config: Config, base_dir: Path, inputs: list[str]) -> str
             "defines": list(config.defines),
             "compile_args": list(config.compile_args),
             "tu_batch": config.tu_batch,
+            # The IR is identical either way, but the *diagnostics* are not:
+            # without this, switching the log on for an already-cached project
+            # would give a no-op build and an empty log. The derived boolean,
+            # never the path, so relocating the log costs no re-parse.
+            "capture_all_diagnostics": bool(config.diagnostics_log),
             "clang_resource_dir": config.clang_resource_dir or "",
             "compile_commands": compile_commands_hash,
             "core_version": getattr(_core, "__core_version__", ""),
             "libclang_version": _core.libclang_version(),
         },
     )
+
+
+def _records(result: _core.ParseResult) -> list[Diagnostic]:
+    """Convert the core's diagnostic records into :class:`Diagnostic` values."""
+    return [
+        Diagnostic(
+            severity=record.severity,
+            depth=record.depth,
+            text=record.text,
+            file=record.file,
+            line=record.line,
+            column=record.column,
+        )
+        for record in result.diagnostic_records
+    ]
+
+
+def _diagnostics_log_path(config: Config, base: Path) -> Path | None:
+    """Resolve ``config.diagnostics_log`` against ``base``, or ``None``."""
+    if not config.diagnostics_log:
+        return None
+    return (base / config.diagnostics_log).resolve()
+
+
+def write_diagnostics_log(
+    path: Path,
+    records: list[Diagnostic],
+    *,
+    inputs: int,
+    partial: int | None = None,
+) -> None:
+    """Write ``records`` to ``path`` as plain text, replacing any previous run's.
+
+    The file is a snapshot of one build, not a rolling history: appending would
+    grow without bound across a ``make html`` loop and leave no way to tell
+    which entries are current. The ``generated`` header line is the staleness
+    signal instead.
+
+    ``partial`` is the number of translation units re-parsed on an incremental
+    build (``None`` for a full parse). It goes into the header, because on an
+    incremental build ``records`` covers only those units and a log that did not
+    say so would read as a complete picture of the project.
+    """
+    counts = Counter(record.severity for record in records)
+    totals = ", ".join(
+        f"{counts[severity]} {name}(s)" for severity, name in sorted(SEVERITY_NAMES.items()) if counts[severity]
+    )
+    scope = "full" if partial is None else f"incremental — {partial} of {inputs} translation unit(s) re-parsed"
+    lines = [
+        "# clangquill diagnostics",
+        f"# generated: {datetime.now(tz=UTC).isoformat(timespec='seconds')}",
+        f"# inputs: {inputs} file(s)",
+        f"# parse: {scope}",
+        f"# totals: {totals or 'none'}",
+        "",
+    ]
+    for index, record in enumerate(records):
+        # A note is indented under the diagnostic it explains, and each
+        # top-level group is separated by a blank line. The text is emitted
+        # verbatim — libclang already prefixed it with file:line:col, the
+        # severity word and any [-Wflag], so re-stating those would only
+        # duplicate them. Records stay in parse order, which is deterministic
+        # (batches merge in input order) and meaningful.
+        if record.depth == 0 and index:
+            lines.append("")
+        indent = "  " * record.depth
+        lines.extend(f"{indent}{line}" for line in record.text.splitlines() or [""])
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Staged then renamed, like the IR writes above, so a crashed build never
+    # leaves a half-written log. The staging name is unique per write — not just
+    # per process — so concurrent builds sharing a srcdir race to a whole file
+    # (last one wins) instead of interleaving into one or unlinking each other's
+    # staging file mid-flight.
+    handle = tempfile.NamedTemporaryFile(  # noqa: SIM115
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        delete=False,
+    )
+    handle.close()
+    staged = Path(handle.name)
+    try:
+        staged.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        staged.replace(path)
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def _template_files_hash(template_dirs: list[str]) -> dict[str, str]:
@@ -420,9 +555,17 @@ def _full_build(config: Config, base: Path, inputs: list[str], output_dir: Path)
     """Stateless build: parse into a throwaway IR and rewrite every page."""
     db_path = _new_temp_db()
 
+    log_path = _diagnostics_log_path(config, base)
+    records: list[Diagnostic] = []
     succeeded = False
     try:
         result = _core.parse_to_sqlite(inputs, str(db_path), _parse_options(config, base))
+        records = _records(result)
+        if log_path is not None:
+            # Written before the render, not after: a log of the parse that
+            # preceded a render crash is exactly what you want to read when
+            # working out why the render crashed.
+            write_diagnostics_log(log_path, records, inputs=len(inputs))
         with Store.open(db_path) as store:
             pages = _make_generator(config, base, store).generate(
                 output_dir,
@@ -447,6 +590,8 @@ def _full_build(config: Config, base: Path, inputs: list[str], output_dir: Path)
         reference_count=result.reference_count,
         file_count=result.file_count,
         diagnostics=list(result.diagnostics),
+        diagnostic_records=records,
+        diagnostics_log=log_path,
         parsed=True,
         pages_written=sorted(written),
         pages_deleted=deleted,
@@ -466,10 +611,18 @@ def _incremental_build(
     parse_fp = _parse_fingerprint(config, base, inputs)
     render_fp = _render_fingerprint(config, base)
     options = _parse_options(config, base)
+    log_path = _diagnostics_log_path(config, base)
 
     with BuildCache.open(cache_dir) as cache:
         # No IR on disk yet means a full parse regardless of bookkeeping.
         status = cache.parse_status(parse_fp) if ir_path.is_file() else ParseStatus(current=False)
+        if log_path is not None and not log_path.is_file():
+            # A configured log that is not on disk — relocated to a new path,
+            # deleted, or never written — has to be materialised, and only a
+            # parse produces its contents (diagnostics live in neither the IR
+            # nor the cache). Force one rather than nooping past it and leaving
+            # the configured path empty. Costs one re-parse per relocation.
+            status = ParseStatus(current=False)
         parsed = not status.current
         # Fully unchanged build: the parse came from cache (IR identical) and the
         # render config/templates are unchanged, so the output the last run wrote
@@ -483,16 +636,29 @@ def _incremental_build(
 
         counts: _core.ParseResult | None = None
         diagnostics: list[str] = []
+        records: list[Diagnostic] = []
+        # Translation units actually re-parsed, or None for a full parse. Only
+        # those units' diagnostics exist this run, so the log has to say so.
+        reparsed: int | None = None
         partial_deps: dict[str, list[str]] | None = None
         if not status.current and status.stale_inputs is None:
             # Configuration changed or no per-TU map: rebuild the whole IR.
             counts = _parse_into(inputs, ir_path, options)
             diagnostics = list(counts.diagnostics)
+            records = _records(counts)
         elif not status.current:
             # Only some inputs are stale: re-parse just those translation units
             # into the existing IR, leaving every other TU's rows in place.
             stale = [inp for inp in inputs if inp in status.stale_inputs]
-            partial_deps, diagnostics = _parse_tus_into(stale, ir_path, options)
+            partial_deps, diagnostics, records = _parse_tus_into(stale, ir_path, options)
+            reparsed = len(stale)
+        # Only when libclang actually ran: a render-only rebuild (parse cached,
+        # templates or output changed) has no diagnostics of its own, and
+        # overwriting a good log with an empty one would report silence where
+        # there were problems. Same reasoning as ``_noop_result``.
+        written_log = log_path if parsed and log_path is not None else None
+        if written_log is not None:
+            write_diagnostics_log(written_log, records, inputs=len(inputs), partial=reparsed)
 
         with Store.open(ir_path) as store:
             snapshot = {f.path: (f.sha256, f.size_bytes) for f in store.files()}
@@ -535,6 +701,8 @@ def _incremental_build(
         reference_count=reference_count,
         file_count=file_count,
         diagnostics=diagnostics,
+        diagnostic_records=records,
+        diagnostics_log=written_log,
         parsed=parsed,
         pages_written=written,
         pages_deleted=deleted,
@@ -542,7 +710,14 @@ def _incremental_build(
 
 
 def _noop_result(output_dir: Path, ir_path: Path, summary: dict[str, object] | None) -> BuildResult:
-    """Build the :class:`BuildResult` for a fully cached (unrendered) build."""
+    """Build the :class:`BuildResult` for a fully cached (unrendered) build.
+
+    No diagnostics log is written here — deliberately. Nothing was re-parsed, so
+    truncating an existing log would delete accurate information and replace it
+    with silence. Leaving the previous run's file (with its own ``generated``
+    timestamp) in place and reporting ``diagnostics_log=None`` lets the caller
+    tell "wrote it" from "left the old one alone".
+    """
     summary = summary or {}
 
     def count(key: str) -> int:
@@ -593,7 +768,7 @@ def _parse_tus_into(
     stale: list[str],
     ir_path: Path,
     options: _core.ParseOptions,
-) -> tuple[dict[str, list[str]], list[str]]:
+) -> tuple[dict[str, list[str]], list[str], list[Diagnostic]]:
     """Re-parse the stale inputs, replacing only their rows, atomically.
 
     One batched writer call re-parses every stale translation unit (in parallel,
@@ -602,7 +777,9 @@ def _parse_tus_into(
     against a staged copy of ``ir_path`` that replaces the original only once
     every stale input has succeeded; on any failure the original IR (and the
     cache, which is only updated afterwards) is left untouched, forcing a clean
-    rebuild next run. Returns the fresh dependency map and the diagnostics.
+    rebuild next run. Returns the fresh dependency map, the error-severity
+    diagnostics and the full diagnostic records — the latter two covering the
+    re-parsed units only, since nothing else was parsed.
     """
     if options.tu_batch == 0:
         # Auto batching: stale sets are usually far smaller than a cold build's
@@ -620,7 +797,7 @@ def _parse_tus_into(
         staged.unlink(missing_ok=True)
         raise
     staged.replace(ir_path)
-    return _tu_deps(result), list(result.diagnostics)
+    return _tu_deps(result), list(result.diagnostics), _records(result)
 
 
 def _stat_pair(path: Path) -> tuple[int | None, int | None]:

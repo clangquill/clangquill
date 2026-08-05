@@ -142,6 +142,19 @@ def _run(app: Sphinx) -> None:
         result.symbol_count,
         result.output_dir,
     )
+    if result.diagnostics_log is not None:
+        # info, not warning: a -W build must not fail merely because the log
+        # exists. A fully cached build reports None here and leaves the
+        # previous run's file alone, so there is nothing to point at.
+        logger.info(
+            "clangquill: wrote %d diagnostic(s) to %s",
+            len(result.diagnostic_records),
+            result.diagnostics_log,
+        )
+    # Errors only, and only the top-level message — unchanged by
+    # ``clangquill_diagnostics_log``, which routes the warnings, remarks and
+    # attached ``note:`` chains to that file instead of this stream.
+    # Suppressible via ``suppress_warnings = ["clangquill.parse"]``.
     for diagnostic in result.diagnostics:
         logger.warning("%s", diagnostic, type="clangquill", subtype="parse")
 
