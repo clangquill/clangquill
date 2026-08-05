@@ -6,6 +6,11 @@ on:
     tags: [v*]
   pull_request:
   workflow_dispatch:
+# Cancel a stale PR run when new commits land; let push (main/tags) and
+# manual dispatch runs finish so tagged wheel builds are never cut short.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   build_wheels:
     name: Wheels on linux/${{ matrix.arch }}

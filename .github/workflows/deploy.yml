@@ -9,6 +9,11 @@ name: Upload Python Package
 on:
   release:
     types: [published]
+# Never cancel a PyPI publish in-progress; guards against a duplicate
+# webhook redelivery racing an already-running publish for the same release.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   build_wheels:
     name: Wheels on linux/${{ matrix.arch }}
