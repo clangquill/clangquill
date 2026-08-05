@@ -12,6 +12,7 @@
 #include <stdexcept>
 
 #include "core/version.hpp"
+#include "model/diagnostic.hpp"
 #include "store/schema.hpp"
 
 #if defined(CLANGQUILL_HAVE_LIBCLANG)
@@ -53,6 +54,7 @@ struct PyParseOptions {
   std::vector<std::string> extra_args;
   std::optional<std::string> compile_commands_dir;
   bool keep_going = true;
+  bool capture_all_diagnostics = false;
   int jobs = 0;
   int tu_batch = 0;
 };
@@ -70,7 +72,13 @@ struct ParseResult {
   int symbol_count = 0;
   int reference_count = 0;
   int file_count = 0;
+  // Error-severity messages only, without their attached notes: the console
+  // stream both front ends print. Independent of capture_all_diagnostics, so
+  // enabling full capture never changes what a build prints.
   std::vector<std::string> diagnostics;
+  // Everything that was captured, in parse order, notes flattened behind their
+  // parent via Diagnostic::depth. Errors-only unless the parse asked for more.
+  std::vector<clangquill::model::Diagnostic> diagnostic_records;
   std::vector<TuFiles> translation_units;
 };
 
@@ -83,6 +91,7 @@ clangquill::parser::ParseOptions to_core_options(const PyParseOptions& opt) {
   po.extra_args = opt.extra_args;
   po.compile_commands_dir = opt.compile_commands_dir;
   po.keep_going = opt.keep_going;
+  po.capture_all_diagnostics = opt.capture_all_diagnostics;
   po.jobs = opt.jobs;
   po.tu_batch = opt.tu_batch;
   return po;
@@ -93,7 +102,12 @@ ParseResult result_from_module(const clangquill::model::ParsedModule& mod) {
   res.symbol_count = static_cast<int>(mod.symbols.size());
   res.reference_count = static_cast<int>(mod.references.size());
   res.file_count = static_cast<int>(mod.files.size());
-  res.diagnostics = mod.diagnostics;
+  res.diagnostic_records = mod.diagnostics;
+  for (const auto& d : mod.diagnostics) {
+    if (d.depth == 0 && d.severity >= clangquill::model::kSeverityError) {
+      res.diagnostics.push_back(d.text);
+    }
+  }
   return res;
 }
 #endif
@@ -204,8 +218,18 @@ NB_MODULE(_core, m) {
       .def_rw("extra_args", &PyParseOptions::extra_args)
       .def_rw("compile_commands_dir", &PyParseOptions::compile_commands_dir)
       .def_rw("keep_going", &PyParseOptions::keep_going)
+      .def_rw("capture_all_diagnostics",
+              &PyParseOptions::capture_all_diagnostics)
       .def_rw("jobs", &PyParseOptions::jobs)
       .def_rw("tu_batch", &PyParseOptions::tu_batch);
+
+  nb::class_<clangquill::model::Diagnostic>(m, "Diagnostic")
+      .def_ro("severity", &clangquill::model::Diagnostic::severity)
+      .def_ro("depth", &clangquill::model::Diagnostic::depth)
+      .def_ro("text", &clangquill::model::Diagnostic::text)
+      .def_ro("file", &clangquill::model::Diagnostic::file)
+      .def_ro("line", &clangquill::model::Diagnostic::line)
+      .def_ro("column", &clangquill::model::Diagnostic::column);
 
   nb::class_<TuFiles>(m, "TuFiles")
       .def_ro("input", &TuFiles::input)
@@ -216,6 +240,7 @@ NB_MODULE(_core, m) {
       .def_ro("reference_count", &ParseResult::reference_count)
       .def_ro("file_count", &ParseResult::file_count)
       .def_ro("diagnostics", &ParseResult::diagnostics)
+      .def_ro("diagnostic_records", &ParseResult::diagnostic_records)
       .def_ro("translation_units", &ParseResult::translation_units);
 
   m.def("parse_to_sqlite", &parse_to_sqlite, nb::arg("inputs"),

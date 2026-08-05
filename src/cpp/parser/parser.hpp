@@ -24,6 +24,12 @@ struct ParseOptions {
   std::vector<std::string> extra_args;    ///< Extra compiler arguments appended verbatim.
   std::optional<std::string> compile_commands_dir;  ///< Directory holding a compile_commands.json.
   bool keep_going = true;  ///< Continue past recoverable parse errors.
+  /// Capture every libclang diagnostic — warnings, remarks and each
+  /// diagnostic's attached `note:` chain — instead of errors only. Off by
+  /// default: umbrella batching re-parses the shared `#include` closure once
+  /// per batch, so a warning in a common header is re-reported per batch and
+  /// the extra volume is only worth paying for when someone asked to see it.
+  bool capture_all_diagnostics = false;
   int jobs = 0;  ///< Parse threads; `<= 0` means auto (hardware concurrency).
   /// Inputs grouped into one umbrella translation unit. Grouping amortises the
   /// dominant parse cost — re-lexing the shared `#include` closure — across the

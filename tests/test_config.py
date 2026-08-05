@@ -22,6 +22,7 @@ def test_defaults_match_issue_contract():
     assert cfg.include_undocumented is True
     assert cfg.group_by == "symbol"
     assert cfg.path_base is None
+    assert cfg.diagnostics_log is None
     assert cfg.std == "c++20"
     assert cfg.toctree_maxdepth == 2
     assert cfg.root_document == "index"
@@ -49,6 +50,7 @@ def test_config_fields_cover_every_documented_value():
         "clangquill_comment_parser",
         "clangquill_group_by",
         "clangquill_path_base",
+        "clangquill_diagnostics_log",
         "clangquill_toctree_maxdepth",
         "clangquill_root_document",
     }
@@ -195,3 +197,15 @@ def test_validate_rejects_non_list_input(bad_input: object):
     cfg = Config(input=bad_input)
     with pytest.raises(ConfigError, match="input must be a list of strings"):
         cfg.validate()
+
+
+def test_diagnostics_log_accepts_none_and_a_path():
+    assert Config(input=["a.hpp"], diagnostics_log=None).validate().diagnostics_log is None
+    cfg = Config(input=["a.hpp"], diagnostics_log="_build/parse.log").validate()
+    assert cfg.diagnostics_log == "_build/parse.log"
+
+
+@pytest.mark.parametrize("value", [1, ["parse.log"], ""])
+def test_diagnostics_log_rejects_bad_values(value):
+    with pytest.raises(ConfigError, match="clangquill_diagnostics_log"):
+        Config(input=["a.hpp"], diagnostics_log=value).validate()

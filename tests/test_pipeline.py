@@ -741,3 +741,213 @@ def test_cli_build_missing_input_exits_cleanly(tmp_path: Path, monkeypatch: pyte
     assert result.exit_code == 1
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert "Error:" in result.output
+
+
+# --- diagnostics log --------------------------------------------------------
+
+# A warning clang always emits under the default flags, unlike the unused-*
+# families, which need the function bodies the parser skips.
+WARNING_FIXTURE = '#warning "demo is on its way out"\n' + FIXTURE
+
+# A redefinition: an error carrying a "previous definition is here" note — the
+# explanatory half that error-only capture drops.
+ERROR_FIXTURE = "struct Widget { int a; };\nstruct Widget { int b; };\n"
+
+
+def _log_header(text: str) -> dict[str, str]:
+    """Parse the ``# key: value`` header block at the top of a log."""
+    header = {}
+    for line in text.splitlines():
+        if not line.startswith("#"):
+            break
+        key, _, value = line[1:].partition(":")
+        header[key.strip()] = value.strip()
+    return header
+
+
+@requires_libclang
+def test_no_diagnostics_log_written_by_default(project: Path) -> None:
+    result = build(Config(input=["demo.hpp"], output_dir="api"), base_dir=project)
+
+    assert result.diagnostics_log is None
+    assert result.diagnostic_records == []
+    assert list(project.glob("*.log")) == []
+
+
+@requires_libclang
+def test_diagnostics_log_written_with_header(project: Path) -> None:
+    config = Config(input=["demo.hpp"], output_dir="api", diagnostics_log="parse.log")
+    result = build(config, base_dir=project)
+
+    log = project / "parse.log"
+    assert result.diagnostics_log == log.resolve()
+    header = _log_header(log.read_text())
+    assert header["parse"] == "full"
+    assert header["inputs"] == "1 file(s)"
+    assert "generated" in header
+    assert "totals" in header
+
+
+@requires_libclang
+def test_diagnostics_log_creates_parent_directories(project: Path) -> None:
+    config = Config(input=["demo.hpp"], output_dir="api", diagnostics_log="_build/logs/parse.log")
+    result = build(config, base_dir=project)
+
+    assert (project / "_build" / "logs" / "parse.log").is_file()
+    assert result.diagnostics_log == (project / "_build" / "logs" / "parse.log").resolve()
+
+
+@requires_libclang
+def test_diagnostics_log_absolute_path_used_verbatim(project: Path, tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere" / "parse.log"
+    config = Config(input=["demo.hpp"], output_dir="api", diagnostics_log=str(target))
+    result = build(config, base_dir=project)
+
+    assert result.diagnostics_log == target.resolve()
+    assert target.is_file()
+
+
+@requires_libclang
+def test_warnings_reach_the_log_but_not_the_console_stream(project: Path) -> None:
+    # The whole point of the feature: full detail in the file, an unchanged
+    # (and here, empty) warning stream for the Sphinx build to fail -W on.
+    (project / "demo.hpp").write_text(WARNING_FIXTURE)
+    config = Config(input=["demo.hpp"], output_dir="api", diagnostics_log="parse.log")
+    result = build(config, base_dir=project)
+
+    assert result.diagnostics == []
+    text = (project / "parse.log").read_text()
+    assert "demo is on its way out" in text
+    assert "warning" in _log_header(text)["totals"]
+    assert any(record.severity == 2 for record in result.diagnostic_records)
+
+
+@requires_libclang
+def test_error_notes_are_logged_indented_under_their_parent(project: Path) -> None:
+    (project / "demo.hpp").write_text(ERROR_FIXTURE)
+    config = Config(input=["demo.hpp"], output_dir="api", diagnostics_log="parse.log")
+    build(config, base_dir=project)
+
+    lines = (project / "parse.log").read_text().splitlines()
+    parent = next(i for i, line in enumerate(lines) if "redefinition" in line)
+    note = lines[parent + 1]
+    assert "previous definition" in note
+    assert note.startswith("  ")
+
+
+@requires_libclang
+def test_diagnostics_log_untouched_by_a_noop_build(project: Path) -> None:
+    config = Config(
+        input=["demo.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        diagnostics_log="parse.log",
+    )
+    build(config, base_dir=project)
+    log = project / "parse.log"
+    before = log.read_bytes()
+
+    result = build(config, base_dir=project)
+
+    # Nothing was re-parsed, so the previous log is left alone rather than
+    # truncated to silence.
+    assert result.parsed is False
+    assert result.diagnostics_log is None
+    assert log.read_bytes() == before
+
+
+@requires_libclang
+def test_diagnostics_log_labels_a_partial_reparse(project: Path) -> None:
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    (project / "beta.hpp").write_text("/// beta ns\nnamespace beta { /// g\nint g(); }\n")
+    config = Config(
+        input=["alpha.hpp", "beta.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        diagnostics_log="parse.log",
+    )
+    build(config, base_dir=project)
+
+    (project / "alpha.hpp").write_text("/// alpha ns edited\nnamespace alpha { /// f\nint f(); }\n")
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    header = _log_header((project / "parse.log").read_text())
+    assert header["parse"] == "incremental — 1 of 2 translation unit(s) re-parsed"
+
+
+@requires_libclang
+def test_enabling_the_log_invalidates_a_cached_parse(project: Path) -> None:
+    # Otherwise turning the option on for an already-cached project would noop
+    # straight past the parse and produce nothing to read.
+    off = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    build(off, base_dir=project)
+
+    on = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache", diagnostics_log="parse.log")
+    result = build(on, base_dir=project)
+
+    assert result.parsed
+    assert (project / "parse.log").is_file()
+
+
+@requires_libclang
+def test_diagnostics_log_leaves_no_staging_file(project: Path) -> None:
+    config = Config(input=["demo.hpp"], output_dir="api", diagnostics_log="parse.log")
+    build(config, base_dir=project)
+
+    assert list(project.glob("*.tmp")) == []
+
+
+def test_write_diagnostics_log_orders_and_indents_records(tmp_path: Path) -> None:
+    records = [
+        pipeline.Diagnostic(severity=3, depth=0, text="a.hpp:1:1: error: bad"),
+        pipeline.Diagnostic(severity=1, depth=1, text="b.hpp:2:1: note: because"),
+        pipeline.Diagnostic(severity=2, depth=0, text="c.hpp:3:1: warning: meh"),
+    ]
+    log = tmp_path / "parse.log"
+    pipeline.write_diagnostics_log(log, records, inputs=2, partial=1)
+
+    text = log.read_text()
+    header = _log_header(text)
+    assert header["parse"] == "incremental — 1 of 2 translation unit(s) re-parsed"
+    assert header["totals"] == "1 note(s), 1 warning(s), 1 error(s)"
+    body = text.split("\n\n", 1)[1]
+    assert body == "a.hpp:1:1: error: bad\n  b.hpp:2:1: note: because\n\nc.hpp:3:1: warning: meh\n"
+
+
+def test_write_diagnostics_log_with_no_records(tmp_path: Path) -> None:
+    log = tmp_path / "parse.log"
+    pipeline.write_diagnostics_log(log, [], inputs=3)
+
+    header = _log_header(log.read_text())
+    assert header["totals"] == "none"
+    assert header["parse"] == "full"
+
+
+@requires_libclang
+def test_diagnostics_log_untouched_by_a_render_only_rebuild(project: Path) -> None:
+    # Parse cached, render config changed: libclang never ran, so there are no
+    # diagnostics to report and the previous log must survive intact.
+    config = Config(
+        input=["demo.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        diagnostics_log="parse.log",
+    )
+    build(config, base_dir=project)
+    log = project / "parse.log"
+    before = log.read_bytes()
+
+    deeper = Config(
+        input=["demo.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        diagnostics_log="parse.log",
+        toctree_maxdepth=4,
+    )
+    result = build(deeper, base_dir=project)
+
+    assert result.parsed is False
+    assert result.pages_written  # the render did re-run
+    assert result.diagnostics_log is None
+    assert log.read_bytes() == before

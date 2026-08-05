@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "model/comment.hpp"
+#include "model/diagnostic.hpp"
 #include "model/enumerator.hpp"
 #include "model/file.hpp"
 #include "model/group.hpp"
@@ -33,7 +34,7 @@ struct ParsedModule {
   std::vector<CommentField> comment_fields;       ///< Normalized comment fields.
   std::vector<Group> groups;                      ///< Doxygen group definitions.
   std::vector<GroupMember> group_members;         ///< Symbol-to-group memberships.
-  std::vector<std::string> diagnostics;           ///< Non-fatal parse warnings/errors.
+  std::vector<Diagnostic> diagnostics;            ///< Parse diagnostics, notes flattened behind their parent.
 };
 
 }  // namespace clangquill::model

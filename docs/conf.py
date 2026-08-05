@@ -125,6 +125,10 @@ _llvm_inc = _llvm_includedir()
 clangquill_compile_args = [f"-I{_llvm_inc}"] if _llvm_inc else []
 clangquill_output_dir = "cpp_api"
 clangquill_std = "c++20"
+# Dogfood the full-diagnostics log. The docs build runs with -W and sets no
+# cache_dir, so this exercises the path where a clang warning lands in the file
+# without ever reaching the (fatal) Sphinx warning stream.
+clangquill_diagnostics_log = "_build/clangquill-diagnostics.log"
 
 # Optionally dogfood newer-standard features. The C++23/26 showcase header only
 # parses on a recent libclang, so we gate it on the linked backend's version:

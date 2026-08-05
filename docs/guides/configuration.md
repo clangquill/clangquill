@@ -37,6 +37,74 @@ The field-name-to-front-end mapping is mechanical:
 | `comment_parser` | `clangquill_comment_parser` | `None` | Comment-parser override: a registered name or a dotted import path. See the [comment-parser guide](comment-parsers.md). |
 | `group_by` | `clangquill_group_by` | `"symbol"` | How to partition output pages: `"symbol"` (one page per top-level symbol), `"file"` (one page per parsed source file), `"class"` (one page per documented class/namespace — descends through namespaces so a single huge namespace becomes one page per member class, keeping Sphinx's C++ domain resolver fast and giving each class its own URL), or `"namespace"` (a browsable index → namespace → per-symbol hierarchy). For namespace-rooted libraries — everything under one root namespace — prefer `"namespace"` or `"class"`: with `"symbol"`, the single root collapses the entire subtree onto one page, which renders slowest, serialises Sphinx's read phase (one giant document cannot be parsed in parallel), and is re-rendered on every symbol change. Splitting it into balanced pages parallelises the Sphinx build and keeps incremental rebuilds proportional to the edit. |
 | `path_base` | `clangquill_path_base` | `None` | Directory (resolved against the srcdir / CWD) that the file paths in generated "File" headings are shown relative to. `None` keeps the absolute paths libclang reports, which leak the build-machine layout; set e.g. the project root for stable, reproducible headings. Files outside the base keep their absolute path. |
+| `diagnostics_log` | `clangquill_diagnostics_log` | `None` | Path (resolved against the srcdir / CWD) of a plain-text file receiving **every** libclang diagnostic of the run. `None` disables it. See [the diagnostics log](#the-diagnostics-log). |
+
+## The diagnostics log
+
+By default a build reports only what it must: libclang's **error**-severity
+diagnostics, as Sphinx warnings under the `clangquill.parse` subtype. Warnings,
+remarks, and the `note:` follow-ups attached to an error — usually the half that
+explains it — are dropped before they ever reach Python.
+
+Set `clangquill_diagnostics_log` to get all of it in a file:
+
+```python
+clangquill_diagnostics_log = "_build/clangquill-diagnostics.log"
+```
+
+```text
+# clangquill diagnostics
+# generated: 2026-08-05T09:12:44+00:00
+# inputs: 42 file(s)
+# parse: full
+# totals: 3 note(s), 17 warning(s), 2 error(s)
+
+/src/foo.hpp:12:5: error: unknown type name 'Widget'
+  /src/bar.hpp:3:1: note: 'Widget' declared here
+
+/src/baz.hpp:8:9: warning: unused variable 'n' [-Wunused-variable]
+```
+
+**The console is unaffected.** Errors still go out as `clangquill.parse`
+warnings exactly as before, and are still silenced by
+`suppress_warnings = ["clangquill.parse"]`; everything the log adds goes only to
+the file. A header full of warnings therefore cannot fail a `-W` build just
+because you switched the log on.
+
+Things worth knowing:
+
+- **The file is rewritten each build, not appended to.** It is a snapshot of one
+  run — the `generated` header line is how you tell whether it is current.
+- **Enabling the option forces one full re-parse**, because a cached parse has
+  no diagnostics left to replay. Moving the file to a different path does not.
+- **With `cache_dir` set, an incremental build logs only the translation units
+  it actually re-parsed**, and says so in the header
+  (`parse: incremental — 3 of 42 translation unit(s) re-parsed`). A fully cached
+  build re-parses nothing and leaves the previous log in place rather than
+  truncating it to silence. Leave `cache_dir` unset for a complete log on
+  every build.
+- **The set of warnings depends on `tu_batch` and input order.** Batched inputs
+  share one translation unit, so a header sees the preprocessor state of the
+  files ahead of it in its batch. Errors are stable; warnings can shift between
+  configurations or machines.
+- Put the log outside `output_dir` — `_build/` is a good spot, since it is
+  usually already ignored by version control.
+
+### Suppressing warnings
+
+Every warning the extension emits carries a subtype, so a `-W` build can
+silence one class without silencing the rest:
+
+| `suppress_warnings` entry | Silences |
+|---------------------------|----------|
+| `clangquill.parse` | libclang's error-severity parse diagnostics. |
+| `clangquill.config` | A `clangquill_*` name in `conf.py` matching no option (usually a typo). |
+| `clangquill.paths` | A `clangquill_input` or `clangquill_include_dirs` entry that does not exist on disk. |
+| `clangquill.libclang` | The core was built without libclang, so generation was skipped. |
+
+Suppressing `clangquill.parse` discards those diagnostics entirely — pair it
+with `clangquill_diagnostics_log` to keep the detail on disk while keeping the
+build output clean.
 
 ## Compile databases
 

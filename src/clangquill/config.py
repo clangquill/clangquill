@@ -69,6 +69,7 @@ _TYPE_CHECKS: tuple[tuple[str, Callable[[object], bool], str], ...] = (
     ("cache_dir", _is_optional_str, "a string or None"),
     ("comment_parser", _is_optional_str, "a string or None"),
     ("path_base", _is_optional_str, "a string or None"),
+    ("diagnostics_log", _is_optional_str, "a string or None"),
     ("input", _is_str_list, "a list of strings"),
     ("compile_args", _is_str_list, "a list of strings"),
     ("include_dirs", _is_str_list, "a list of strings"),
@@ -142,6 +143,13 @@ class Config:
     #: project root to render stable, reproducible paths in the generated 'File'
     #: headings. Files outside the base keep their absolute path.
     path_base: str | None = None
+    #: Path of a plain-text file receiving every libclang diagnostic of the run
+    #: — all severities, plus the ``note:`` chain attached to each — resolved
+    #: against the base directory (Sphinx srcdir / CWD). ``None`` disables it.
+    #: Setting it switches the parse to full-diagnostic capture; the console and
+    #: Sphinx warning stream keep showing only errors either way, so this is how
+    #: to see the detail without drowning a build in it.
+    diagnostics_log: str | None = None
 
     # -- toctree / root -------------------------------------------------------
     #: ``:maxdepth:`` of the generated root toctree.
@@ -168,6 +176,9 @@ class Config:
             raise ConfigError(msg)
         if not self.output_dir:
             msg = f"{CONFIG_PREFIX}output_dir must be a non-empty directory name"
+            raise ConfigError(msg)
+        if self.diagnostics_log is not None and not self.diagnostics_log:
+            msg = f"{CONFIG_PREFIX}diagnostics_log must be a non-empty path, or None to disable"
             raise ConfigError(msg)
         if self.toctree_maxdepth < 1:
             msg = f"{CONFIG_PREFIX}toctree_maxdepth must be >= 1, got {self.toctree_maxdepth}"
