@@ -560,16 +560,26 @@ TEST_CASE("a diagnostic shared by several batches is merged once", "[parser]") {
 
   int redefinitions = 0;
   int previous_definitions = 0;
+  int include_stacks = 0;
   for (const auto& d : mod.diagnostics) {
     if (d.text.find("redefinition") != std::string::npos) ++redefinitions;
     if (d.text.find("previous definition") != std::string::npos) {
       ++previous_definitions;
+    }
+    if (d.text.find("in file included from") != std::string::npos) {
+      ++include_stacks;
     }
   }
   CHECK(redefinitions == 1);
   // The note survived alongside the parent it explains rather than being
   // orphaned or dropped with the duplicate.
   CHECK(previous_definitions == 1);
+  // Exactly one include stack survives, from whichever batch got there first.
+  // libclang names the *including* TU in that note, so the two groups differ
+  // by construction — which is why merge_diagnostics keys on the parent alone.
+  // Widening the key to the whole note chain would make this 2 and defeat the
+  // dedup entirely.
+  CHECK(include_stacks == 1);
 
   fs::remove_all(dir);
 }

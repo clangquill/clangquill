@@ -488,9 +488,20 @@ void append(std::vector<T>& dst, std::vector<T>& src) {
 // Every batch re-parses the shared `#include` closure, so one bad header is
 // reported once per batch that reaches it — noise that grows with the input
 // count. The formatted text already embeds `file:line:col`, so equal
-// (severity, text) means genuinely the same diagnostic. Notes travel with their
-// parent: a group is taken or skipped whole, because dropping a duplicated
-// parent while keeping its `note:` children would leave them orphaned.
+// (severity, text) means genuinely the same diagnostic.
+//
+// Notes travel with their parent: a group is taken or skipped whole, because
+// dropping a duplicated parent while keeping its `note:` children would leave
+// them orphaned.
+//
+// The key covers the parent only, deliberately. libclang prepends an
+// "in file included from <includer>:<line>:" note to a diagnostic raised inside
+// an `#include`d file, and that note names the *including* translation unit —
+// so the same bad header reached from two batches produces groups whose note
+// chains differ by construction. Keying on the whole chain would therefore
+// never collapse anything, which is the one case dedup exists for. The include
+// stack says how the parse got there, not what is wrong; keeping the first
+// group's copy of it is the intended trade.
 //
 // One accepted collision: the synthetic umbrella main file is named
 // `.clangquill-umbrella.cpp` in the same directory for every batch rooted
@@ -501,11 +512,11 @@ void append(std::vector<T>& dst, std::vector<T>& src) {
 void merge_diagnostics(model::ParsedModule& out, model::ParsedModule& part,
                        std::unordered_set<std::string>& seen) {
   for (std::size_t i = 0; i < part.diagnostics.size();) {
-    auto& parent = part.diagnostics[i];
     std::size_t end = i + 1;
     while (end < part.diagnostics.size() && part.diagnostics[end].depth > 0) {
       ++end;
     }
+    const auto& parent = part.diagnostics[i];
     if (seen.insert(std::to_string(parent.severity) + '\0' + parent.text)
             .second) {
       for (std::size_t j = i; j < end; ++j) {

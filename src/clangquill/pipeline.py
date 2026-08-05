@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import glob
 import json
-import os
 import shutil
 import tempfile
 from collections import Counter
@@ -377,10 +376,18 @@ def write_diagnostics_log(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     # Staged then renamed, like the IR writes above, so a crashed build never
-    # leaves a half-written log. The staging name carries the pid so two builds
-    # sharing a srcdir race to a whole file (last one wins) rather than
-    # interleaving into one.
-    staged = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    # leaves a half-written log. The staging name is unique per write — not just
+    # per process — so concurrent builds sharing a srcdir race to a whole file
+    # (last one wins) instead of interleaving into one or unlinking each other's
+    # staging file mid-flight.
+    handle = tempfile.NamedTemporaryFile(  # noqa: SIM115
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        delete=False,
+    )
+    handle.close()
+    staged = Path(handle.name)
     try:
         staged.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
         staged.replace(path)
@@ -609,6 +616,13 @@ def _incremental_build(
     with BuildCache.open(cache_dir) as cache:
         # No IR on disk yet means a full parse regardless of bookkeeping.
         status = cache.parse_status(parse_fp) if ir_path.is_file() else ParseStatus(current=False)
+        if log_path is not None and not log_path.is_file():
+            # A configured log that is not on disk — relocated to a new path,
+            # deleted, or never written — has to be materialised, and only a
+            # parse produces its contents (diagnostics live in neither the IR
+            # nor the cache). Force one rather than nooping past it and leaving
+            # the configured path empty. Costs one re-parse per relocation.
+            status = ParseStatus(current=False)
         parsed = not status.current
         # Fully unchanged build: the parse came from cache (IR identical) and the
         # render config/templates are unchanged, so the output the last run wrote

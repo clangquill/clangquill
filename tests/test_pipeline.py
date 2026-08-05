@@ -951,3 +951,47 @@ def test_diagnostics_log_untouched_by_a_render_only_rebuild(project: Path) -> No
     assert result.pages_written  # the render did re-run
     assert result.diagnostics_log is None
     assert log.read_bytes() == before
+
+
+@requires_libclang
+def test_relocating_the_diagnostics_log_materialises_the_new_path(project: Path) -> None:
+    # The parse fingerprint tracks only whether full capture is on, so moving
+    # the log would otherwise noop straight past the parse and leave the new
+    # path empty. The missing file itself is what forces the re-parse.
+    first = Config(
+        input=["demo.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        diagnostics_log="a.log",
+    )
+    build(first, base_dir=project)
+    assert (project / "a.log").is_file()
+
+    second = Config(
+        input=["demo.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        diagnostics_log="b.log",
+    )
+    result = build(second, base_dir=project)
+
+    assert result.parsed
+    assert result.diagnostics_log == (project / "b.log").resolve()
+    assert (project / "b.log").is_file()
+
+
+@requires_libclang
+def test_deleting_the_diagnostics_log_rewrites_it(project: Path) -> None:
+    config = Config(
+        input=["demo.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        diagnostics_log="parse.log",
+    )
+    build(config, base_dir=project)
+    (project / "parse.log").unlink()
+
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    assert (project / "parse.log").is_file()

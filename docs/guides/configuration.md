@@ -37,7 +37,7 @@ The field-name-to-front-end mapping is mechanical:
 | `comment_parser` | `clangquill_comment_parser` | `None` | Comment-parser override: a registered name or a dotted import path. See the [comment-parser guide](comment-parsers.md). |
 | `group_by` | `clangquill_group_by` | `"symbol"` | How to partition output pages: `"symbol"` (one page per top-level symbol), `"file"` (one page per parsed source file), `"class"` (one page per documented class/namespace — descends through namespaces so a single huge namespace becomes one page per member class, keeping Sphinx's C++ domain resolver fast and giving each class its own URL), or `"namespace"` (a browsable index → namespace → per-symbol hierarchy). For namespace-rooted libraries — everything under one root namespace — prefer `"namespace"` or `"class"`: with `"symbol"`, the single root collapses the entire subtree onto one page, which renders slowest, serialises Sphinx's read phase (one giant document cannot be parsed in parallel), and is re-rendered on every symbol change. Splitting it into balanced pages parallelises the Sphinx build and keeps incremental rebuilds proportional to the edit. |
 | `path_base` | `clangquill_path_base` | `None` | Directory (resolved against the srcdir / CWD) that the file paths in generated "File" headings are shown relative to. `None` keeps the absolute paths libclang reports, which leak the build-machine layout; set e.g. the project root for stable, reproducible headings. Files outside the base keep their absolute path. |
-| `diagnostics_log` | `clangquill_diagnostics_log` | `None` | Path (resolved against the srcdir / CWD) of a plain-text file receiving **every** libclang diagnostic of the run. `None` disables it. See [the diagnostics log](#the-diagnostics-log). |
+| `diagnostics_log` | `clangquill_diagnostics_log` | `None` | Path (resolved against the srcdir / CWD) of a plain-text file receiving **every** libclang diagnostic of the run. `None` disables it. Sphinx and the Python API only — `clangquill build` has no `--diagnostics-log` flag. See [the diagnostics log](#the-diagnostics-log). |
 
 ## The diagnostics log
 
@@ -76,7 +76,9 @@ Things worth knowing:
 - **The file is rewritten each build, not appended to.** It is a snapshot of one
   run — the `generated` header line is how you tell whether it is current.
 - **Enabling the option forces one full re-parse**, because a cached parse has
-  no diagnostics left to replay. Moving the file to a different path does not.
+  no diagnostics left to replay. So does moving it to a path that does not exist
+  yet, or deleting the log and rebuilding — the contents can only come from a
+  parse. Once the file is there, rebuilds are incremental again.
 - **With `cache_dir` set, an incremental build logs only the translation units
   it actually re-parsed**, and says so in the header
   (`parse: incremental — 3 of 42 translation unit(s) re-parsed`). A fully cached
