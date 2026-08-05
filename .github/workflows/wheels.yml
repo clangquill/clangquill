@@ -82,6 +82,10 @@ jobs:
   build_wheels_windows:
     name: Wheels on windows/AMD64
     runs-on: windows-2022
+        # Safety net: the libclang fetch/extract + vcpkg bootstrap should take
+        # single-digit minutes; bound the job so a hang fails fast instead of
+        # silently burning the 6h GitHub Actions default job timeout.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7.0.1
         with:
