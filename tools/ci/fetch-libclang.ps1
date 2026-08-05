@@ -45,8 +45,11 @@ Write-Host "fetch-libclang: extracting to $Prefix"
 # Windows' built-in tar.exe (bsdtar) is pathologically slow decompressing a
 # multi-GB .tar.xz like this one -- it can take *hours* even with a wildcard
 # filter, since xz decompression can't skip unwanted entries. 7-Zip (shipped
-# on GitHub's windows-2022 image) decodes xz far faster; pipe the archive
-# through it twice (outer .xz -> .tar stream, inner .tar -> filtered files).
+# on GitHub's windows-2022 image) decodes xz far faster -- but this script
+# runs under Windows PowerShell (powershell.exe, not pwsh 7.4+), whose native
+# command pipeline round-trips binary output through .NET strings and
+# corrupts multi-GB byte streams. So the two 7z passes go through an
+# intermediate .tar file on disk instead of a pipe.
 $extractTmp = Join-Path $env:TEMP "libclang-extract"
 if (Test-Path $extractTmp) {
     Remove-Item -Recurse -Force $extractTmp
@@ -58,24 +61,43 @@ if (-not $sevenZip) {
     $sevenZip = Join-Path ${env:ProgramFiles} "7-Zip\7z.exe"
 }
 
-& $sevenZip x $archivePath -so |
-    & $sevenZip x -si -ttar -y -r -o"$extractTmp" `
-        "libclang.dll" "libclang.lib" "clang-c/*" | Out-Null
+# Pass 1: decompress the outer .xz layer to a plain .tar file.
+& $sevenZip x $archivePath -o"$extractTmp" -y | Out-Null
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "fetch-libclang: extraction failed"
+    Write-Error "fetch-libclang: xz decompression failed"
+    exit 1
+}
+$tarFile = Get-ChildItem $extractTmp -Filter "*.tar" | Select-Object -First 1
+if (-not $tarFile) {
+    Write-Error "fetch-libclang: no .tar produced by xz decompression"
+    exit 1
+}
+
+# Pass 2: pull only the needed files out of the .tar (any depth via -r).
+$filteredTmp = Join-Path $env:TEMP "libclang-filtered"
+if (Test-Path $filteredTmp) {
+    Remove-Item -Recurse -Force $filteredTmp
+}
+New-Item -ItemType Directory -Force -Path $filteredTmp | Out-Null
+
+& $sevenZip x $tarFile.FullName -ttar -y -r -o"$filteredTmp" `
+    "libclang.dll" "libclang.lib" "clang-c/*" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "fetch-libclang: tar extraction failed"
     exit 1
 }
 Remove-Item $archivePath
+Remove-Item -Recurse -Force $extractTmp
 
 # Emulate tar's --strip-components=1: the archive unpacks under a single
 # top-level "clang+llvm-<ver>-..." directory; hoist its contents into $Prefix.
-$topDir = Get-ChildItem $extractTmp | Select-Object -First 1
+$topDir = Get-ChildItem $filteredTmp | Select-Object -First 1
 if (-not $topDir) {
     Write-Error "fetch-libclang: extraction produced no files"
     exit 1
 }
 Get-ChildItem $topDir.FullName | Move-Item -Destination $Prefix -Force
-Remove-Item -Recurse -Force $extractTmp
+Remove-Item -Recurse -Force $filteredTmp
 
 if (-not (Test-Path (Join-Path $Prefix "include\clang-c\Index.h"))) {
     Write-Error "fetch-libclang: clang-c\Index.h missing"
