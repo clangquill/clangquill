@@ -38,6 +38,12 @@ build-backend = "scikit_build_core.build"
 # missing or too old, so no extra system setup is required to build.
 minimum-version = "build-system.requires"
 build-dir = "build/{wheel_tag}"
+# `_core` is built with nanobind STABLE_ABI (CMakeLists.txt), which needs
+# Development.SABIModule to actually engage -- but even with that satisfied,
+# scikit-build-core still tags the wheel by the exact build interpreter
+# (cp313-cp313) unless told otherwise: wheel.py-api is what makes it emit the
+# cp312-abi3 tag the compiled extension actually supports.
+wheel.py-api = "cp312"
 wheel.packages = ["src/clangquill"]
 sdist.exclude = [".github", "docs/_build"]
 
@@ -70,6 +76,8 @@ license-files = ["LICENSE*"]
 dynamic = ["version"]
 classifiers = [
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 requires-python = ">=3.13"
 dependencies = [ "rich", "packaging" , "typer", "click", "jinja2>=3.1"]

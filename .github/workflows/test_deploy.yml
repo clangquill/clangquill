@@ -79,6 +79,61 @@ jobs:
         with:
           name: wheels-linux-${{ matrix.arch }}
           path: ./wheelhouse/*.whl
+  build_wheels_windows:
+    name: Wheels on windows/AMD64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+                  # full history so setuptools_scm derives the version
+          fetch-depth: 0
+      - name: Build Windows wheels
+        uses: pypa/cibuildwheel@v4.1.1
+        env:
+                  # Mirrors the Linux job above: same libclang (fetched by the
+                  # Windows counterpart of fetch-libclang.sh, see docs
+                  # ADR-0001) and the same vcpkg-sourced sqlite3 +
+                  # nlohmann-json. A single cp313 build covers 3.13+: `_core`
+                  # is built with nanobind STABLE_ABI, which pins
+                  # Py_LIMITED_API to 3.12 regardless of build interpreter, so
+                  # the wheel tag is cp312-abi3 and installs unchanged on
+                  # later interpreters. cibuildwheel 4 repairs Windows wheels
+                  # with delvewheel by default; --add-path points it at
+                  # libclang.dll.
+          CIBW_BUILD: cp313-*
+          CIBW_ARCHS_WINDOWS: AMD64
+          CIBW_BUILD_VERBOSITY: '1'
+                  # One PowerShell script does the whole setup: stages the CI
+                  # helper scripts at a fixed path (CIBW_ENVIRONMENT_WINDOWS
+                  # gets no {project} substitution, same restriction as
+                  # CIBW_ENVIRONMENT_LINUX above), fetches libclang, and
+                  # bootstraps vcpkg.
+          CIBW_BEFORE_ALL_WINDOWS: >-
+            powershell -NoProfile -ExecutionPolicy Bypass
+            -File {project}\tools\ci\wheel-setup-windows.ps1
+                  # vcpkg's default triplet on Windows would build sqlite3 as a
+                  # shared DLL; the *-static-md triplet keeps it (and
+                  # nlohmann-json) statically linked while still using the
+                  # dynamic CRT that Python extensions require, so libclang.dll
+                  # is the only third-party DLL the wheel needs to vendor.
+          CIBW_ENVIRONMENT_WINDOWS: >-
+            VCPKG_ROOT="C:\\vcpkg"
+            VCPKG_TARGET_TRIPLET="x64-windows-static-md"
+            PATH="C:\\libclang\\bin;$PATH"
+            SKBUILD_CMAKE_DEFINE="CMAKE_TOOLCHAIN_FILE=C:\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake;CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=C:\\libclang;VCPKG_TARGET_TRIPLET=x64-windows-static-md"
+            X_VCPKG_ASSET_SOURCES="clear;x-script,powershell -NoProfile -ExecutionPolicy
+            Bypass -File C:\\ci\\vcpkg-asset-fetch.ps1 {url}
+            {sha512} {dst}"
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
+            delvewheel repair --add-path C:\libclang\bin -w {dest_dir} {wheel}
+          CIBW_TEST_COMMAND: >-
+            python -c "from clangquill import _core;
+            assert _core.have_libclang();
+            print(_core.__core_version__, _core.libclang_version())"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: wheels-windows-AMD64
+          path: ./wheelhouse/*.whl
   build_sdist:
     name: Source distribution
     runs-on: ubuntu-24.04
@@ -103,7 +158,7 @@ jobs:
     name: Publish to Test PyPI
         # Build jobs run on PRs too (to verify every arch); only pushes publish.
     if: github.event_name == 'push'
-    needs: [build_wheels, build_sdist]
+    needs: [build_wheels, build_wheels_windows, build_sdist]
     runs-on: ubuntu-24.04
     permissions:
       id-token: write

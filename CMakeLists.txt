@@ -11,7 +11,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # --- Python + nanobind -------------------------------------------------------
 # scikit-build-core puts the right Python here; find nanobind via its pip wheel.
-find_package(Python 3.11 REQUIRED COMPONENTS Interpreter Development.Module)
+# Development.SABIModule is required for nanobind's STABLE_ABI (below): it
+# checks for the `Python::SABIModule` target and silently falls back to a
+# regular per-version build (cp3<X>-cp3<X> tag, one wheel per interpreter)
+# if that target isn't found -- it does not error, so this is easy to miss.
+find_package(Python 3.11 REQUIRED
+             COMPONENTS Interpreter Development.Module Development.SABIModule)
 
 execute_process(
   COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
