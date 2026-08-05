@@ -70,6 +70,8 @@ license-files = ["LICENSE*"]
 dynamic = ["version"]
 classifiers = [
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 requires-python = ">=3.13"
 dependencies = [ "rich", "packaging" , "typer", "click", "jinja2>=3.1"]

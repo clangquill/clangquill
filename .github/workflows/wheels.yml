@@ -33,6 +33,13 @@ jobs:
                   # is bootstrapped once per container in CIBW_BEFORE_ALL.
                   # libclang is now bundled from the official LLVM release per
                   # ADR-0001 (self-contained libclang.so; needs manylinux_2_34).
+                  # A single cp313 build covers every later interpreter: `_core`
+                  # is built with nanobind STABLE_ABI, which nanobind pins to
+                  # Py_LIMITED_API 3.12 regardless of the build interpreter, so
+                  # the wheel tag is `cp312-abi3` and installs unchanged on 3.13,
+                  # 3.14, ... — building a second cp314 wheel would just produce
+                  # a byte-for-byte duplicate under the same tag. Python 3.14
+                  # compatibility is instead verified by the smoke_test job below.
           CIBW_BUILD: cp313-*
           CIBW_SKIP: '*-musllinux*'
           CIBW_ARCHS_LINUX: ${{ matrix.arch }}
@@ -72,6 +79,58 @@ jobs:
         with:
           name: wheels-${{ matrix.os }}
           path: ./wheelhouse/*.whl
+  build_wheels_windows:
+    name: Wheels on windows/AMD64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+                  # full history so setuptools_scm derives the version
+          fetch-depth: 0
+      - name: Build Windows wheels
+        uses: pypa/cibuildwheel@v4.1.1
+        env:
+                  # Mirrors the Linux job above: same libclang (fetched by the
+                  # Windows counterpart of fetch-libclang.sh, see docs
+                  # ADR-0001) and the same vcpkg-sourced sqlite3 +
+                  # nlohmann-json, plus the same single-cp313-build reasoning
+                  # (nanobind STABLE_ABI => cp312-abi3, forward-compatible).
+                  # cibuildwheel 4 repairs Windows wheels with delvewheel by
+                  # default; --add-path points it at libclang.dll.
+          CIBW_BUILD: cp313-*
+          CIBW_ARCHS_WINDOWS: AMD64
+          CIBW_BUILD_VERBOSITY: '1'
+                  # One PowerShell script does the whole setup: stages the CI
+                  # helper scripts at a fixed path (CIBW_ENVIRONMENT_WINDOWS
+                  # gets no {project} substitution, same restriction as
+                  # CIBW_ENVIRONMENT_LINUX above), fetches libclang, and
+                  # bootstraps vcpkg.
+          CIBW_BEFORE_ALL_WINDOWS: >-
+            powershell -NoProfile -ExecutionPolicy Bypass
+            -File {project}\tools\ci\wheel-setup-windows.ps1
+                  # vcpkg's default triplet on Windows would build sqlite3 as a
+                  # shared DLL; the *-static-md triplet keeps it (and
+                  # nlohmann-json) statically linked while still using the
+                  # dynamic CRT that Python extensions require, so libclang.dll
+                  # is the only third-party DLL the wheel needs to vendor.
+          CIBW_ENVIRONMENT_WINDOWS: >-
+            VCPKG_ROOT="C:\\vcpkg"
+            VCPKG_TARGET_TRIPLET="x64-windows-static-md"
+            PATH="C:\\libclang\\bin;$PATH"
+            SKBUILD_CMAKE_DEFINE="CMAKE_TOOLCHAIN_FILE=C:\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake;CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=C:\\libclang;VCPKG_TARGET_TRIPLET=x64-windows-static-md"
+            X_VCPKG_ASSET_SOURCES="clear;x-script,powershell -NoProfile -ExecutionPolicy
+            Bypass -File C:\\ci\\vcpkg-asset-fetch.ps1 {url}
+            {sha512} {dst}"
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
+            delvewheel repair --add-path C:\libclang\bin -w {dest_dir} {wheel}
+          CIBW_TEST_COMMAND: >-
+            python -c "from clangquill import _core;
+            assert _core.have_libclang();
+            print(_core.__core_version__, _core.libclang_version())"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: wheels-windows-AMD64
+          path: ./wheelhouse/*.whl
   build_sdist:
     name: Source distribution
     runs-on: ubuntu-24.04
@@ -88,12 +147,17 @@ jobs:
           name: sdist
           path: ./dist/*.tar.gz
   smoke_test:
-    name: Smoke-test wheel on ${{ matrix.arch }}
+    name: Smoke-test wheel on ${{ matrix.arch }} (${{ matrix.python }})
     needs: build_wheels
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+              # cp313 is the interpreter the wheel was built against; cp314
+              # proves the cp312-abi3 wheel (see build_wheels above) installs
+              # and runs unmodified on the next interpreter too.
+        python: [cp313, cp314]
         include:
           - os: ubuntu-24.04
             arch: x86_64
@@ -111,10 +175,37 @@ jobs:
             # LLVM and parse a header — proves the bundled libclang is
             # self-contained (the build-time CIBW test runs with libclang still
             # on LD_LIBRARY_PATH, which this deliberately does not).
-      - name: Install wheel and parse in ${{ matrix.image }}
+      - name: Install wheel and parse in ${{ matrix.image }} (${{ matrix.python }})
         run: >-
           docker run --rm -v "$PWD:/work" -w /work ${{ matrix.image }}
           bash -ec '
-          py=/opt/python/cp313-cp313/bin/python;
+          py=/opt/python/${{ matrix.python }}-${{ matrix.python }}/bin/python;
           "$py" -m pip install dist/*.whl;
           "$py" tools/ci/smoke_test.py'
+  smoke_test_windows:
+    name: Smoke-test wheel on windows/AMD64 (${{ matrix.python-version }})
+    needs: build_wheels_windows
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+              # 3.13 is the interpreter the wheel was built against; 3.14
+              # proves the cp312-abi3 wheel installs and runs unmodified on
+              # the next interpreter too (a fresh runner, so no system LLVM
+              # and no libclang left over from the build job, unlike the
+              # build-time CIBW_TEST_COMMAND above).
+        python-version: ['3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheels-windows-AMD64
+          path: dist
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install wheel and parse
+        run: |-
+          $wheel = Get-ChildItem dist\*.whl | Select-Object -First 1
+          python -m pip install $wheel.FullName
+          python tools/ci/smoke_test.py

@@ -143,3 +143,30 @@ Consequences:
   uses the glob `["LICENSE*"]`, which picks the file up when present (wheels) and is
   a no-op for sdists/source builds that bundle no libclang. The project's own license
   stays BSD-2-Clause.
+
+## Update (Windows wheels)
+
+Windows wheels bundle libclang the same way, with a Windows-specific asset:
+`LLVM_BUILD_LLVM_DYLIB` (the shared-libLLVM option the distro-libclang problem
+on Linux stems from) isn't available on Windows at all, so `libclang.dll` from
+any official Windows release is inherently self-contained the way the Linux
+release tarball is — there's no separate `libLLVM.dll` to vendor.
+
+The Windows release ships no slim tarball equivalent to
+`LLVM-<ver>-Linux-<arch>.tar.xz` (only an NSIS `.exe` installer, which isn't
+stream-extractable the way `fetch-libclang.sh` unpacks the Linux archive), so
+`tools/ci/fetch-libclang.ps1` downloads the full
+`clang+llvm-<ver>-x86_64-pc-windows-msvc.tar.xz` archive instead and extracts
+only `bin/libclang.dll`, `lib/libclang.lib` (the import library `FindLibClang.cmake`
+links against), and the `clang-c` headers.
+
+`sqlite3` and `nlohmann-json` come from vcpkg on Windows too, using the
+`x64-windows-static-md` triplet so both are statically linked against the
+dynamic CRT (the same one Python's own DLLs use) — `libclang.dll` ends up the
+only third-party DLL cibuildwheel needs to vendor into the wheel, which it
+does via `delvewheel` (cibuildwheel 4's default Windows repair tool, analogous
+to `auditwheel` on Linux). `tools/ci/vcpkg-asset-fetch.ps1` mirrors the Linux
+asset-fetch workaround for vcpkg's sqlite.org 403.
+
+Windows wheel building targets `x86_64` only for now; Windows-on-Arm is a
+possible follow-up.
