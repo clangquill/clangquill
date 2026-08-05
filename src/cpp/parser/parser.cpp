@@ -280,6 +280,20 @@ void Parser::report_compile_db_failure(model::ParsedModule& out) const {
 
 namespace {
 
+// Whether `d` belongs to -Wunused-command-line-argument: libclang parses
+// build-only flags (e.g. -c, -o) that compile_commands.json entries always
+// carry, and since a parse-only invocation never reaches the job those flags
+// govern, clang reports them "unused". That's a fact about the argv we
+// replayed, not about the source being parsed, so it's never worth surfacing
+// -- including when a project's own -Werror promotes it past the severity
+// check below.
+bool is_unused_argument_diagnostic(CXDiagnostic d) {
+  CXString disable;
+  std::string option = to_string(clang_getDiagnosticOption(d, &disable));
+  clang_disposeString(disable);
+  return option == "-Wunused-command-line-argument";
+}
+
 // Deepest note chain followed; libclang nests at most a couple of levels, so
 // this only guards against a pathological (or malicious) diagnostic tree.
 constexpr int kMaxDiagnosticDepth = 8;
@@ -329,7 +343,8 @@ void collect_diagnostics(CXTranslationUnit tu, model::ParsedModule& out,
     CXDiagnostic d = clang_getDiagnostic(tu, i);
     if (all) {
       collect_one(d, 0, out);
-    } else if (clang_getDiagnosticSeverity(d) >= CXDiagnostic_Error) {
+    } else if (clang_getDiagnosticSeverity(d) >= CXDiagnostic_Error &&
+               !is_unused_argument_diagnostic(d)) {
       // Deliberately flat: without `all`, notes are dropped and only the
       // top-level message is kept, exactly as before this option existed.
       out.diagnostics.push_back(model::Diagnostic{

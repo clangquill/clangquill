@@ -344,6 +344,40 @@ TEST_CASE("compile_commands_dir falls back to the sibling .cpp for a header",
   fs::remove_all(dir);
 }
 
+TEST_CASE("an unused link-only flag is not reported even under the "
+          "project's own -Werror",
+          "[parser]") {
+  // A real compile_commands.json entry routinely carries link-stage flags
+  // (here -fuse-ld=lld) that a parse-only libclang invocation never reaches,
+  // so clang reports them unused ([-Wunused-command-line-argument]). That's
+  // ordinarily below the error threshold and silently dropped, but a project
+  // built with -Werror promotes it to an error -- it should still never
+  // surface, since it says nothing about the source being parsed.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-werror-cc-test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+
+  std::ofstream(dir / "widget.cpp") << "inline int widget_value() { return 3; }\n";
+
+  {
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"" << (dir / "widget.cpp").string()
+       << "\", \"arguments\": [\"c++\", \"-Werror\", \"-fuse-ld=lld\", \"-c\", \""
+       << (dir / "widget.cpp").string() << "\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file((dir / "widget.cpp").string(), mod));
+  CHECK(mod.diagnostics.empty());
+  CHECK(find(mod, "widget_value") != nullptr);
+
+  fs::remove_all(dir);
+}
+
 TEST_CASE("a differently spelled source path is still dropped from the args",
           "[parser]") {
   // A generated compile_commands.json may spell its file relative to the
