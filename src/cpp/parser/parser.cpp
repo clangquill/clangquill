@@ -341,16 +341,17 @@ void collect_diagnostics(CXTranslationUnit tu, model::ParsedModule& out,
   unsigned n = clang_getNumDiagnostics(tu);
   for (unsigned i = 0; i < n; ++i) {
     CXDiagnostic d = clang_getDiagnostic(tu, i);
-    if (all) {
-      collect_one(d, 0, out);
-    } else if (clang_getDiagnosticSeverity(d) >= CXDiagnostic_Error &&
-               !is_unused_argument_diagnostic(d)) {
-      // Deliberately flat: without `all`, notes are dropped and only the
-      // top-level message is kept, exactly as before this option existed.
-      out.diagnostics.push_back(model::Diagnostic{
-          .severity = static_cast<int>(clang_getDiagnosticSeverity(d)),
-          .text = to_string(clang_formatDiagnostic(
-              d, clang_defaultDiagnosticDisplayOptions()))});
+    if (!is_unused_argument_diagnostic(d)) {
+      if (all) {
+        collect_one(d, 0, out);
+      } else if (clang_getDiagnosticSeverity(d) >= CXDiagnostic_Error) {
+        // Deliberately flat: without `all`, notes are dropped and only the
+        // top-level message is kept, exactly as before this option existed.
+        out.diagnostics.push_back(model::Diagnostic{
+            .severity = static_cast<int>(clang_getDiagnosticSeverity(d)),
+            .text = to_string(clang_formatDiagnostic(
+                d, clang_defaultDiagnosticDisplayOptions()))});
+      }
     }
     clang_disposeDiagnostic(d);
   }

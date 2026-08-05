@@ -523,6 +523,29 @@ TEST_CASE("capture_all_diagnostics keeps warnings with their location",
   std::filesystem::remove_all(file.parent_path());
 }
 
+TEST_CASE(
+    "capture_all_diagnostics still drops -Wunused-command-line-argument",
+    "[parser]") {
+  // A parse-only invocation never reaches the link job that a flag like
+  // -fuse-ld=lld governs, so it's always reported "unused" -- a fact about
+  // clangquill's own argument replay, not the source. That must stay
+  // filtered even when the caller asked to see every diagnostic.
+  const auto file = write_scratch("clangquill-diag-unused-all", "widget.hpp",
+                                  "inline int widget_value() { return 3; }\n");
+
+  parser::ParseOptions opts;
+  opts.capture_all_diagnostics = true;
+  opts.extra_args.push_back("-fuse-ld=lld");
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file(file.string(), mod));
+
+  for (const auto& d : mod.diagnostics) {
+    CHECK(d.text.find("fuse-ld") == std::string::npos);
+  }
+
+  std::filesystem::remove_all(file.parent_path());
+}
+
 TEST_CASE("attached notes are captured one level below their parent",
           "[parser]") {
   const auto file = write_scratch("clangquill-diag-notes", "widget.hpp",
