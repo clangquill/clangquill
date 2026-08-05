@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 name: pytest
+# Cancel a stale PR run when new commits land; let push/merge_group runs finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   py-check:
     runs-on: ${{ matrix.config.os }}
@@ -19,10 +23,6 @@ jobs:
       OS: ${{ matrix.config.os }}
       PYTHON: ${{ matrix.config.py }}
     steps:
-      - name: Cancel Previous Runs
-        uses: styfle/cancel-workflow-action@0.13.1
-        with:
-          access_token: ${{ github.token }}
       - name: Checkout
         uses: actions/checkout@v7.0.1
       - name: Install build dependencies

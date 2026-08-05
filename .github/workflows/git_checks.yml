@@ -1,6 +1,10 @@
 ---
 on: pull_request
 name: Git
+# Cancel a stale run when new commits land on the same PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   message-check:
     name: Block Autosquash Commits

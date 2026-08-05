@@ -1,6 +1,10 @@
 ---
 name: Dependabot auto-merge
 on: pull_request
+# Cancel a stale run when new commits land on the same PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   pull-requests: write
   contents: write
