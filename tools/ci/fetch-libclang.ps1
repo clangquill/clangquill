@@ -42,9 +42,40 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "fetch-libclang: extracting to $Prefix"
 # Only unpack the pieces clangquill needs; the rest of the release (clang-cl,
 # lld, static component libs, ...) is multiple GB unpacked and unused here.
-tar.exe -xf $archivePath -C $Prefix --strip-components=1 `
-    "*/bin/libclang.dll" "*/lib/libclang.lib" "*/include/clang-c/*"
+# Windows' built-in tar.exe (bsdtar) is pathologically slow decompressing a
+# multi-GB .tar.xz like this one -- it can take *hours* even with a wildcard
+# filter, since xz decompression can't skip unwanted entries. 7-Zip (shipped
+# on GitHub's windows-2022 image) decodes xz far faster; pipe the archive
+# through it twice (outer .xz -> .tar stream, inner .tar -> filtered files).
+$extractTmp = Join-Path $env:TEMP "libclang-extract"
+if (Test-Path $extractTmp) {
+    Remove-Item -Recurse -Force $extractTmp
+}
+New-Item -ItemType Directory -Force -Path $extractTmp | Out-Null
+
+$sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+if (-not $sevenZip) {
+    $sevenZip = Join-Path ${env:ProgramFiles} "7-Zip\7z.exe"
+}
+
+& $sevenZip x $archivePath -so |
+    & $sevenZip x -si -ttar -y -r -o"$extractTmp" `
+        "libclang.dll" "libclang.lib" "clang-c/*" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "fetch-libclang: extraction failed"
+    exit 1
+}
 Remove-Item $archivePath
+
+# Emulate tar's --strip-components=1: the archive unpacks under a single
+# top-level "clang+llvm-<ver>-..." directory; hoist its contents into $Prefix.
+$topDir = Get-ChildItem $extractTmp | Select-Object -First 1
+if (-not $topDir) {
+    Write-Error "fetch-libclang: extraction produced no files"
+    exit 1
+}
+Get-ChildItem $topDir.FullName | Move-Item -Destination $Prefix -Force
+Remove-Item -Recurse -Force $extractTmp
 
 if (-not (Test-Path (Join-Path $Prefix "include\clang-c\Index.h"))) {
     Write-Error "fetch-libclang: clang-c\Index.h missing"
