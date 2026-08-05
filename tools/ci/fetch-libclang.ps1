@@ -81,7 +81,7 @@ if (Test-Path $filteredTmp) {
 New-Item -ItemType Directory -Force -Path $filteredTmp | Out-Null
 
 & $sevenZip x $tarFile.FullName -ttar -y -r -o"$filteredTmp" `
-    "libclang.dll" "libclang.lib" "clang-c/*" | Out-Null
+    "libclang.dll" "libclang.lib" "clang-c" | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Error "fetch-libclang: tar extraction failed"
     exit 1
