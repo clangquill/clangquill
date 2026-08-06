@@ -59,7 +59,9 @@ class Parser {
   ///        @p out.files — which is deduplicated across every TU parsed into the
   ///        module — this captures exactly what *this* TU pulled in, so a caller
   ///        can attribute each dependency to the input that requires it.
-  /// @return `false` on hard failure (the translation unit could not be created).
+  /// @return `false` on hard failure (the translation unit could not be
+  ///         created). The failure is appended to @p out as an error carrying a
+  ///         `note:` chain that explains it — see @ref report_parse_failure.
   bool parse_file(const std::string& path, model::ParsedModule& out,
                   std::vector<std::string>* tu_files = nullptr);
 
@@ -88,7 +90,37 @@ class Parser {
                    std::vector<bool>* member_ok = nullptr);
 
  private:
-  std::vector<std::string> build_args(const std::string& path) const;
+  // Compiler arguments for @p path: the compilation database entry when there
+  // is one, else the configured -std/-I/-D fallback. Sets `*from_compile_db`
+  // (when given) to which of the two it was, so a failure can name the source
+  // of the flags it is blaming.
+  std::vector<std::string> build_args(const std::string& path,
+                                      bool* from_compile_db = nullptr) const;
+
+  // The -std/-I/-D fallback arguments, independent of any database entry.
+  std::vector<std::string> default_args() const;
+
+  // Appends the "failed to parse" record for @p path to @p out, followed by
+  // the `note:` chain diagnosing it.
+  //
+  // libclang hands back no CXTranslationUnit when it refuses to create one,
+  // and the driver's own diagnostics die with the half-built AST unit — the C
+  // API offers no way to reach them. So the notes reconstruct the diagnosis
+  // from what is knowable here (the error code, whether the input is readable,
+  // the exact argv, whether it names a second input) and, when the flags came
+  // from a compilation database, from a re-parse under @ref default_args that
+  // recovers the compiler's real complaints about the file.
+  //
+  // @param path Input whose translation unit could not be created.
+  // @param error_code The `CXErrorCode` returned, as an int (this header stays
+  //        clang-free).
+  // @param args Arguments that were handed to libclang.
+  // @param args_from_compile_db Whether @p args came from the database.
+  // @param out Module the records are appended to.
+  void report_parse_failure(const std::string& path, int error_code,
+                            const std::vector<std::string>& args,
+                            bool args_from_compile_db,
+                            model::ParsedModule& out);
 
   ParseOptions options_;
   void* index_ = nullptr;  // CXIndex (opaque here to keep the header clang-free)

@@ -662,6 +662,170 @@ TEST_CASE("the compile-database failure is reported once per parser",
   fs::remove_all(dir);
 }
 
+namespace {
+
+// The whole `failed to parse` group: the record itself plus every note nested
+// under it, joined so a test can assert on the report as a reader sees it.
+std::string failure_report(const model::ParsedModule& m) {
+  std::string report;
+  bool inside = false;
+  for (const auto& d : m.diagnostics) {
+    if (d.depth == 0) inside = d.text.find("failed to parse") != std::string::npos;
+    if (inside) report += d.text + "\n";
+  }
+  return report;
+}
+
+}  // namespace
+
+TEST_CASE("a missing input reports why libclang refused it", "[parser]") {
+  // libclang returns no translation unit — and therefore no diagnostics at all
+  // — for an input the driver cannot open, so a bare "failed to parse" line was
+  // everything the log ever carried for exactly this case.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-parse-fail-missing";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+
+  parser::ParseOptions opts;
+  opts.capture_all_diagnostics = true;
+  opts.include_dirs.push_back((dir / "include").string());
+  model::ParsedModule mod;
+  CHECK_FALSE(parser::Parser(opts).parse_file((dir / "gone.hpp").string(), mod));
+
+  const std::string report = failure_report(mod);
+  CHECK(report.find("failed to parse: " + (dir / "gone.hpp").string()) !=
+        std::string::npos);
+  CHECK(report.find("CXError_Failure") != std::string::npos);
+  CHECK(report.find("the input file does not exist") != std::string::npos);
+  // The exact argv is in the log, so a wrong include path or standard is
+  // visible without reproducing the run.
+  CHECK(report.find("-I" + (dir / "include").string()) != std::string::npos);
+  CHECK(report.find("-xc++") != std::string::npos);
+
+  // Every explanatory record hangs off the failure, so error-only consumers
+  // (the console stream) still see one line per failed input.
+  int top_level = 0;
+  for (const auto& d : mod.diagnostics) {
+    if (d.depth == 0) ++top_level;
+    if (d.depth > 0) CHECK(d.severity == model::kSeverityNote);
+  }
+  CHECK(top_level == 1);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("a database entry with a second input is named, and the file is "
+          "re-parsed for its real diagnostics",
+          "[parser]") {
+  // libclang creates no translation unit when the command carries more than one
+  // input — the classic way a compile_commands.json entry breaks a parse. The
+  // report has to say that, and then get clang's actual complaints about the
+  // source into the log by parsing it under flags known to be well formed.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-parse-fail-argv";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.hpp") << kErrorWithNoteSource;
+  std::ofstream(dir / "other.cpp") << "int other() { return 1; }\n";
+  {
+    std::ofstream db(dir / "compile_commands.json");
+    db << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"clang++\", "
+          "\"-std=c++20\", \"-DWIDGET_FROM_DB=1\", \"-c\", \"widget.hpp\", \""
+       << (dir / "other.cpp").string() << "\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  opts.capture_all_diagnostics = true;
+  model::ParsedModule mod;
+  CHECK_FALSE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+
+  const std::string report = failure_report(mod);
+  CHECK(report.find("names a second input file") != std::string::npos);
+  CHECK(report.find((dir / "other.cpp").string()) != std::string::npos);
+  // The flags are quoted verbatim, and attributed to the database rather than
+  // to clangquill's own -std/-I/-D options.
+  CHECK(report.find("from the compilation database") != std::string::npos);
+  CHECK(report.find("-DWIDGET_FROM_DB=1") != std::string::npos);
+  // The recovery parse: libclang's own error about this file, which the failed
+  // parse discarded, is now in the log.
+  CHECK(report.find("re-parsed with") != std::string::npos);
+  CHECK(report.find("redefinition") != std::string::npos);
+  CHECK(report.find("previous definition") != std::string::npos);
+
+  // The recovered diagnostics nest under the note that introduces them, so the
+  // log shows they came from a different command line than the project's.
+  const model::Diagnostic* redefinition = nullptr;
+  for (const auto& d : mod.diagnostics) {
+    if (d.text.find("redefinition") != std::string::npos) redefinition = &d;
+  }
+  REQUIRE(redefinition != nullptr);
+  CHECK(redefinition->depth == 2);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("a file that parses alone blames the compile flags", "[parser]") {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-parse-fail-clean";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.hpp") << "inline int widget_value() { return 1; }\n";
+  std::ofstream(dir / "other.cpp") << "int other() { return 1; }\n";
+  {
+    std::ofstream db(dir / "compile_commands.json");
+    db << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"clang++\", "
+          "\"-std=c++20\", \"-c\", \"widget.hpp\", \""
+       << (dir / "other.cpp").string() << "\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  opts.capture_all_diagnostics = true;
+  model::ParsedModule mod;
+  CHECK_FALSE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+
+  CHECK(failure_report(mod).find("the compile flags are what libclang "
+                                 "rejected") != std::string::npos);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("a batch member libclang never opened is reported", "[parser]") {
+  // Umbrella batching left this case silent: the input produced no symbols and
+  // no message, which reads as "nothing to document" rather than "never
+  // parsed".
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-batch-unopened";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "a.hpp") << "inline int a_value() { return 1; }\n";
+
+  parser::ParseOptions opts;
+  opts.capture_all_diagnostics = true;
+  opts.jobs = 1;
+  std::vector<bool> ok;
+  model::ParsedModule mod = parser::parse_files(
+      {(dir / "a.hpp").string(), (dir / "gone.hpp").string()}, opts, nullptr,
+      &ok);
+
+  REQUIRE(ok.size() == 2);
+  CHECK(ok[0]);
+  CHECK_FALSE(ok[1]);
+  const std::string report = failure_report(mod);
+  CHECK(report.find("failed to parse: " + (dir / "gone.hpp").string()) !=
+        std::string::npos);
+  CHECK(report.find("never opened this file") != std::string::npos);
+  CHECK(report.find("the input file does not exist") != std::string::npos);
+  // The good member still parsed.
+  CHECK(find(mod, "a_value") != nullptr);
+
+  fs::remove_all(dir);
+}
+
 #else  // !CLANGQUILL_HAVE_LIBCLANG
 
 TEST_CASE("parser tests skipped without libclang", "[parser][!mayfail]") {

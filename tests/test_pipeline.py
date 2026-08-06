@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -833,6 +834,52 @@ def test_error_notes_are_logged_indented_under_their_parent(project: Path) -> No
     note = lines[parent + 1]
     assert "previous definition" in note
     assert note.startswith("  ")
+
+
+@requires_libclang
+def test_a_failed_parse_explains_itself_in_the_log(project: Path) -> None:
+    # libclang hands back no translation unit — and with it no diagnostics at
+    # all — when it refuses a command, so without clangquill's own diagnosis a
+    # failed input is a bare "failed to parse" line and nothing else. Here the
+    # database entry carries a second input file, which is the way a
+    # compile_commands.json breaks a header parse in practice.
+    (project / "demo.hpp").write_text(ERROR_FIXTURE)
+    (project / "other.cpp").write_text("int other() { return 1; }\n")
+    entry = {
+        "directory": str(project),
+        "file": "demo.hpp",
+        "arguments": ["clang++", "-std=c++20", "-c", "demo.hpp", str(project / "other.cpp")],
+    }
+    (project / "compile_commands.json").write_text(json.dumps([entry]))
+    config = Config(
+        input=["demo.hpp"],
+        output_dir="api",
+        compile_commands=".",
+        diagnostics_log="parse.log",
+    )
+    result = build(config, base_dir=project)
+
+    lines = (project / "parse.log").read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("failed to parse:"))
+    # The group is self-delimiting: the failure line is unindented and every
+    # note under it is indented, so it ends at the next unindented line. A fixed
+    # slice would break silently the day a note is added.
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i] and not lines[i].startswith(" ")),
+        len(lines),
+    )
+    group = lines[start:end]
+    assert "CXError" in group[0]
+    assert any("names a second input file" in line for line in group)
+    assert any("-std=c++20" in line and "compilation database" in line for line in group)
+    # The recovered diagnostics sit one level deeper than the note introducing
+    # them, so the log shows they came from a different command line.
+    recovered = next(line for line in group if "redefinition" in line)
+    assert recovered.startswith("    ")
+    # Both halves of the contract: the failure reaches the console stream, the
+    # notes explaining it do not.
+    assert any("failed to parse:" in line for line in result.diagnostics)
+    assert all("note:" not in line for line in result.diagnostics)
 
 
 @requires_libclang
