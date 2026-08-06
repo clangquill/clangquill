@@ -224,6 +224,32 @@ shares the header's include dirs and defines, before falling back to
 not exist either, are the case for generating a database that lists the headers
 themselves — `docs/conf.py` in this repository does exactly that.
 
+### How an entry's command line is replayed
+
+An entry's arguments are handed to libclang almost verbatim. Three adjustments
+are made, and they exist because libclang appends arguments of its own — the
+source file and `-fsyntax-only` — after whatever it is given:
+
+- **The source operand is dropped**, however the database spells it (relative to
+  the entry's `directory`, or with unresolved `..` segments). Leaving it in
+  gives the driver two inputs, and a command with more than one input yields no
+  translation unit at all.
+- **A `--` separator is dropped.** Past it the driver reads every token as a
+  file name, so the arguments appended afterwards become inputs
+  (`error: no such file or directory: '-fsyntax-only'`) and, again, no
+  translation unit is built. CMake writes exactly this shape for the header-set
+  verification targets it generates
+  (`c++ … -c -x c++-header … -- <header>`), which are often the only entries a
+  documented header has. The operand the separator protected is the source
+  file, dropped above and re-supplied by libclang, so nothing is left for it to
+  separate.
+- **`-xc++` is appended only when the entry names no language itself.** It is
+  there so a header without a `.cpp` extension is not parsed as C; an entry
+  carrying its own `-x` has already said what the file is, and overriding
+  `c++-header` with `c++` would report a `#pragma once` as being in a main file
+  — which such a project's own `-Werror` then turns into an error on a header
+  that compiles cleanly.
+
 ## Toctree / root
 
 | Field | Sphinx value | Default | Description |
