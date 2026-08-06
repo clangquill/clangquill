@@ -80,6 +80,21 @@ std::vector<std::string> CompileDb::args_for(const std::string& path) const {
     for (unsigned i = 1; i < argc; ++i) {
       std::string a = to_string(clang_CompileCommand_getArg(cmd, i));
       if (names_same_file(dir, a, path)) continue;
+      // Drop the `--` separator too. Past it the driver reads every token as a
+      // file name, and both libclang and this parser append arguments after
+      // whatever the database supplied -- libclang's own `-fsyntax-only` among
+      // them. A surviving separator therefore turns those into input files
+      // ("error: no such file or directory: '-fsyntax-only'"), the driver
+      // produces no compiler job, and clang_parseTranslationUnit2 returns
+      // CXError_ASTReadError with no translation unit and no diagnostics.
+      //
+      // Not a corner case: CMake writes exactly this shape for the header-set
+      // verification targets it generates (`-c -x c++-header … -- <header>`),
+      // so the entries most likely to belong to a documented header are the
+      // ones that hit it. The operand the separator protected is the source
+      // file, which is dropped above and re-supplied by libclang, so nothing
+      // is left for it to separate.
+      if (a == "--") continue;
       args.push_back(std::move(a));
     }
   }

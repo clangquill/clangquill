@@ -267,8 +267,18 @@ std::vector<std::string> Parser::build_args(const std::string& path,
   if (args.empty()) return default_args();
 
   if (from_compile_db != nullptr) *from_compile_db = true;
-  // Parse headers as C++ even without a .cpp extension.
-  args.push_back("-xc++");
+  // Parse headers as C++ even without a .cpp extension -- but only when the
+  // entry has not already said what the file is. `-x` applies to the inputs
+  // that follow it and libclang appends the source last, so appending our own
+  // would win over the entry's. That matters for the `-x c++-header` commands
+  // CMake generates for header sets: under `c++` a `#pragma once` in the main
+  // file is -Wpragma-once-outside-header, which such a project's own -Werror
+  // then turns into an error on a header that compiles perfectly well.
+  const bool entry_sets_language =
+      std::any_of(args.begin(), args.end(), [](const std::string& a) {
+        return a == "-x" || a.rfind("-x", 0) == 0;
+      });
+  if (!entry_sets_language) args.push_back("-xc++");
   return args;
 }
 

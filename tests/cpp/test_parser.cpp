@@ -412,6 +412,78 @@ TEST_CASE("a differently spelled source path is still dropped from the args",
   fs::remove_all(dir);
 }
 
+TEST_CASE("a '--' separator in a database entry does not sink the parse",
+          "[parser]") {
+  // CMake's header-set verification targets are written as
+  // `c++ … -c -x c++-header … -- <header>`. Once the source operand is dropped
+  // the separator has nothing left to separate, but everything appended after
+  // it — this parser's `-xc++`, and libclang's own `-fsyntax-only` — is read by
+  // the driver as a file name instead of a flag. That leaves no compiler job,
+  // so libclang builds no translation unit at all and the header silently
+  // documents nothing.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-separator";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.hpp")
+      << "#pragma once\ninline int widget_value() { return 4; }\n";
+
+  {
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"c++\", "
+          "\"-Wall\", \"-Werror\", \"-c\", \"-x\", \"c++-header\", "
+          "\"-std=gnu++20\", \"--\", \"widget.hpp\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  opts.capture_all_diagnostics = true;
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+  // Clean, not merely non-fatal: the entry's own `-x c++-header` survives, so
+  // the `#pragma once` above is not reported as being in a main file — which
+  // this entry's -Werror would turn into an error on a perfectly good header.
+  CHECK(mod.diagnostics.empty());
+  CHECK(find(mod, "widget_value") != nullptr);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("an entry's own -x survives, and is supplied when it has none",
+          "[parser]") {
+  // `-x` applies to the inputs after it and libclang appends the source last,
+  // so anything this parser appends wins over the entry. A database that has
+  // stated the language knows better than the fallback does; one that has not
+  // still needs it, or a header without a .cpp extension parses as C.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-language";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  // Valid C++, invalid C: it only parses if the language is right.
+  std::ofstream(dir / "plain.h")
+      << "namespace demo { inline int plain_value() { return 5; } }\n";
+
+  {
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"plain.h\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-c\", \"plain.h\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  opts.capture_all_diagnostics = true;
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file((dir / "plain.h").string(), mod));
+  CHECK(find(mod, "demo::plain_value") != nullptr);
+  for (const auto& d : mod.diagnostics) {
+    CHECK(d.severity < model::kSeverityError);
+  }
+
+  fs::remove_all(dir);
+}
+
 TEST_CASE("an unloadable compile database is reported with the path searched",
           "[parser]") {
   // libclang reports a database it cannot open exactly like "no entry for this
