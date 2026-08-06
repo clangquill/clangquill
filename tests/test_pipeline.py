@@ -857,11 +857,18 @@ def test_a_failed_parse_explains_itself_in_the_log(project: Path) -> None:
         compile_commands=".",
         diagnostics_log="parse.log",
     )
-    build(config, base_dir=project)
+    result = build(config, base_dir=project)
 
     lines = (project / "parse.log").read_text().splitlines()
     start = next(i for i, line in enumerate(lines) if line.startswith("failed to parse:"))
-    group = lines[start : start + 8]
+    # The group is self-delimiting: the failure line is unindented and every
+    # note under it is indented, so it ends at the next unindented line. A fixed
+    # slice would break silently the day a note is added.
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i] and not lines[i].startswith(" ")),
+        len(lines),
+    )
+    group = lines[start:end]
     assert "CXError" in group[0]
     assert any("names a second input file" in line for line in group)
     assert any("-std=c++20" in line and "compilation database" in line for line in group)
@@ -869,9 +876,10 @@ def test_a_failed_parse_explains_itself_in_the_log(project: Path) -> None:
     # them, so the log shows they came from a different command line.
     recovered = next(line for line in group if "redefinition" in line)
     assert recovered.startswith("    ")
-    # Only the failure itself reaches the console stream; the notes stay in the
-    # file.
-    assert all("note:" not in line for line in build(config, base_dir=project).diagnostics)
+    # Both halves of the contract: the failure reaches the console stream, the
+    # notes explaining it do not.
+    assert any("failed to parse:" in line for line in result.diagnostics)
+    assert all("note:" not in line for line in result.diagnostics)
 
 
 @requires_libclang
