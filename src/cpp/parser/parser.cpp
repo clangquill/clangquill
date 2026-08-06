@@ -227,7 +227,20 @@ Parser::~Parser() {
   if (index_) clang_disposeIndex(as_index(index_));
 }
 
-std::vector<std::string> Parser::build_args(const std::string& path) const {
+std::vector<std::string> Parser::default_args() const {
+  std::vector<std::string> args;
+  args.push_back("-std=" + options_.std_flag);
+  for (const auto& inc : options_.include_dirs) args.push_back("-I" + inc);
+  for (const auto& def : options_.defines) args.push_back("-D" + def);
+  for (const auto& extra : options_.extra_args) args.push_back(extra);
+  // Parse headers as C++ even without a .cpp extension.
+  args.push_back("-xc++");
+  return args;
+}
+
+std::vector<std::string> Parser::build_args(const std::string& path,
+                                            bool* from_compile_db) const {
+  if (from_compile_db != nullptr) *from_compile_db = false;
   std::vector<std::string> args;
 
   if (options_.compile_commands_dir) {
@@ -251,13 +264,9 @@ std::vector<std::string> Parser::build_args(const std::string& path) const {
     }
   }
 
-  if (args.empty()) {
-    args.push_back("-std=" + options_.std_flag);
-    for (const auto& inc : options_.include_dirs) args.push_back("-I" + inc);
-    for (const auto& def : options_.defines) args.push_back("-D" + def);
-    for (const auto& extra : options_.extra_args) args.push_back(extra);
-  }
+  if (args.empty()) return default_args();
 
+  if (from_compile_db != nullptr) *from_compile_db = true;
   // Parse headers as C++ even without a .cpp extension.
   args.push_back("-xc++");
   return args;
@@ -335,20 +344,23 @@ void collect_one(CXDiagnostic d, int depth, model::ParsedModule& out) {
 }
 
 // Collects `tu`'s diagnostics into `out.diagnostics`: errors only, or every
-// severity plus each diagnostic's attached notes when `all` is set.
+// severity plus each diagnostic's attached notes when `all` is set. `base_depth`
+// nests the whole set under an enclosing record (used when a recovery parse's
+// diagnostics hang off a parse-failure report).
 void collect_diagnostics(CXTranslationUnit tu, model::ParsedModule& out,
-                         bool all) {
+                         bool all, int base_depth = 0) {
   unsigned n = clang_getNumDiagnostics(tu);
   for (unsigned i = 0; i < n; ++i) {
     CXDiagnostic d = clang_getDiagnostic(tu, i);
     if (!is_unused_argument_diagnostic(d)) {
       if (all) {
-        collect_one(d, 0, out);
+        collect_one(d, base_depth, out);
       } else if (clang_getDiagnosticSeverity(d) >= CXDiagnostic_Error) {
         // Deliberately flat: without `all`, notes are dropped and only the
         // top-level message is kept, exactly as before this option existed.
         out.diagnostics.push_back(model::Diagnostic{
             .severity = static_cast<int>(clang_getDiagnosticSeverity(d)),
+            .depth = base_depth,
             .text = to_string(clang_formatDiagnostic(
                 d, clang_defaultDiagnosticDisplayOptions()))});
       }
@@ -357,11 +369,237 @@ void collect_diagnostics(CXTranslationUnit tu, model::ParsedModule& out,
   }
 }
 
+// Spelling of a CXErrorCode, so a parse failure names the exact refusal
+// libclang returned instead of hiding it behind one generic message.
+const char* error_code_name(int code) {
+  switch (static_cast<CXErrorCode>(code)) {
+    case CXError_Success:
+      return "CXError_Success";
+    case CXError_Failure:
+      return "CXError_Failure";
+    case CXError_Crashed:
+      return "CXError_Crashed";
+    case CXError_InvalidArguments:
+      return "CXError_InvalidArguments";
+    case CXError_ASTReadError:
+      return "CXError_ASTReadError";
+  }
+  return "unrecognised CXErrorCode";
+}
+
+// Renders `args` as a copy-pasteable command tail, quoting anything that would
+// not survive a shell round trip.
+std::string join_args(const std::vector<std::string>& args) {
+  std::string joined;
+  for (const auto& a : args) {
+    if (!joined.empty()) joined += ' ';
+    if (a.empty() || a.find_first_of(" \t\"'\\") != std::string::npos) {
+      joined += '"';
+      for (char c : a) {
+        if (c == '"' || c == '\\') joined += '\\';
+        joined += c;
+      }
+      joined += '"';
+    } else {
+      joined += a;
+    }
+  }
+  return joined;
+}
+
+// Appends an explanatory record nested at `depth` under the diagnostic it
+// belongs to, formatted the way libclang formats its own note chains.
+void push_note(model::ParsedModule& out, int depth, std::string text) {
+  out.diagnostics.push_back(model::Diagnostic{.severity = model::kSeverityNote,
+                                              .depth = depth,
+                                              .text = "note: " + std::move(text)});
+}
+
+// Whether `arg` is a source file the driver would treat as an input, i.e. an
+// existing file with a source extension that is not `path` itself. libclang
+// creates no translation unit for a command with two inputs, and a compilation
+// database entry whose source file is spelled differently from the path we
+// looked it up with is the way that happens in practice — so it is worth
+// pointing at explicitly.
+bool names_second_input(const std::string& arg, const std::string& path) {
+  static const std::vector<std::string> kSourceExtensions = {
+      ".c", ".cc", ".cp", ".cpp", ".cxx", ".c++", ".C", ".CPP",
+      ".m", ".mm", ".S",  ".s",   ".i",   ".ii",  ".cu"};
+  if (arg.empty() || arg.front() == '-') return false;
+  const std::filesystem::path candidate(arg);
+  const std::string ext = candidate.extension().string();
+  if (std::find(kSourceExtensions.begin(), kSourceExtensions.end(), ext) ==
+      kSourceExtensions.end()) {
+    return false;
+  }
+  std::error_code ec;
+  if (!std::filesystem::exists(candidate, ec) || ec) return false;
+  // `equivalent` fails when `path` itself is missing — and an existing source
+  // file in the argv is a second input either way, so a failed comparison
+  // still counts.
+  const bool same =
+      std::filesystem::equivalent(candidate, std::filesystem::path(path), ec) &&
+      !ec;
+  return !same;
+}
+
+// Why `path` cannot be handed to a compiler at all, or an empty string when the
+// file itself is fine. Checked because a missing or unreadable input is the
+// single most common reason the driver produces no compiler job — and the one
+// case where libclang's silence is most misleading.
+std::string input_file_problem(const std::string& path) {
+  std::error_code ec;
+  const std::filesystem::file_status status = std::filesystem::status(path, ec);
+  // The status decides, not `ec`: libstdc++ reports a missing file as ENOENT
+  // while the standard has it clear the error, so `ec` is only consulted for
+  // what the status cannot describe (type `none` — an unsearchable parent
+  // directory, say).
+  if (status.type() == std::filesystem::file_type::not_found) {
+    return "the input file does not exist";
+  }
+  if (status.type() == std::filesystem::file_type::none) {
+    return "the input file cannot be examined: " + ec.message();
+  }
+  if (std::filesystem::is_directory(status)) {
+    return "the input path is a directory, not a file";
+  }
+  std::ifstream probe(path, std::ios::binary);
+  if (!probe) return "the input file exists but cannot be opened for reading";
+  return {};
+}
+
+// Reports a batch member that libclang never opened while parsing the umbrella
+// translation unit. Without this the input was simply absent from the log — it
+// produced no symbols and no message, which reads as "nothing to document"
+// rather than "this never got parsed".
+void report_unopened_member(const std::string& path,
+                            const std::string& umbrella,
+                            model::ParsedModule& out) {
+  out.diagnostics.push_back(model::Diagnostic{
+      .severity = model::kSeverityError,
+      .depth = 0,
+      .text = "failed to parse: " + path +
+              ": libclang never opened this file while parsing its umbrella "
+              "translation unit",
+      .file = path});
+
+  const std::string problem = input_file_problem(path);
+  if (!problem.empty()) {
+    push_note(out, 1, problem);
+  } else {
+    // The `#include` that failed is attributed to the synthetic main file, so
+    // point at it by name rather than leaving the reader to guess which of the
+    // batch's diagnostics belongs to this member.
+    push_note(out, 1,
+              "the file exists; the diagnostic that stopped the '#include' is "
+              "reported against the umbrella main file '" +
+                  umbrella + "' elsewhere in this log");
+  }
+}
+
 }  // namespace
+
+void Parser::report_parse_failure(const std::string& path, int error_code,
+                                  const std::vector<std::string>& args,
+                                  bool args_from_compile_db,
+                                  model::ParsedModule& out) {
+  out.diagnostics.push_back(model::Diagnostic{
+      .severity = model::kSeverityError,
+      .depth = 0,
+      .text = "failed to parse: " + path +
+              ": libclang created no translation unit (" +
+              error_code_name(error_code) + ")",
+      .file = path});
+
+  // The C API drops the driver's diagnostics along with the AST unit it failed
+  // to build, so state up front that the notes below are clangquill's
+  // reconstruction rather than clang's own account of the failure.
+  push_note(out, 1,
+            "libclang reports no diagnostics when it cannot create a "
+            "translation unit; the notes below are clangquill's diagnosis");
+
+  const std::string problem = input_file_problem(path);
+  if (!problem.empty()) push_note(out, 1, problem);
+
+  for (const auto& arg : args) {
+    if (names_second_input(arg, path)) {
+      push_note(out, 1,
+                "argument '" + arg +
+                    "' names a second input file; libclang creates no "
+                    "translation unit for a command with more than one input");
+    }
+  }
+
+  push_note(out, 1,
+            std::string("clang arguments (") +
+                (args_from_compile_db ? "from the compilation database"
+                                      : "from the configured -std/-I/-D flags") +
+                "): " + join_args(args));
+
+  // A file that is not there cannot be parsed under any flags, and re-parsing
+  // it would only produce the same silence.
+  if (!problem.empty()) return;
+
+  // Everything above is inference. This is the part that gets clang's real
+  // complaints about the file into the log: parse it again under flags known to
+  // be well formed, so libclang does build a translation unit and its
+  // diagnostics become reachable. Worth the second parse because it only
+  // happens for an input that has otherwise yielded nothing at all.
+  //
+  // Skipped when the failing flags already were the fallback ones: the retry
+  // would be byte-for-byte the same command and fail the same way.
+  if (!args_from_compile_db) return;
+
+  const std::vector<std::string> retry_args = default_args();
+  std::vector<const char*> retry_argv;
+  retry_argv.reserve(retry_args.size());
+  for (const auto& a : retry_args) retry_argv.push_back(a.c_str());
+
+  unsigned flags = CXTranslationUnit_SkipFunctionBodies |
+                   CXTranslationUnit_DetailedPreprocessingRecord;
+  if (options_.keep_going) flags |= CXTranslationUnit_KeepGoing;
+
+  CXTranslationUnit tu = nullptr;
+  CXErrorCode rc = clang_parseTranslationUnit2(
+      as_index(index_), path.c_str(), retry_argv.data(),
+      static_cast<int>(retry_argv.size()), nullptr, 0, flags, &tu);
+  if (rc != CXError_Success || tu == nullptr) {
+    if (tu) clang_disposeTranslationUnit(tu);
+    push_note(out, 1,
+              std::string("re-parsing with '") + join_args(retry_args) +
+                  "' failed the same way (" + error_code_name(rc) +
+                  "), so the input itself — not the compilation database entry "
+                  "— is what libclang refuses");
+    return;
+  }
+  TuGuard guard{tu};
+
+  // Collected aside so the introduction is only written when there is
+  // something to introduce.
+  model::ParsedModule recovered;
+  collect_diagnostics(tu, recovered, options_.capture_all_diagnostics,
+                      /*base_depth=*/2);
+  if (recovered.diagnostics.empty()) {
+    push_note(out, 1,
+              std::string("re-parsing with '") + join_args(retry_args) +
+                  "' produced no diagnostics: the file is fine on its own, so "
+                  "the compile flags are what libclang rejected");
+    return;
+  }
+
+  push_note(out, 1,
+            std::string("re-parsed with '") + join_args(retry_args) +
+                "' to recover libclang's own diagnostics; they describe the "
+                "file under those flags, not under the project's build:");
+  for (auto& d : recovered.diagnostics) {
+    out.diagnostics.push_back(std::move(d));
+  }
+}
 
 bool Parser::parse_file(const std::string& path, model::ParsedModule& out,
                         std::vector<std::string>* tu_files) {
-  std::vector<std::string> args = build_args(path);
+  bool args_from_compile_db = false;
+  std::vector<std::string> args = build_args(path, &args_from_compile_db);
   report_compile_db_failure(out);
   std::vector<const char*> argv;
   argv.reserve(args.size());
@@ -376,9 +614,15 @@ bool Parser::parse_file(const std::string& path, model::ParsedModule& out,
       as_index(index_), path.c_str(), argv.data(),
       static_cast<int>(argv.size()), nullptr, 0, flags, &tu);
   if (rc != CXError_Success || tu == nullptr) {
-    out.diagnostics.push_back(
-        model::Diagnostic{.text = "failed to parse: " + path});
-    if (tu) clang_disposeTranslationUnit(tu);
+    // Drain whatever the half-built unit does carry before reporting: libclang
+    // leaves `tu` null on every failure path it documents, but a future version
+    // that hands one back should not have its diagnostics thrown away.
+    if (tu) {
+      collect_diagnostics(tu, out, /*all=*/true);
+      clang_disposeTranslationUnit(tu);
+    }
+    report_parse_failure(path, static_cast<int>(rc), args, args_from_compile_db,
+                         out);
     return false;
   }
   TuGuard guard{tu};
@@ -470,20 +714,26 @@ bool Parser::parse_batch(const std::vector<std::string>& paths,
   visit_translation_unit(clang_getTranslationUnitCursor(tu), mains,
                          /*trust_main_file=*/false, out);
 
+  // Checked unconditionally — not just when a caller asked for the per-member
+  // sinks — because a member that never got parsed has to reach the log either
+  // way.
   bool all_ok = true;
-  if (member_files != nullptr || member_ok != nullptr) {
-    auto edges = include_edges(tu);
-    for (std::size_t i = 0; i < paths.size(); ++i) {
-      // A member libclang never opened (missing file, broken include) parsed
-      // nothing; report it like a per-file hard failure.
-      CXFile file = clang_getFile(tu, abs[i].c_str());
-      bool entered = file != nullptr;
-      if (member_ok != nullptr) (*member_ok)[i] = entered;
-      all_ok = all_ok && entered;
-      if (member_files != nullptr && entered) {
-        (*member_files)[i] =
-            include_closure(edges, to_string(clang_getFileName(file)));
-      }
+  std::unordered_map<std::string, std::vector<std::string>> edges;
+  if (member_files != nullptr) edges = include_edges(tu);
+  for (std::size_t i = 0; i < paths.size(); ++i) {
+    // A member libclang never opened (missing file, broken include) parsed
+    // nothing; report it like a per-file hard failure.
+    CXFile file = clang_getFile(tu, abs[i].c_str());
+    const bool entered = file != nullptr;
+    if (member_ok != nullptr) (*member_ok)[i] = entered;
+    all_ok = all_ok && entered;
+    if (!entered) {
+      report_unopened_member(paths[i], umbrella, out);
+      continue;
+    }
+    if (member_files != nullptr) {
+      (*member_files)[i] =
+          include_closure(edges, to_string(clang_getFileName(file)));
     }
   }
   return all_ok;

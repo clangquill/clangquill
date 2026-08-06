@@ -92,6 +92,51 @@ Things worth knowing:
 - Put the log outside `output_dir` — `_build/` is a good spot, since it is
   usually already ignored by version control.
 
+### When an input cannot be parsed at all
+
+A `failed to parse` entry is a different animal from an ordinary diagnostic:
+libclang refused to build a translation unit for the file, and in that case it
+hands back **no diagnostics whatsoever** — the driver's own complaints die with
+the half-built unit and cannot be reached through the C API. A bare "failed to
+parse" line would therefore be all the log could ever say about the files that
+need explaining most.
+
+So clangquill reconstructs the diagnosis and nests it under the failure:
+
+```text
+failed to parse: /src/oasys/core/cmake/compiler_info.h: libclang created no translation unit (CXError_ASTReadError)
+  note: libclang reports no diagnostics when it cannot create a translation unit; the notes below are clangquill's diagnosis
+  note: argument '/src/benchmarks/other.cpp' names a second input file; libclang creates no translation unit for a command with more than one input
+  note: clang arguments (from the compilation database): --driver-mode=g++ -std=c++20 -DOASYS_CORE=1 -c /src/benchmarks/other.cpp -xc++
+  note: re-parsed with '-std=c++20 -xc++' to recover libclang's own diagnostics; they describe the file under those flags, not under the project's build:
+    /src/oasys/core/cmake/compiler_info.h:2:10: error: 'oasys/core/generated_config.h' file not found
+```
+
+The notes cover, in order:
+
+- the exact `CXErrorCode` libclang returned;
+- whether the input is missing, unreadable, or a directory;
+- any argument that names a **second** input file — libclang builds no unit for
+  a command with more than one input, which is how a `compile_commands.json`
+  entry usually breaks a header parse;
+- the full argument list, and whether it came from the compilation database or
+  from the `std`/`include_dirs`/`defines` options;
+- when the flags came from the database, the diagnostics from a re-parse under
+  clangquill's own flags. That second parse exists purely to make the
+  compiler's account of the file reachable — its results are never used for
+  documentation, and it is skipped when the file is missing or when the failing
+  flags already were the fallback ones (the retry would be the same command).
+  If it reports nothing, the file is fine on its own and the flags are what
+  libclang rejected.
+
+Only the `failed to parse` line itself is a Sphinx warning; the notes go to the
+log alone.
+
+Umbrella batching has its own version of this: a member file libclang never
+opened is reported as `failed to parse: … libclang never opened this file while
+parsing its umbrella translation unit`, with the `#include` failure itself
+logged against the batch's synthetic main file.
+
 ### Suppressing warnings
 
 Every warning the extension emits carries a subtype, so a `-W` build can
