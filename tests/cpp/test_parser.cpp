@@ -794,6 +794,82 @@ TEST_CASE("a file that parses alone blames the compile flags", "[parser]") {
   fs::remove_all(dir);
 }
 
+TEST_CASE("the failure line alone carries the cause", "[parser]") {
+  // Notes reach the diagnostics log only, and that log is opt-in — so a build
+  // without one must still learn *why* from the one record it does see. This is
+  // the contract that keeps the console warning actionable on its own.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-headline";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.hpp") << "#include \"absent.hpp\"\n";
+  std::ofstream(dir / "other.cpp") << "int other() { return 1; }\n";
+  {
+    std::ofstream db(dir / "compile_commands.json");
+    db << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"clang++\", "
+          "\"-std=c++20\", \"-c\", \"widget.hpp\", \""
+       << (dir / "other.cpp").string() << "\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  // Explicitly *off*: the headline must not depend on the log being enabled.
+  opts.capture_all_diagnostics = false;
+  model::ParsedModule mod;
+  CHECK_FALSE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+
+  REQUIRE_FALSE(mod.diagnostics.empty());
+  const model::Diagnostic& headline = mod.diagnostics.front();
+  REQUIRE(headline.depth == 0);
+  CHECK(headline.text.find("names a second input file") != std::string::npos);
+  CHECK(headline.text.find("-std=c++20") != std::string::npos);
+  // And libclang's real complaint about the source, recovered by the re-parse.
+  CHECK(headline.text.find("'absent.hpp' file not found") != std::string::npos);
+  // One line: a multi-line record would break every consumer that treats a
+  // diagnostic as one console warning.
+  CHECK(headline.text.find('\n') == std::string::npos);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("a long compile command is elided on the failure line", "[parser]") {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-headline-long";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.hpp") << "inline int widget_value() { return 1; }\n";
+  std::ofstream(dir / "other.cpp") << "int other() { return 1; }\n";
+  {
+    std::ofstream db(dir / "compile_commands.json");
+    db << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"clang++\"";
+    for (int i = 0; i < 60; ++i) db << ", \"-DFLAG_" << i << "=1\"";
+    db << ", \"-c\", \"widget.hpp\", \"" << (dir / "other.cpp").string()
+       << "\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  model::ParsedModule mod;
+  CHECK_FALSE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+
+  REQUIRE_FALSE(mod.diagnostics.empty());
+  const std::string& headline = mod.diagnostics.front().text;
+  CHECK(headline.find("chars elided") != std::string::npos);
+  // Both ends survive — the head identifies the command, the tail keeps the
+  // trailing arguments (here the second input that caused the failure) — while
+  // the middle is dropped.
+  CHECK(headline.find("-DFLAG_0=1") != std::string::npos);
+  CHECK(headline.find("-xc++") != std::string::npos);
+  CHECK(headline.find("-DFLAG_30=1") == std::string::npos);
+  // The note keeps every flag, however long the command.
+  const std::string report = failure_report(mod);
+  CHECK(report.find("-DFLAG_30=1") != std::string::npos);
+
+  fs::remove_all(dir);
+}
+
 TEST_CASE("a batch member libclang never opened is reported", "[parser]") {
   // Umbrella batching left this case silent: the input produced no symbols and
   // no message, which reads as "nothing to document" rather than "never

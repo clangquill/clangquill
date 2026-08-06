@@ -837,6 +837,31 @@ def test_error_notes_are_logged_indented_under_their_parent(project: Path) -> No
 
 
 @requires_libclang
+def test_a_failed_parse_explains_itself_without_a_log(project: Path) -> None:
+    # The diagnostics log is opt-in, so the cause cannot live only there: a
+    # build with no log configured still has to learn why the file failed from
+    # the console warning alone.
+    (project / "demo.hpp").write_text('#include "absent.hpp"\n')
+    (project / "other.cpp").write_text("int other() { return 1; }\n")
+    entry = {
+        "directory": str(project),
+        "file": "demo.hpp",
+        "arguments": ["clang++", "-std=c++20", "-c", "demo.hpp", str(project / "other.cpp")],
+    }
+    (project / "compile_commands.json").write_text(json.dumps([entry]))
+    config = Config(input=["demo.hpp"], output_dir="api", compile_commands=".")
+    result = build(config, base_dir=project)
+
+    assert result.diagnostics_log is None
+    assert len(result.diagnostics) == 1
+    warning = result.diagnostics[0]
+    assert "names a second input file" in warning
+    assert "-std=c++20" in warning
+    assert "'absent.hpp' file not found" in warning
+    assert "\n" not in warning
+
+
+@requires_libclang
 def test_a_failed_parse_explains_itself_in_the_log(project: Path) -> None:
     # libclang hands back no translation unit — and with it no diagnostics at
     # all — when it refuses a command, so without clangquill's own diagnosis a
@@ -873,9 +898,9 @@ def test_a_failed_parse_explains_itself_in_the_log(project: Path) -> None:
     assert any("names a second input file" in line for line in group)
     assert any("-std=c++20" in line and "compilation database" in line for line in group)
     # The recovered diagnostics sit one level deeper than the note introducing
-    # them, so the log shows they came from a different command line.
-    recovered = next(line for line in group if "redefinition" in line)
-    assert recovered.startswith("    ")
+    # them, so the log shows they came from a different command line. (The
+    # headline quotes the first of them too, hence the indentation filter.)
+    assert any(line.startswith("    ") and "redefinition" in line for line in group)
     # Both halves of the contract: the failure reaches the console stream, the
     # notes explaining it do not.
     assert any("failed to parse:" in line for line in result.diagnostics)

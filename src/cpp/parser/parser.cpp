@@ -407,6 +407,29 @@ std::string join_args(const std::vector<std::string>& args) {
   return joined;
 }
 
+// Longest argument list carried on a failure's headline; the untruncated list
+// is always a note below it. Chosen so a realistic compile command survives
+// with both ends intact on one terminal line or two.
+constexpr std::size_t kHeadlineArgsLimit = 240;
+
+// `text` with its middle replaced by a count of what was dropped, when it
+// exceeds `limit`. Keeps both ends, which is where a compile command carries
+// what identifies it.
+std::string elide_middle(const std::string& text, std::size_t limit) {
+  if (text.size() <= limit) return text;
+  const std::size_t keep = limit / 2;
+  return text.substr(0, keep) + " …(" +
+         std::to_string(text.size() - 2 * keep) + " chars elided)… " +
+         text.substr(text.size() - keep);
+}
+
+// The first line of `text`, for quoting a libclang diagnostic inside a
+// one-line message (a formatted diagnostic can carry an include stack).
+std::string first_line(const std::string& text) {
+  const std::size_t nl = text.find('\n');
+  return nl == std::string::npos ? text : text.substr(0, nl);
+}
+
 // Appends an explanatory record nested at `depth` under the diagnostic it
 // belongs to, formatted the way libclang formats its own note chains.
 void push_note(model::ParsedModule& out, int depth, std::string text) {
@@ -475,15 +498,21 @@ std::string input_file_problem(const std::string& path) {
 void report_unopened_member(const std::string& path,
                             const std::string& umbrella,
                             model::ParsedModule& out) {
+  const std::string problem = input_file_problem(path);
+  // Like report_parse_failure, the cause goes on the headline: the notes reach
+  // the diagnostics log only, and the console is where most people read this.
   out.diagnostics.push_back(model::Diagnostic{
       .severity = model::kSeverityError,
       .depth = 0,
       .text = "failed to parse: " + path +
               ": libclang never opened this file while parsing its umbrella "
-              "translation unit",
+              "translation unit" +
+              (problem.empty()
+                   ? "; see the '#include' error reported against '" + umbrella +
+                         "'"
+                   : "; " + problem),
       .file = path});
 
-  const std::string problem = input_file_problem(path);
   if (!problem.empty()) {
     push_note(out, 1, problem);
   } else {
@@ -503,94 +532,126 @@ void Parser::report_parse_failure(const std::string& path, int error_code,
                                   const std::vector<std::string>& args,
                                   bool args_from_compile_db,
                                   model::ParsedModule& out) {
-  out.diagnostics.push_back(model::Diagnostic{
-      .severity = model::kSeverityError,
-      .depth = 0,
-      .text = "failed to parse: " + path +
-              ": libclang created no translation unit (" +
-              error_code_name(error_code) + ")",
-      .file = path});
+  // Everything is worked out before the first record is pushed, because the
+  // headline carries the verdict: notes only reach the diagnostics log, and a
+  // build without one configured would otherwise see "no translation unit" and
+  // nothing about why.
+  const std::string problem = input_file_problem(path);
 
-  // The C API drops the driver's diagnostics along with the AST unit it failed
-  // to build, so state up front that the notes below are clangquill's
-  // reconstruction rather than clang's own account of the failure.
+  std::vector<std::string> second_inputs;
+  for (const auto& arg : args) {
+    if (names_second_input(arg, path)) second_inputs.push_back(arg);
+  }
+
+  const std::string flag_source = args_from_compile_db
+                                      ? "from the compilation database"
+                                      : "from the configured -std/-I/-D flags";
+
+  // libclang throws the driver's own diagnostics away with the AST unit it
+  // failed to build -- the C API cannot reach them -- so the only way to get
+  // the compiler's account of this file is to parse it again under flags known
+  // to be well formed. Worth the second parse: it happens only for an input
+  // that has otherwise yielded nothing at all.
+  //
+  // Skipped when the file is not there to parse, and when the failing flags
+  // already were the fallback ones (the retry would repeat the same command).
+  const std::vector<std::string> retry_args = default_args();
+  const bool retry = problem.empty() && args_from_compile_db;
+  model::ParsedModule recovered;
+  std::string recovery_note;   // what the retry established, for the notes
+  std::string recovery_clause; // its first error, for the headline
+  if (retry) {
+    std::vector<const char*> retry_argv;
+    retry_argv.reserve(retry_args.size());
+    for (const auto& a : retry_args) retry_argv.push_back(a.c_str());
+
+    unsigned flags = CXTranslationUnit_SkipFunctionBodies |
+                     CXTranslationUnit_DetailedPreprocessingRecord;
+    if (options_.keep_going) flags |= CXTranslationUnit_KeepGoing;
+
+    CXTranslationUnit tu = nullptr;
+    CXErrorCode rc = clang_parseTranslationUnit2(
+        as_index(index_), path.c_str(), retry_argv.data(),
+        static_cast<int>(retry_argv.size()), nullptr, 0, flags, &tu);
+    if (rc != CXError_Success || tu == nullptr) {
+      if (tu) clang_disposeTranslationUnit(tu);
+      recovery_note = "re-parsing with '" + join_args(retry_args) +
+                      "' failed the same way (" + error_code_name(rc) +
+                      "), so the input itself — not the compilation database "
+                      "entry — is what libclang refuses";
+    } else {
+      TuGuard guard{tu};
+      // Always the full set here, whatever capture_all_diagnostics says: these
+      // are the only diagnostics this input will ever produce, and dropping
+      // the warnings among them would hide the explanation again.
+      collect_diagnostics(tu, recovered, /*all=*/true, /*base_depth=*/2);
+      for (const auto& d : recovered.diagnostics) {
+        if (d.severity >= model::kSeverityError) {
+          recovery_clause = "parsed on its own it reports: " + first_line(d.text);
+          break;
+        }
+      }
+      recovery_note =
+          recovered.diagnostics.empty()
+              ? "re-parsing with '" + join_args(retry_args) +
+                    "' produced no diagnostics: the file is fine on its own, so "
+                    "the compile flags are what libclang rejected"
+              : "re-parsed with '" + join_args(retry_args) +
+                    "' to recover libclang's own diagnostics; they describe the "
+                    "file under those flags, not under the project's build:";
+      if (recovered.diagnostics.empty() && recovery_clause.empty()) {
+        recovery_clause = "it parses cleanly on its own, so the flags are what "
+                          "libclang rejected";
+      }
+    }
+  }
+
+  // The headline: the refusal, then the single most decisive fact behind it,
+  // then whatever the compiler itself had to say. The argument list rides along
+  // whenever the flags are implicated, elided in the middle so a sixty-flag
+  // command stays one readable line -- the full list is a note below.
+  std::string headline = "failed to parse: " + path +
+                         ": libclang created no translation unit (" +
+                         error_code_name(error_code) + ")";
+  if (!problem.empty()) {
+    // A missing or unreadable input fails under any flags, so listing them
+    // would only bury the one fact that matters.
+    headline += "; " + problem;
+  } else {
+    if (!second_inputs.empty()) {
+      headline += "; argument '" + second_inputs.front() +
+                  "' names a second input file (libclang creates no "
+                  "translation unit for a command with more than one input)";
+    }
+    headline += "; flags " + flag_source + ": " +
+                elide_middle(join_args(args), kHeadlineArgsLimit);
+    if (!recovery_clause.empty()) headline += "; " + recovery_clause;
+  }
+
+  out.diagnostics.push_back(model::Diagnostic{.severity = model::kSeverityError,
+                                              .depth = 0,
+                                              .text = headline,
+                                              .file = path});
+
+  // The notes repeat the headline's findings in full -- unelided arguments,
+  // every offending argument rather than the first, and the recovered
+  // diagnostics themselves.
   push_note(out, 1,
             "libclang reports no diagnostics when it cannot create a "
             "translation unit; the notes below are clangquill's diagnosis");
 
-  const std::string problem = input_file_problem(path);
   if (!problem.empty()) push_note(out, 1, problem);
 
-  for (const auto& arg : args) {
-    if (names_second_input(arg, path)) {
-      push_note(out, 1,
-                "argument '" + arg +
-                    "' names a second input file; libclang creates no "
-                    "translation unit for a command with more than one input");
-    }
-  }
-
-  push_note(out, 1,
-            std::string("clang arguments (") +
-                (args_from_compile_db ? "from the compilation database"
-                                      : "from the configured -std/-I/-D flags") +
-                "): " + join_args(args));
-
-  // A file that is not there cannot be parsed under any flags, and re-parsing
-  // it would only produce the same silence.
-  if (!problem.empty()) return;
-
-  // Everything above is inference. This is the part that gets clang's real
-  // complaints about the file into the log: parse it again under flags known to
-  // be well formed, so libclang does build a translation unit and its
-  // diagnostics become reachable. Worth the second parse because it only
-  // happens for an input that has otherwise yielded nothing at all.
-  //
-  // Skipped when the failing flags already were the fallback ones: the retry
-  // would be byte-for-byte the same command and fail the same way.
-  if (!args_from_compile_db) return;
-
-  const std::vector<std::string> retry_args = default_args();
-  std::vector<const char*> retry_argv;
-  retry_argv.reserve(retry_args.size());
-  for (const auto& a : retry_args) retry_argv.push_back(a.c_str());
-
-  unsigned flags = CXTranslationUnit_SkipFunctionBodies |
-                   CXTranslationUnit_DetailedPreprocessingRecord;
-  if (options_.keep_going) flags |= CXTranslationUnit_KeepGoing;
-
-  CXTranslationUnit tu = nullptr;
-  CXErrorCode rc = clang_parseTranslationUnit2(
-      as_index(index_), path.c_str(), retry_argv.data(),
-      static_cast<int>(retry_argv.size()), nullptr, 0, flags, &tu);
-  if (rc != CXError_Success || tu == nullptr) {
-    if (tu) clang_disposeTranslationUnit(tu);
+  for (const auto& arg : second_inputs) {
     push_note(out, 1,
-              std::string("re-parsing with '") + join_args(retry_args) +
-                  "' failed the same way (" + error_code_name(rc) +
-                  "), so the input itself — not the compilation database entry "
-                  "— is what libclang refuses");
-    return;
-  }
-  TuGuard guard{tu};
-
-  // Collected aside so the introduction is only written when there is
-  // something to introduce.
-  model::ParsedModule recovered;
-  collect_diagnostics(tu, recovered, options_.capture_all_diagnostics,
-                      /*base_depth=*/2);
-  if (recovered.diagnostics.empty()) {
-    push_note(out, 1,
-              std::string("re-parsing with '") + join_args(retry_args) +
-                  "' produced no diagnostics: the file is fine on its own, so "
-                  "the compile flags are what libclang rejected");
-    return;
+              "argument '" + arg +
+                  "' names a second input file; libclang creates no "
+                  "translation unit for a command with more than one input");
   }
 
-  push_note(out, 1,
-            std::string("re-parsed with '") + join_args(retry_args) +
-                "' to recover libclang's own diagnostics; they describe the "
-                "file under those flags, not under the project's build:");
+  push_note(out, 1, "clang arguments (" + flag_source + "): " + join_args(args));
+
+  if (!recovery_note.empty()) push_note(out, 1, recovery_note);
   for (auto& d : recovered.diagnostics) {
     out.diagnostics.push_back(std::move(d));
   }
