@@ -412,15 +412,32 @@ std::string join_args(const std::vector<std::string>& args) {
 // with both ends intact on one terminal line or two.
 constexpr std::size_t kHeadlineArgsLimit = 240;
 
+// Largest index <= `at` that does not fall inside a UTF-8 sequence. Cutting a
+// multibyte path or flag in half would put invalid UTF-8 into a diagnostic that
+// downstream consumers (Sphinx, JSON, the log) must be able to encode.
+std::size_t utf8_boundary(const std::string& text, std::size_t at) {
+  while (at > 0 && (static_cast<unsigned char>(text[at]) & 0xC0) == 0x80) --at;
+  return at;
+}
+
 // `text` with its middle replaced by a count of what was dropped, when it
 // exceeds `limit`. Keeps both ends, which is where a compile command carries
-// what identifies it.
+// what identifies it. The result honours `limit`: the marker's own length —
+// including the widest the dropped-byte count could ever be — is reserved
+// before the kept ends are measured.
 std::string elide_middle(const std::string& text, std::size_t limit) {
   if (text.size() <= limit) return text;
-  const std::size_t keep = limit / 2;
-  return text.substr(0, keep) + " …(" +
-         std::to_string(text.size() - 2 * keep) + " chars elided)… " +
-         text.substr(text.size() - keep);
+  static constexpr const char* kOpen = " …(";
+  static constexpr const char* kClose = " bytes elided)… ";
+  const std::size_t marker =
+      std::string(kOpen).size() + std::string(kClose).size() +
+      std::to_string(text.size()).size();  // the count can be no wider
+  if (limit <= marker) return text.substr(0, utf8_boundary(text, limit));
+  const std::size_t keep = (limit - marker) / 2;
+  const std::size_t head = utf8_boundary(text, keep);
+  const std::size_t tail = utf8_boundary(text, text.size() - keep);
+  return text.substr(0, head) + kOpen + std::to_string(tail - head) + kClose +
+         text.substr(tail);
 }
 
 // The first line of `text`, for quoting a libclang diagnostic inside a
@@ -428,6 +445,26 @@ std::string elide_middle(const std::string& text, std::size_t limit) {
 std::string first_line(const std::string& text) {
   const std::size_t nl = text.find('\n');
   return nl == std::string::npos ? text : text.substr(0, nl);
+}
+
+// `text` with every line break escaped, so one diagnostic record stays one
+// line. Applied to a whole assembled headline rather than to each part: a
+// newline can arrive in any of them — POSIX allows one in a file name, and a
+// compilation database is free to put one in an argument — and one consumer
+// treating a record as several warnings is the failure this prevents.
+std::string single_line(std::string text) {
+  std::string out;
+  out.reserve(text.size());
+  for (char c : text) {
+    if (c == '\n') {
+      out += "\\n";
+    } else if (c == '\r') {
+      out += "\\r";
+    } else {
+      out += c;
+    }
+  }
+  return out;
 }
 
 // Appends an explanatory record nested at `depth` under the diagnostic it
@@ -504,13 +541,13 @@ void report_unopened_member(const std::string& path,
   out.diagnostics.push_back(model::Diagnostic{
       .severity = model::kSeverityError,
       .depth = 0,
-      .text = "failed to parse: " + path +
-              ": libclang never opened this file while parsing its umbrella "
-              "translation unit" +
-              (problem.empty()
-                   ? "; see the '#include' error reported against '" + umbrella +
-                         "'"
-                   : "; " + problem),
+      .text = single_line(
+          "failed to parse: " + path +
+          ": libclang never opened this file while parsing its umbrella "
+          "translation unit" +
+          (problem.empty()
+               ? "; see the '#include' error reported against '" + umbrella + "'"
+               : "; " + problem)),
       .file = path});
 
   if (!problem.empty()) {
@@ -575,10 +612,16 @@ void Parser::report_parse_failure(const std::string& path, int error_code,
         static_cast<int>(retry_argv.size()), nullptr, 0, flags, &tu);
     if (rc != CXError_Success || tu == nullptr) {
       if (tu) clang_disposeTranslationUnit(tu);
+      // Deliberately not "so the input is at fault": the fallback carries the
+      // configured -std/-I/-D and compile_args, which can be broken in their
+      // own right (an extra source file among them fails a parse exactly like
+      // the database entry did). Both command lines are out, which narrows it
+      // to what they share — no further.
       recovery_note = "re-parsing with '" + join_args(retry_args) +
-                      "' failed the same way (" + error_code_name(rc) +
-                      "), so the input itself — not the compilation database "
-                      "entry — is what libclang refuses";
+                      "' failed too (" + error_code_name(rc) +
+                      "), so the cause is either the input itself or the "
+                      "configured -std/-I/-D flags, not the compilation "
+                      "database entry alone";
     } else {
       TuGuard guard{tu};
       // Always the full set here, whatever capture_all_diagnostics says: these
@@ -628,10 +671,11 @@ void Parser::report_parse_failure(const std::string& path, int error_code,
     if (!recovery_clause.empty()) headline += "; " + recovery_clause;
   }
 
-  out.diagnostics.push_back(model::Diagnostic{.severity = model::kSeverityError,
-                                              .depth = 0,
-                                              .text = headline,
-                                              .file = path});
+  out.diagnostics.push_back(
+      model::Diagnostic{.severity = model::kSeverityError,
+                        .depth = 0,
+                        .text = single_line(headline),
+                        .file = path});
 
   // The notes repeat the headline's findings in full -- unelided arguments,
   // every offending argument rather than the first, and the recovered

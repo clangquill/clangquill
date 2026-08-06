@@ -111,8 +111,9 @@ failed to parse: /src/oasys/core/cmake/compiler_info.h: libclang created no tran
 ```
 
 It is one line, however long — every consumer treats a diagnostic as a single
-warning — and a compile command past ~240 characters keeps both ends with its
-middle elided. In the log the same findings are repeated in full, unelided, as a
+warning, with any line break in a path or argument escaped so it cannot split
+into several — and a compile command is capped at 240 bytes on the line, keeping
+both ends with its middle elided. In the log the same findings are in full, as a
 `note:` chain under the failure:
 
 ```text

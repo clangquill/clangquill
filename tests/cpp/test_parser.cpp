@@ -856,16 +856,99 @@ TEST_CASE("a long compile command is elided on the failure line", "[parser]") {
 
   REQUIRE_FALSE(mod.diagnostics.empty());
   const std::string& headline = mod.diagnostics.front().text;
-  CHECK(headline.find("chars elided") != std::string::npos);
+  CHECK(headline.find("bytes elided") != std::string::npos);
   // Both ends survive — the head identifies the command, the tail keeps the
   // trailing arguments (here the second input that caused the failure) — while
   // the middle is dropped.
   CHECK(headline.find("-DFLAG_0=1") != std::string::npos);
   CHECK(headline.find("-xc++") != std::string::npos);
   CHECK(headline.find("-DFLAG_30=1") == std::string::npos);
+
+  // The budget covers the marker too, so the flag list on the line never
+  // exceeds it however long the real command was. The file parses cleanly by
+  // itself, which fixes the clause that follows the flags.
+  const std::string opens = "flags from the compilation database: ";
+  const std::size_t begin = headline.find(opens) + opens.size();
+  const std::size_t end = headline.find("; it parses cleanly", begin);
+  REQUIRE(end != std::string::npos);
+  CHECK(end - begin <= 240);
+
   // The note keeps every flag, however long the command.
   const std::string report = failure_report(mod);
   CHECK(report.find("-DFLAG_30=1") != std::string::npos);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("a line break in the compile command cannot split the failure line",
+          "[parser]") {
+  // A record is one warning to every consumer of it, and the log indents each
+  // line of a record's text under its parent — so a raw newline arriving from a
+  // compilation database argument (or a POSIX file name, which may contain one)
+  // would turn one failure into several.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-headline-newline";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.hpp") << "inline int widget_value() { return 1; }\n";
+  std::ofstream(dir / "other.cpp") << "int other() { return 1; }\n";
+  {
+    std::ofstream db(dir / "compile_commands.json");
+    db << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"clang++\", "
+          "\"-std=c++20\", \"-DBANNER=one\\ntwo\", \"-c\", \"widget.hpp\", \""
+       << (dir / "other.cpp").string() << "\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  model::ParsedModule mod;
+  CHECK_FALSE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+
+  REQUIRE_FALSE(mod.diagnostics.empty());
+  const std::string& headline = mod.diagnostics.front().text;
+  CHECK(headline.find('\n') == std::string::npos);
+  CHECK(headline.find('\r') == std::string::npos);
+  CHECK(headline.find("-DBANNER=one\\ntwo") != std::string::npos);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("a fallback re-parse that also fails does not blame the input",
+          "[parser]") {
+  // The fallback carries the configured -std/-I/-D and compile_args, which can
+  // be broken in their own right — here an extra source file among them fails
+  // the retry exactly as the database entry failed the first parse. Concluding
+  // "the input is what libclang refuses" would then be wrong.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-retry-inconclusive";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.hpp") << "inline int widget_value() { return 1; }\n";
+  std::ofstream(dir / "other.cpp") << "int other() { return 1; }\n";
+  {
+    std::ofstream db(dir / "compile_commands.json");
+    db << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"clang++\", "
+          "\"-std=c++20\", \"-c\", \"widget.hpp\", \""
+       << (dir / "other.cpp").string() << "\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  opts.capture_all_diagnostics = true;
+  // A second input smuggled into the fallback flags, so the retry fails too.
+  opts.extra_args.push_back((dir / "other.cpp").string());
+  model::ParsedModule mod;
+  CHECK_FALSE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+
+  const std::string report = failure_report(mod);
+  CHECK(report.find("failed too") != std::string::npos);
+  CHECK(report.find("either the input itself or the configured -std/-I/-D "
+                    "flags") != std::string::npos);
+  // The file is never accused on its own.
+  CHECK(report.find("the input itself — not the compilation database") ==
+        std::string::npos);
 
   fs::remove_all(dir);
 }
