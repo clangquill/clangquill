@@ -57,7 +57,7 @@ if(CLANGQUILL_USE_VCPKG AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
             FetchContent_Declare(
                 vcpkg
                 GIT_REPOSITORY https://github.com/microsoft/vcpkg/
-                GIT_TAG 2026.06.01
+                GIT_TAG f3e10653cc27d62a37a3763cd84b38bca07c6075 # tag 2026.06.01
                 SOURCE_DIR ${VCPKG_ROOT})
             FetchContent_MakeAvailable(vcpkg)
             message(STATUS "Setting up vcpkg for re-use in .vcpkg-checkout (this may take some time) - done")
