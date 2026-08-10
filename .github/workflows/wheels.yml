@@ -31,7 +31,7 @@ jobs:
                   # full history so setuptools_scm derives the version
           fetch-depth: 0
       - name: Build manylinux wheels
-        uses: pypa/cibuildwheel@v4.1.1
+        uses: pypa/cibuildwheel@v4.2.0
         env:
                   # The core links sqlite3 + nlohmann-json, sourced via vcpkg
                   # inside the manylinux image (apt is unavailable there).
@@ -96,7 +96,7 @@ jobs:
                   # full history so setuptools_scm derives the version
           fetch-depth: 0
       - name: Build Windows wheels
-        uses: pypa/cibuildwheel@v4.1.1
+        uses: pypa/cibuildwheel@v4.2.0
         env:
                   # Mirrors the Linux job above: same libclang (fetched by the
                   # Windows counterpart of fetch-libclang.sh, see docs
