@@ -11,6 +11,7 @@ __pycache__/
 env/
 build/
 build-cpp/
+.vcpkg-checkout/
 develop-eggs/
 dist/
 downloads/

@@ -40,8 +40,10 @@ jobs:
         uses: pypa/cibuildwheel@v4.1.1
         env:
                   # The core links sqlite3 + nlohmann-json, sourced via vcpkg
-                  # inside the manylinux image (apt is unavailable there). vcpkg
-                  # is bootstrapped once per container in CIBW_BEFORE_ALL.
+                  # inside the manylinux image (apt is unavailable there).
+                  # CLANGQUILL_USE_VCPKG makes the CMake build fetch and
+                  # bootstrap vcpkg itself (cmake/VcpkgBootStrap.cmake), into a
+                  # .vcpkg-checkout reused by every build in the container.
                   # libclang is now bundled from the official LLVM release per
                   # ADR-0001 (self-contained libclang.so; needs manylinux_2_34).
           CIBW_BUILD: cp311-* cp312-* cp313-*
@@ -52,7 +54,7 @@ jobs:
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_34
                   # manylinux_2_28 ships unzip/tar/curl but not zip, which
                   # vcpkg's bootstrap requires; install it (a vcpkg build
-                  # prerequisite, not a C++ dependency) before bootstrapping.
+                  # prerequisite, not a C++ dependency) up front.
           CIBW_BEFORE_ALL_LINUX: >-
             dnf -y install zip unzip tar curl xz &&
             cp {project}/tools/ci/vcpkg-asset-fetch.sh /opt/vcpkg-asset-fetch.sh &&
@@ -61,18 +63,15 @@ jobs:
             cp {project}/tools/ci/llvm-version.txt /opt/llvm-version.txt &&
             chmod +x /opt/fetch-libclang.sh &&
             /opt/fetch-libclang.sh /opt/libclang &&
-            cp /opt/libclang/LICENSE.TXT {project}/LICENSE-LLVM.txt &&
-            git clone https://github.com/microsoft/vcpkg /opt/vcpkg &&
-            /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+            cp /opt/libclang/LICENSE.TXT {project}/LICENSE-LLVM.txt
            # cibuildwheel evaluates each CIBW_ENVIRONMENT value through
                   # bashlex, which rejects a bare `NAME=value` (it parses as a
-                  # shell assignment), so the toolchain define must be quoted.
+                  # shell assignment), so SKBUILD_CMAKE_DEFINE must be quoted.
                   # sqlite.org also 403s vcpkg's default downloader, so distfiles
                   # go through a browser-User-Agent script (SHA512 still checked).
           CIBW_ENVIRONMENT_LINUX: >-
-            VCPKG_ROOT=/opt/vcpkg
             LD_LIBRARY_PATH=/opt/libclang/lib
-            SKBUILD_CMAKE_DEFINE="CMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake;CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/opt/libclang"
+            SKBUILD_CMAKE_DEFINE="CLANGQUILL_USE_VCPKG=ON;CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/opt/libclang"
             X_VCPKG_ASSET_SOURCES="clear;x-script,/opt/vcpkg-asset-fetch.sh {url}
             {sha512} {dst}"
           CIBW_TEST_COMMAND: >-
@@ -110,8 +109,8 @@ jobs:
                   # One PowerShell script does the whole setup: stages the CI
                   # helper scripts at a fixed path (CIBW_ENVIRONMENT_WINDOWS
                   # gets no {project} substitution, same restriction as
-                  # CIBW_ENVIRONMENT_LINUX above), fetches libclang, and
-                  # bootstraps vcpkg.
+                  # CIBW_ENVIRONMENT_LINUX above) and fetches libclang; vcpkg
+                  # is bootstrapped by the CMake build itself.
           CIBW_BEFORE_ALL_WINDOWS: >-
             powershell -NoProfile -ExecutionPolicy Bypass
             -File {project}\tools\ci\wheel-setup-windows.ps1
@@ -121,10 +120,9 @@ jobs:
                   # dynamic CRT that Python extensions require, so libclang.dll
                   # is the only third-party DLL the wheel needs to vendor.
           CIBW_ENVIRONMENT_WINDOWS: >-
-            VCPKG_ROOT="C:\\vcpkg"
             VCPKG_TARGET_TRIPLET="x64-windows-static-md"
             PATH="C:\\libclang\\bin;$PATH"
-            SKBUILD_CMAKE_DEFINE="CMAKE_TOOLCHAIN_FILE=C:\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake;CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=C:\\libclang;VCPKG_TARGET_TRIPLET=x64-windows-static-md"
+            SKBUILD_CMAKE_DEFINE="CLANGQUILL_USE_VCPKG=ON;CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=C:\\libclang;VCPKG_TARGET_TRIPLET=x64-windows-static-md"
             X_VCPKG_ASSET_SOURCES="clear;x-script,powershell -NoProfile -ExecutionPolicy
             Bypass -File C:\\ci\\vcpkg-asset-fetch.ps1 {url}
             {sha512} {dst}"

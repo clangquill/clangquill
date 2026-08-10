@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.26...3.29)
 
+# Must run before project(): it may set CMAKE_TOOLCHAIN_FILE.
+include(cmake/VcpkgBootStrap.cmake)
+
 project(
   clangquill
   LANGUAGES CXX

@@ -5,8 +5,8 @@ Mirrors the manylinux CIBW_BEFORE_ALL_LINUX steps in the wheel workflows:
 fetches the bundled libclang, stages the CI helper scripts at a fixed path
 (CIBW_ENVIRONMENT_WINDOWS gets no {project} substitution, same restriction as
 CIBW_ENVIRONMENT_LINUX -- hence copying to a fixed path rather than
-referencing the checkout directly), and bootstraps vcpkg for the sqlite3 +
-nlohmann-json dependencies.
+referencing the checkout directly). vcpkg itself is fetched and bootstrapped
+by the CMake build (CLANGQUILL_USE_VCPKG, see cmake/VcpkgBootStrap.cmake).
 #>
 $ErrorActionPreference = "Stop"
 
@@ -20,8 +20,3 @@ Copy-Item "$repoRoot\tools\ci\llvm-version.txt" "$ciDir\llvm-version.txt" -Force
 
 & "$ciDir\fetch-libclang.ps1" -Prefix C:\libclang
 Copy-Item C:\libclang\LICENSE.TXT "$repoRoot\LICENSE-LLVM.txt" -Force
-
-if (-not (Test-Path C:\vcpkg)) {
-    git clone https://github.com/microsoft/vcpkg C:\vcpkg
-}
-& C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
