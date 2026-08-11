@@ -22,14 +22,20 @@ jobs:
     env:
       OS: ${{ matrix.config.os }}
       PYTHON: ${{ matrix.config.py }}
+          # sqlite.org 403s vcpkg's default downloader, so distfiles go through
+          # a browser-User-Agent script (SHA512 is still checked by vcpkg).
+      X_VCPKG_ASSET_SOURCES: >-
+        clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
+        {url} {sha512} {dst}
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+          # Only libclang comes from apt; sqlite3 and nlohmann-json are
+          # provided by vcpkg, bootstrapped by the CMake build itself.
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libclang-dev libsqlite3-dev nlohmann-json3-dev
+          sudo apt-get install -y --no-install-recommends libclang-dev
       - name: Install uv
         uses: astral-sh/setup-uv@v9.0.0
       - name: Set up Python
@@ -61,6 +67,12 @@ jobs:
     # core links against it and actually parses the C++23/26 dogfood header.
     runs-on: ubuntu-24.04
     name: docs (clang 22 dogfood)
+    env:
+          # sqlite.org 403s vcpkg's default downloader, so distfiles go through
+          # a browser-User-Agent script (SHA512 is still checked by vcpkg).
+      X_VCPKG_ASSET_SOURCES: >-
+        clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
+        {url} {sha512} {dst}
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -70,7 +82,7 @@ jobs:
           chmod +x llvm.sh
           sudo ./llvm.sh 22
           sudo apt-get install -y --no-install-recommends \
-            libclang-22-dev llvm-22-dev libsqlite3-dev nlohmann-json3-dev
+            libclang-22-dev llvm-22-dev
       - name: Install uv
         uses: astral-sh/setup-uv@v9.0.0
       - name: Set up Python

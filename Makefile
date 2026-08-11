@@ -19,8 +19,9 @@ format:
 docs:
 	make -C docs html
 
-# Configure, build and run the C++ Catch2 tests. Requires libclang-dev,
-# libsqlite3-dev, nlohmann-json3-dev and catch2 (or a vcpkg toolchain).
+# Configure, build and run the C++ Catch2 tests. sqlite3, nlohmann-json and
+# catch2 come from vcpkg, which the CMake build fetches and bootstraps itself
+# (into .vcpkg-checkout); only libclang-dev is needed from the system.
 cpp-test:
 	cmake -S . -B build-cpp -G Ninja \
 		-DCLANGQUILL_WITH_LIBCLANG=ON -DCLANGQUILL_BUILD_TESTS=ON \

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.26...3.29)
 
-# Must run before project(): it may set CMAKE_TOOLCHAIN_FILE.
+# Must run before project(): it sets CMAKE_TOOLCHAIN_FILE.
 include(cmake/VcpkgBootStrap.cmake)
 
 project(
@@ -28,7 +28,7 @@ execute_process(
   COMMAND_ERROR_IS_FATAL ANY)
 find_package(nanobind CONFIG REQUIRED)
 
-# --- C++ dependencies (vcpkg in CI, system packages locally) -----------------
+# --- C++ dependencies (always from vcpkg, see cmake/VcpkgBootStrap.cmake) ----
 find_package(SQLite3 REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 

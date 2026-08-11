@@ -19,18 +19,24 @@ jobs:
   build:
     name: Build docs
     runs-on: ubuntu-24.04
+    env:
+          # sqlite.org 403s vcpkg's default downloader, so distfiles go through
+          # a browser-User-Agent script (SHA512 is still checked by vcpkg).
+      X_VCPKG_ASSET_SOURCES: >-
+        clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
+        {url} {sha512} {dst}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
                   # full history so setuptools_scm derives the version
           fetch-depth: 0
       - name: Install build dependencies
-              # libclang lets the build dogfood clangquill on its own C++ headers;
-              # sqlite/nlohmann are the core's build dependencies.
+              # libclang lets the build dogfood clangquill on its own C++
+              # headers; sqlite3/nlohmann-json come from vcpkg, which the CMake
+              # build bootstraps itself.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libclang-dev libsqlite3-dev nlohmann-json3-dev
+          sudo apt-get install -y --no-install-recommends libclang-dev
       - name: Install uv
         uses: astral-sh/setup-uv@v9.0.0
       - name: Set up Python
