@@ -130,7 +130,9 @@ Nothing is timed. Three checks per project, all of which must pass:
 - **doxygen** — `doxygen` with `WARNINGS = YES` and
   `WARN_AS_ERROR = FAIL_ON_WARNINGS` exits 0 over the identical file set.
   Doxygen finishes the run before failing, so its XML is still there to compare
-  against.
+  against. Needs Doxygen **1.9.2+**: older releases ignore `FAIL_ON_WARNINGS`
+  and exit 0 however much they warned, so the check fails on them outright
+  rather than reporting a green it cannot back up.
 - **extraction** — every input file Doxygen extracted a documented entity from
   yielded a documented symbol in ClangQuill's IR too.
 

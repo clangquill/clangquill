@@ -314,8 +314,9 @@ def write_doxyfile(ctx: RepoContext, mode: str, *, strict: bool = False, warn_lo
             # FAIL_ON_WARNINGS makes doxygen exit non-zero after finishing the
             # run, so the XML is still written and can be compared even on a
             # failing project. Doxygen 1.9.2+ understands the value; an older
-            # one warns about it and falls back to NO, which the recorded
-            # doxygen version in the report makes visible.
+            # one falls back to NO and would exit 0 however much it warned,
+            # which is why verify.py checks the doxygen version rather than
+            # trusting the exit code alone.
             "WARN_AS_ERROR = FAIL_ON_WARNINGS",
             *([f"WARN_LOGFILE = {warn_log}"] if warn_log is not None else []),
         ]

@@ -287,25 +287,53 @@ def check_clangquill(ctx: RepoContext, clangquill_cmd: list[str], logs: Path) ->
 
 
 def check_doxygen(ctx: RepoContext, doxygen_cmd: list[str], logs: Path) -> tuple[Check, Path]:
-    """Run Doxygen strictly over the same file set; return the check and XML dir."""
+    """Run Doxygen strictly over the same file set; return the check and XML dir.
+
+    The XML directory is returned whatever the verdict, so the extraction check
+    can still compare against whatever Doxygen managed to write.
+    """
     warn_log = logs / "doxygen-warnings.log"
     doxyfile = write_doxyfile(ctx, "xml", strict=True, warn_log=warn_log)
     run = run_logged(doxygen_argv(doxygen_cmd, doxyfile), ctx.source_dir, logs / "doxygen.log")
     xml_dir = ctx.doxygen_out("xml") / "xml"
-    if run.exit_code == 0:
-        return Check("doxygen", passed=True, summary="no warnings"), xml_dir
     # The warn log holds the diagnostics; the run log holds whatever doxygen
     # printed around them. Prefer the former and fall back to the latter.
     detail = _tail(warn_log.read_text(encoding="utf-8", errors="replace")) if warn_log.is_file() else []
-    return (
-        Check(
-            "doxygen",
-            passed=False,
-            summary=f"doxygen exited {run.exit_code}",
-            detail=detail or _tail(run.output),
-        ),
-        xml_dir,
-    )
+    if run.exit_code != 0:
+        return (
+            Check(
+                "doxygen",
+                passed=False,
+                summary=f"doxygen exited {run.exit_code}",
+                detail=detail or _tail(run.output),
+            ),
+            xml_dir,
+        )
+    # A clean exit only means something if this doxygen can enforce the setting
+    # that was asked of it. Releases before 1.9.2 do not understand
+    # WARN_AS_ERROR = FAIL_ON_WARNINGS, treat the unknown value as NO, and exit
+    # 0 no matter how much they warned — so trusting the exit code there would
+    # report a green check for a run that never enforced anything. A version
+    # that cannot be parsed at all gets the same treatment: an unidentifiable
+    # doxygen is not evidence of a clean extraction. Recording the version in
+    # the report is not enough, because CI gates on the exit status rather than
+    # on the prose.
+    version = tool_version([*doxygen_cmd, "--version"])
+    if doxygen_release(version) < MIN_DOXYGEN_FOR_FAIL_ON_WARNINGS:
+        wanted = ".".join(str(part) for part in MIN_DOXYGEN_FOR_FAIL_ON_WARNINGS)
+        return (
+            Check(
+                "doxygen",
+                passed=False,
+                summary=(
+                    f"doxygen {version or 'of unknown version'} cannot fail on its own warnings "
+                    f"(WARN_AS_ERROR = FAIL_ON_WARNINGS needs {wanted}), so its exit code proves nothing"
+                ),
+                detail=detail,
+            ),
+            xml_dir,
+        )
+    return Check("doxygen", passed=True, summary=f"no warnings (doxygen {version})"), xml_dir
 
 
 def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
@@ -410,7 +438,12 @@ class Tools:
 
 
 def doxygen_release(version: str) -> tuple[int, ...]:
-    """Extract the ``(major, minor, patch)`` tuple from a doxygen version string."""
+    """Extract the ``(major, minor, patch)`` tuple from a doxygen version string.
+
+    An empty tuple for anything unrecognisable, which compares below every real
+    release — so an unidentifiable doxygen fails the version gate rather than
+    slipping past it.
+    """
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", version)
     return tuple(int(part) for part in match.groups()) if match else ()
 
@@ -425,9 +458,9 @@ def environment_info(tools: Tools) -> dict:
             "doxygen": doxygen,
             "libclang": libclang_version(),
         },
-        # Recorded rather than enforced: an older doxygen still runs, it just
-        # cannot fail on its own warnings, and the report has to say so instead
-        # of presenting a free pass as a green check.
+        # Surfaced in the report header so a red doxygen check on an old
+        # toolchain reads as "this doxygen cannot enforce the setting" rather
+        # than "this project warns". The verdict itself is `check_doxygen`'s.
         "doxygen_fails_on_warnings": doxygen_release(doxygen) >= MIN_DOXYGEN_FOR_FAIL_ON_WARNINGS,
     }
 
