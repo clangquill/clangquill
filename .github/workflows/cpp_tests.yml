@@ -14,14 +14,22 @@ jobs:
   ctest:
     name: C++ unit tests
     runs-on: ubuntu-24.04
+    env:
+          # sqlite.org 403s vcpkg's default downloader, so distfiles go through
+          # a browser-User-Agent script (SHA512 is still checked by vcpkg).
+      X_VCPKG_ASSET_SOURCES: >-
+        clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
+        {url} {sha512} {dst}
     steps:
       - uses: actions/checkout@v7.0.1
+            # Only the build tools and libclang come from apt: sqlite3,
+            # nlohmann-json and catch2 are provided by vcpkg, which the CMake
+            # build bootstraps itself (cmake/VcpkgBootStrap.cmake).
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build libclang-dev libsqlite3-dev \
-            nlohmann-json3-dev catch2
+            cmake ninja-build libclang-dev
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:

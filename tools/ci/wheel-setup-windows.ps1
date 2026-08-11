@@ -6,7 +6,7 @@ fetches the bundled libclang, stages the CI helper scripts at a fixed path
 (CIBW_ENVIRONMENT_WINDOWS gets no {project} substitution, same restriction as
 CIBW_ENVIRONMENT_LINUX -- hence copying to a fixed path rather than
 referencing the checkout directly). vcpkg itself is fetched and bootstrapped
-by the CMake build (CLANGQUILL_USE_VCPKG, see cmake/VcpkgBootStrap.cmake).
+by the CMake build (see cmake/VcpkgBootStrap.cmake).
 #>
 $ErrorActionPreference = "Stop"
 

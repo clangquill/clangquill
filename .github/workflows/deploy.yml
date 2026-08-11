@@ -41,9 +41,9 @@ jobs:
         env:
                   # The core links sqlite3 + nlohmann-json, sourced via vcpkg
                   # inside the manylinux image (apt is unavailable there).
-                  # CLANGQUILL_USE_VCPKG makes the CMake build fetch and
-                  # bootstrap vcpkg itself (cmake/VcpkgBootStrap.cmake), into a
-                  # .vcpkg-checkout reused by every build in the container.
+                  # The CMake build fetches and bootstraps vcpkg itself
+                  # (cmake/VcpkgBootStrap.cmake), into a .vcpkg-checkout
+                  # reused by every build in the container.
                   # libclang is now bundled from the official LLVM release per
                   # ADR-0001 (self-contained libclang.so; needs manylinux_2_34).
           CIBW_BUILD: cp311-* cp312-* cp313-*
@@ -71,7 +71,7 @@ jobs:
                   # go through a browser-User-Agent script (SHA512 still checked).
           CIBW_ENVIRONMENT_LINUX: >-
             LD_LIBRARY_PATH=/opt/libclang/lib
-            SKBUILD_CMAKE_DEFINE="CLANGQUILL_USE_VCPKG=ON;CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/opt/libclang"
+            SKBUILD_CMAKE_DEFINE="CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/opt/libclang"
             X_VCPKG_ASSET_SOURCES="clear;x-script,/opt/vcpkg-asset-fetch.sh {url}
             {sha512} {dst}"
           CIBW_TEST_COMMAND: >-
@@ -122,7 +122,7 @@ jobs:
           CIBW_ENVIRONMENT_WINDOWS: >-
             VCPKG_TARGET_TRIPLET="x64-windows-static-md"
             PATH="C:\\libclang\\bin;$PATH"
-            SKBUILD_CMAKE_DEFINE="CLANGQUILL_USE_VCPKG=ON;CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=C:\\libclang;VCPKG_TARGET_TRIPLET=x64-windows-static-md"
+            SKBUILD_CMAKE_DEFINE="CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=C:\\libclang;VCPKG_TARGET_TRIPLET=x64-windows-static-md"
             X_VCPKG_ASSET_SOURCES="clear;x-script,powershell -NoProfile -ExecutionPolicy
             Bypass -File C:\\ci\\vcpkg-asset-fetch.ps1 {url}
             {sha512} {dst}"

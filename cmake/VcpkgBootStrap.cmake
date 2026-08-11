@@ -1,13 +1,12 @@
-# Optional vcpkg bootstrap, included from the top-level CMakeLists *before*
-# project() so the toolchain file it selects actually takes effect.
+# vcpkg bootstrap, included from the top-level CMakeLists *before* project() so
+# the toolchain file it selects actually takes effect.
 #
-# Off by default: a build against system packages (libsqlite3-dev,
-# nlohmann-json3-dev, catch2) needs none of this. Configure with
-# -DCLANGQUILL_USE_VCPKG=ON and CMake fetches, bootstraps and hooks up vcpkg
-# by itself -- callers (CI, developers) need no `git clone` + bootstrap step.
-option(CLANGQUILL_USE_VCPKG "Fetch/bootstrap vcpkg and use it for the C++ dependencies" OFF)
+# vcpkg is the only supported source for the C++ dependencies (sqlite3,
+# nlohmann-json and -- for the tests -- catch2): CMake fetches, bootstraps and
+# hooks up vcpkg by itself, so callers (CI, developers) need no `git clone` +
+# bootstrap step and no distro packages.
 
-if(CLANGQUILL_USE_VCPKG AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     # Catch2 sits behind the `tests` feature of vcpkg.json; ask for it when the
     # tests are being built (CLANGQUILL_BUILD_TESTS is declared after project(),
     # but a -D on the command line is already in the cache here).
