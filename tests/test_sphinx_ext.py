@@ -503,6 +503,9 @@ def test_warnings_as_errors_config_value_is_recognised(tmp_path: Path) -> None:
 
 
 def test_warnings_as_errors_fails_the_build_and_lists_the_offenders(tmp_path: Path) -> None:
+    # importorskip before the import: _build_project does its own, but that runs
+    # too late for a test that needs the exception type up front.
+    pytest.importorskip("sphinx")
     from sphinx.errors import ExtensionError  # noqa: PLC0415
 
     with pytest.raises(ExtensionError) as excinfo:
@@ -516,6 +519,7 @@ def test_warnings_as_errors_fails_the_build_and_lists_the_offenders(tmp_path: Pa
 
 def test_warnings_as_errors_is_not_suppressible_as_a_warning(tmp_path: Path) -> None:
     """It is an opt-in hard failure, not one more silenceable warning."""
+    pytest.importorskip("sphinx")
     from sphinx.errors import ExtensionError  # noqa: PLC0415
 
     conf = STRICT_CONF + 'suppress_warnings = ["clangquill.parse"]\n'
