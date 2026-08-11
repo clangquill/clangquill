@@ -2,9 +2,9 @@
 
 # Benchmarks
 
-- Generated: `2026-07-05T17:05:08.638699+00:00`
-- Machine: Linux-6.17.0-1018-azure-x86_64-with-glibc2.39 · 4 CPU · 16.8 GB RAM
-- clangquill: `clangquill 0.8.3` · libclang `Ubuntu clang version 22.1.8 (++20260613092238+e80beda6e255-1~exp1~20260613092253.78)`
+- Generated: `2026-08-11T10:31:37.788584+00:00`
+- Machine: Linux-6.17.0-1020-azure-x86_64-with-glibc2.39 · 4 CPU · 16.8 GB RAM
+- clangquill: `clangquill 0.16.0` · libclang `Ubuntu clang version 22.1.8 (++20260714014902+ca7933e47d3a-1~exp1~20260714135019.80)`
 - doxygen: `1.9.8` · sphinx: `sphinx-build 9.1.0`
 - repeat=3 warmup=1 (median wall-clock seconds)
 
@@ -14,35 +14,35 @@ _ref: 20240722.0 · commit: `4447c7562e3b`_
 
 | stage | cold | noop | incremental | incremental-leaf |
 | --- | --- | --- | --- | --- |
-| clangquill-myst | 1.670 | 0.167 | 2.441 | 1.227 |
-| clangquill-sphinx | 18.855 | 1.616 | 18.111 | 18.093 |
-| doxygen-xml | 0.405 | 0.417 | 0.419 | 0.414 |
-| doxygen-html | 0.389 | 0.392 | 0.402 | 0.398 |
+| clangquill-myst | 1.689 | 0.170 | 2.495 | 1.257 |
+| clangquill-sphinx | 20.794 | 1.732 | 20.104 | 20.052 |
+| doxygen-xml | 0.391 | 0.410 | 0.407 | 0.409 |
+| doxygen-html | 0.374 | 0.387 | 0.393 | 0.390 |
 
-- **cold** — parse: clangquill-myst 1.670s vs doxygen-xml 0.405s (0.24× ); full HTML: clangquill 20.525s vs doxygen-html 0.389s (0.02× )
-- **noop** — parse: clangquill-myst 0.167s vs doxygen-xml 0.417s (2.50× ); full HTML: clangquill 1.783s vs doxygen-html 0.392s (0.22× )
-- **incremental** — parse: clangquill-myst 2.441s vs doxygen-xml 0.419s (0.17× ); full HTML: clangquill 20.552s vs doxygen-html 0.402s (0.02× )
-- **incremental-leaf** — parse: clangquill-myst 1.227s vs doxygen-xml 0.414s (0.34× ); full HTML: clangquill 19.321s vs doxygen-html 0.398s (0.02× )
-- **clangquill cache** — cold→noop 10.0× faster, cold→incremental 0.7× faster, cold→incremental-leaf 1.4× faster
-- **work (cold)** — clangquill-myst: 1909 symbols from 451 files → 77 pages, output 79 files · 324.5 KB; doxygen-xml: output 286 files · 7.9 MB; doxygen-html: output 638 files · 10.3 MB
+- **cold** — parse: clangquill-myst 1.689s vs doxygen-xml 0.391s (0.23× ); full HTML: clangquill 22.484s vs doxygen-html 0.374s (0.02× )
+- **noop** — parse: clangquill-myst 0.170s vs doxygen-xml 0.410s (2.42× ); full HTML: clangquill 1.902s vs doxygen-html 0.387s (0.20× )
+- **incremental** — parse: clangquill-myst 2.495s vs doxygen-xml 0.407s (0.16× ); full HTML: clangquill 22.599s vs doxygen-html 0.393s (0.02× )
+- **incremental-leaf** — parse: clangquill-myst 1.257s vs doxygen-xml 0.409s (0.33× ); full HTML: clangquill 21.309s vs doxygen-html 0.390s (0.02× )
+- **clangquill cache** — cold→noop 10.0× faster, cold→incremental 0.7× faster, cold→incremental-leaf 1.3× faster
+- **work (cold)** — clangquill-myst: 1909 symbols from 451 files → 77 pages, output 79 files · 442.7 KB; doxygen-xml: output 286 files · 7.9 MB; doxygen-html: output 638 files · 10.3 MB
 
 ## clangquill
 
-_ref: (local working tree) · commit: `4581857bf689`_
+_ref: (local working tree) · commit: `846a09e3b249`_
 
 | stage | cold | noop | incremental | incremental-leaf |
 | --- | --- | --- | --- | --- |
-| clangquill-myst | 0.883 | 0.167 | 0.816 | 0.570 |
-| clangquill-sphinx | 1.963 | 0.715 | 2.141 | 2.200 |
-| doxygen-xml | 0.075 | 0.080 | 0.080 | 0.078 |
-| doxygen-html | 0.106 | 0.113 | 0.110 | 0.111 |
+| clangquill-myst | 0.889 | 0.163 | 0.824 | 0.579 |
+| clangquill-sphinx | 2.104 | 0.688 | 2.116 | 2.171 |
+| doxygen-xml | 0.072 | 0.074 | 0.076 | 0.077 |
+| doxygen-html | 0.105 | 0.108 | 0.112 | 0.112 |
 
-- **cold** — parse: clangquill-myst 0.883s vs doxygen-xml 0.075s (0.08× ); full HTML: clangquill 2.846s vs doxygen-html 0.106s (0.04× )
-- **noop** — parse: clangquill-myst 0.167s vs doxygen-xml 0.080s (0.48× ); full HTML: clangquill 0.882s vs doxygen-html 0.113s (0.13× )
-- **incremental** — parse: clangquill-myst 0.816s vs doxygen-xml 0.080s (0.10× ); full HTML: clangquill 2.958s vs doxygen-html 0.110s (0.04× )
-- **incremental-leaf** — parse: clangquill-myst 0.570s vs doxygen-xml 0.078s (0.14× ); full HTML: clangquill 2.771s vs doxygen-html 0.111s (0.04× )
-- **clangquill cache** — cold→noop 5.3× faster, cold→incremental 1.1× faster, cold→incremental-leaf 1.5× faster
-- **work (cold)** — clangquill-myst: 251 symbols from 294 files → 1 pages, output 3 files · 46.5 KB; doxygen-xml: output 70 files · 724.0 KB; doxygen-html: output 167 files · 1.4 MB
+- **cold** — parse: clangquill-myst 0.889s vs doxygen-xml 0.072s (0.08× ); full HTML: clangquill 2.993s vs doxygen-html 0.105s (0.03× )
+- **noop** — parse: clangquill-myst 0.163s vs doxygen-xml 0.074s (0.46× ); full HTML: clangquill 0.851s vs doxygen-html 0.108s (0.13× )
+- **incremental** — parse: clangquill-myst 0.824s vs doxygen-xml 0.076s (0.09× ); full HTML: clangquill 2.940s vs doxygen-html 0.112s (0.04× )
+- **incremental-leaf** — parse: clangquill-myst 0.579s vs doxygen-xml 0.077s (0.13× ); full HTML: clangquill 2.751s vs doxygen-html 0.112s (0.04× )
+- **clangquill cache** — cold→noop 5.4× faster, cold→incremental 1.1× faster, cold→incremental-leaf 1.5× faster
+- **work (cold)** — clangquill-myst: 269 symbols from 295 files → 1 pages, output 3 files · 62.0 KB; doxygen-xml: output 72 files · 767.4 KB; doxygen-html: output 171 files · 1.5 MB
 
 ## dune-gdt
 
@@ -50,17 +50,17 @@ _ref: b51af5ba309da83a234174ca916df029f53e3d15 · commit: `b51af5ba309d`_
 
 | stage | cold | noop | incremental | incremental-leaf |
 | --- | --- | --- | --- | --- |
-| clangquill-myst | 1.064 | 0.176 | 1.013 | 1.027 |
-| clangquill-sphinx | 1.438 | 0.747 | 0.734 | 0.814 |
-| doxygen-xml | 0.113 | 0.117 | 0.118 | 0.117 |
-| doxygen-html | 0.136 | 0.137 | 0.139 | 0.139 |
+| clangquill-myst | 1.015 | 0.166 | 0.961 | 0.983 |
+| clangquill-sphinx | 1.345 | 0.658 | 0.653 | 0.733 |
+| doxygen-xml | 0.115 | 0.114 | 0.116 | 0.114 |
+| doxygen-html | 0.131 | 0.135 | 0.135 | 0.134 |
 
-- **cold** — parse: clangquill-myst 1.064s vs doxygen-xml 0.113s (0.11× ); full HTML: clangquill 2.502s vs doxygen-html 0.136s (0.05× )
-- **noop** — parse: clangquill-myst 0.176s vs doxygen-xml 0.117s (0.67× ); full HTML: clangquill 0.922s vs doxygen-html 0.137s (0.15× )
-- **incremental** — parse: clangquill-myst 1.013s vs doxygen-xml 0.118s (0.12× ); full HTML: clangquill 1.747s vs doxygen-html 0.139s (0.08× )
-- **incremental-leaf** — parse: clangquill-myst 1.027s vs doxygen-xml 0.117s (0.11× ); full HTML: clangquill 1.841s vs doxygen-html 0.139s (0.08× )
+- **cold** — parse: clangquill-myst 1.015s vs doxygen-xml 0.115s (0.11× ); full HTML: clangquill 2.360s vs doxygen-html 0.131s (0.06× )
+- **noop** — parse: clangquill-myst 0.166s vs doxygen-xml 0.114s (0.69× ); full HTML: clangquill 0.824s vs doxygen-html 0.135s (0.16× )
+- **incremental** — parse: clangquill-myst 0.961s vs doxygen-xml 0.116s (0.12× ); full HTML: clangquill 1.614s vs doxygen-html 0.135s (0.08× )
+- **incremental-leaf** — parse: clangquill-myst 0.983s vs doxygen-xml 0.114s (0.12× ); full HTML: clangquill 1.716s vs doxygen-html 0.134s (0.08× )
 - **clangquill cache** — cold→noop 6.1× faster, cold→incremental 1.1× faster, cold→incremental-leaf 1.0× faster
-- **work (cold)** — clangquill-myst: 88 symbols from 529 files → 8 pages, output 10 files · 19.8 KB; doxygen-xml: output 53 files · 605.4 KB; doxygen-html: output 124 files · 1.2 MB
+- **work (cold)** — clangquill-myst: 88 symbols from 529 files → 8 pages, output 10 files · 22.4 KB; doxygen-xml: output 53 files · 605.4 KB; doxygen-html: output 124 files · 1.2 MB
 
 ## eigen
 
@@ -68,14 +68,14 @@ _ref: 3.4.0 · commit: `3147391d946b`_
 
 | stage | cold | noop | incremental | incremental-leaf |
 | --- | --- | --- | --- | --- |
-| clangquill-myst | 1.800 | 0.217 | 0.602 | 0.576 |
-| clangquill-sphinx | 343.522 | 4.131 | 9.688 | 8.519 |
-| doxygen-xml | 4.546 | 4.584 | 4.257 | 4.596 |
-| doxygen-html | 4.024 | 4.124 | 4.126 | 4.141 |
+| clangquill-myst | 1.779 | 0.206 | 0.592 | 0.571 |
+| clangquill-sphinx | 345.223 | 3.860 | 12.385 | 11.152 |
+| doxygen-xml | 4.307 | 4.380 | 4.410 | 4.422 |
+| doxygen-html | 3.858 | 3.891 | 3.896 | 3.903 |
 
-- **cold** — parse: clangquill-myst 1.800s vs doxygen-xml 4.546s (2.52× ); full HTML: clangquill 345.323s vs doxygen-html 4.024s (0.01× )
-- **noop** — parse: clangquill-myst 0.217s vs doxygen-xml 4.584s (21.10× ); full HTML: clangquill 4.348s vs doxygen-html 4.124s (0.95× )
-- **incremental** — parse: clangquill-myst 0.602s vs doxygen-xml 4.257s (7.08× ); full HTML: clangquill 10.290s vs doxygen-html 4.126s (0.40× )
-- **incremental-leaf** — parse: clangquill-myst 0.576s vs doxygen-xml 4.596s (7.98× ); full HTML: clangquill 9.095s vs doxygen-html 4.141s (0.46× )
-- **clangquill cache** — cold→noop 8.3× faster, cold→incremental 3.0× faster, cold→incremental-leaf 3.1× faster
-- **work (cold)** — clangquill-myst: 4365 symbols from 402 files → 1691 pages, output 1693 files · 989.4 KB; doxygen-xml: output 1860 files · 45.2 MB; doxygen-html: output 4023 files · 77.1 MB
+- **cold** — parse: clangquill-myst 1.779s vs doxygen-xml 4.307s (2.42× ); full HTML: clangquill 347.002s vs doxygen-html 3.858s (0.01× )
+- **noop** — parse: clangquill-myst 0.206s vs doxygen-xml 4.380s (21.26× ); full HTML: clangquill 4.066s vs doxygen-html 3.891s (0.96× )
+- **incremental** — parse: clangquill-myst 0.592s vs doxygen-xml 4.410s (7.45× ); full HTML: clangquill 12.977s vs doxygen-html 3.896s (0.30× )
+- **incremental-leaf** — parse: clangquill-myst 0.571s vs doxygen-xml 4.422s (7.75× ); full HTML: clangquill 11.723s vs doxygen-html 3.903s (0.33× )
+- **clangquill cache** — cold→noop 8.6× faster, cold→incremental 3.0× faster, cold→incremental-leaf 3.1× faster
+- **work (cold)** — clangquill-myst: 4365 symbols from 402 files → 1691 pages, output 1693 files · 1.1 MB; doxygen-xml: output 1860 files · 45.2 MB; doxygen-html: output 4023 files · 77.1 MB
