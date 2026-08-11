@@ -1,0 +1,154 @@
+---
+# Verify — rather than time — ClangQuill and Doxygen across the same real C++
+# codebases the benchmark measures. For every repo configured under
+# benchmarks/configs/ the harness asserts that ClangQuill parses it with no
+# diagnostic of warning severity or worse, that Doxygen extracts from the
+# identical file set without a single warning, and that ClangQuill did not
+# document fewer source files than Doxygen did. Nothing is timed and nothing is
+# published; the job is red exactly when one of those three claims is false.
+#
+# Runs weekly (Mondays) and on manual dispatch. Weekly rather than per-push
+# because it clones and fully re-parses four large upstream projects — the
+# per-push correctness signal is the test suite, and this catches the slower
+# drift: an upstream project moving, a libclang upgrade changing what parses,
+# or a regression in comment extraction that a green parse would hide.
+name: verify-extraction
+on:
+  schedule:
+    # 05:00 UTC on Mondays — off-peak for hosted runners, and early enough in
+    # the week that a red result has somewhere to go.
+    - cron: 0 5 * * 1
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: Comma-separated repo configs to narrow scope (empty = every config
+          under benchmarks/configs/)
+        default: ''
+      fresh_clone:
+        description: Re-clone the upstream projects instead of reusing an existing
+          checkout
+        type: boolean
+        default: false
+# One verification run per ref at a time; a newer dispatch cancels an in-flight
+# run rather than having two of them fight over the same clones.
+concurrency:
+  group: verify-extraction-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    # Read-only: unlike the benchmark, this workflow publishes nothing and opens
+    # no pull request.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The harness only does local git ops against its own clones.
+          persist-credentials: false
+      - name: Install doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends doxygen
+      - name: Install build dependencies (LLVM 22)
+        # The verification must judge the code on this branch, not a previously
+        # published wheel, so the core is built from this checkout. LLVM 22 from
+        # apt.llvm.org matches the libclang major bundled into release wheels;
+        # the distro libclang is older and would report a different set of
+        # diagnostics, which is precisely what this workflow gates on.
+        # sqlite3 and nlohmann-json are not installed from apt: they come from
+        # vcpkg, which the CMake build bootstraps itself.
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 22
+          sudo apt-get install -y --no-install-recommends \
+            libclang-22-dev llvm-22-dev
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install harness dependencies (checkout build)
+        # benchmarks/ is a standalone uv project shared by both drivers; sync
+        # pulls its dependencies (and the locked clangquill wheel as a
+        # placeholder), then the wheel is replaced with a build of the
+        # checked-out source so the verdict is about this commit. The assert
+        # fails fast if the core silently linked against an older distro
+        # libclang, and the version the checkout build installed is recorded so
+        # the run step can verify it is still the one being exercised.
+        env:
+          SKBUILD_CMAKE_DEFINE: CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/usr/lib/llvm-22
+          # sqlite.org 403s vcpkg's default downloader, so distfiles go through
+          # a browser-User-Agent script (SHA512 is still checked by vcpkg).
+          X_VCPKG_ASSET_SOURCES: >-
+            clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
+            {url} {sha512} {dst}
+        run: |
+          uv sync --frozen --project benchmarks
+          uv pip install --python benchmarks/.venv/bin/python --reinstall-package clangquill .
+          benchmarks/.venv/bin/python -c "from clangquill._libclang import libclang_major; assert (libclang_major() or 0) >= 22, libclang_major()"
+          built=$(benchmarks/.venv/bin/python -c "import importlib.metadata as m; print(m.version('clangquill'))")
+          echo "Built clangquill $built from the checkout"
+          echo "CLANGQUILL_BUILT_VERSION=$built" >> "$GITHUB_ENV"
+      - name: Verify extraction
+        # `uv run` puts the project's venv bin on PATH, so the harness resolves
+        # `clangquill` by name; `doxygen` comes from apt. `--no-sync` is
+        # load-bearing: without it `uv run` re-syncs the environment to
+        # benchmarks/uv.lock and silently replaces the checkout build with the
+        # locked PyPI wheel — which would verify a released version instead of
+        # this branch. The version check makes that failure loud rather than
+        # silent. Dispatch inputs are passed via env (not interpolated into the
+        # script) so they can never expand into executable shell.
+        env:
+          # Empty by default so every config under benchmarks/configs/ is
+          # verified; a dispatch can pass a subset to narrow scope.
+          VERIFY_REPOS: ${{ inputs.repos }}
+          VERIFY_FRESH_CLONE: ${{ inputs.fresh_clone }}
+        run: |
+          actual=$(benchmarks/.venv/bin/python -c "import importlib.metadata as m; print(m.version('clangquill'))")
+          if [ "$actual" != "$CLANGQUILL_BUILT_VERSION" ]; then
+            echo "benchmarks venv holds clangquill $actual, not the checkout build $CLANGQUILL_BUILT_VERSION — refusing to verify the wrong binary" >&2
+            exit 1
+          fi
+          fresh=""
+          if [ "$VERIFY_FRESH_CLONE" = "true" ]; then
+            fresh="--fresh-clone"
+          fi
+          # -u keeps the harness's per-repo/per-check progress lines unbuffered:
+          # python block-buffers stdout on a pipe, so a killed run would
+          # otherwise leave no trace of how far it got in the CI log.
+          uv run --no-sync --project benchmarks python -u benchmarks/verify.py \
+            --repos "$VERIFY_REPOS" $fresh
+      - name: Publish results to job summary
+        if: always()
+        run: |
+          # The verify step exits non-zero on any failed check, so this step must
+          # run regardless — the report is most useful precisely when the run is
+          # red. It must not fail on its own, hence the guards.
+          if [ ! -d benchmarks/verify-results ]; then
+            echo "No verification results were produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Result files are named with a sortable UTC timestamp, so the last
+          # one lexicographically is the newest. (find/sort avoids parsing `ls`.)
+          latest=$(find benchmarks/verify-results -maxdepth 1 -name '*.md' | sort | tail -1)
+          if [ -n "$latest" ]; then
+            cat "$latest" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No verification results were produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload results and per-project logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: verify-extraction-results
+          # The reports plus every project's clangquill diagnostics and doxygen
+          # warning logs: the summary shows the first lines of a failure, these
+          # hold the rest.
+          path: |
+            benchmarks/verify-results/
+            benchmarks/.work/_bench/*/logs/
+          if-no-files-found: ignore

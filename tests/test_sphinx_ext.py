@@ -489,3 +489,35 @@ def test_errors_stay_suppressible_with_the_log_enabled(tmp_path: Path) -> None:
 
     assert "redefinition" not in warnings
     assert "redefinition" in (src / "_build" / "parse.log").read_text()
+
+
+STRICT_CONF = CONF + "clangquill_warnings_as_errors = True\n"
+
+
+def test_warnings_as_errors_config_value_is_recognised(tmp_path: Path) -> None:
+    """A clean parse under the new setting builds exactly as before."""
+    src, warnings = _build_project(tmp_path, HEADER, STRICT_CONF)
+
+    assert "unknown config value" not in warnings
+    assert (src / "api" / "geo.md").is_file()
+
+
+def test_warnings_as_errors_fails_the_build_and_lists_the_offenders(tmp_path: Path) -> None:
+    from sphinx.errors import ExtensionError  # noqa: PLC0415
+
+    with pytest.raises(ExtensionError) as excinfo:
+        _build_project(tmp_path, WARNING_HEADER, STRICT_CONF, strict=False)
+
+    message = str(excinfo.value)
+    assert "1 warning(s)" in message
+    assert "geo is on its way out" in message
+    assert "clangquill_warnings_as_errors" in message
+
+
+def test_warnings_as_errors_is_not_suppressible_as_a_warning(tmp_path: Path) -> None:
+    """It is an opt-in hard failure, not one more silenceable warning."""
+    from sphinx.errors import ExtensionError  # noqa: PLC0415
+
+    conf = STRICT_CONF + 'suppress_warnings = ["clangquill.parse"]\n'
+    with pytest.raises(ExtensionError):
+        _build_project(tmp_path, WARNING_HEADER, conf, strict=False)

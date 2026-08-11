@@ -76,6 +76,7 @@ _TYPE_CHECKS: tuple[tuple[str, Callable[[object], bool], str], ...] = (
     ("defines", _is_str_list, "a list of strings"),
     ("template_dirs", _is_str_list, "a list of strings"),
     ("include_undocumented", _is_bool, "a boolean"),
+    ("warnings_as_errors", _is_bool, "a boolean"),
     ("templates", _is_str_dict, "a mapping of kind name to template name"),
 )
 
@@ -150,6 +151,13 @@ class Config:
     #: Sphinx warning stream keep showing only errors either way, so this is how
     #: to see the detail without drowning a build in it.
     diagnostics_log: str | None = None
+    #: Treat any libclang diagnostic of warning severity or worse as a build
+    #: failure: the CLI exits non-zero and the Sphinx extension raises, *after*
+    #: the pages have been written. Off by default, because a header that
+    #: warns still documents perfectly well; turn it on in CI to gate on a
+    #: clean parse. Like :attr:`diagnostics_log` it switches the parse to
+    #: full-diagnostic capture, since warnings are otherwise never collected.
+    warnings_as_errors: bool = False
 
     # -- toctree / root -------------------------------------------------------
     #: ``:maxdepth:`` of the generated root toctree.

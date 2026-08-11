@@ -58,25 +58,39 @@ at runtime and skipped with a warning when absent.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
-import platform
 import shlex
 import shutil
 import statistics
 import subprocess
 import sys
 import time
-import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-REPO_ROOT = HERE.parent
-DEFAULT_CONFIG_DIR = HERE / "configs"
-DEFAULT_WORK_DIR = HERE / ".work"
+from harness import (
+    DEFAULT_CONFIG_DIR,
+    DEFAULT_WORK_DIR,
+    HERE,
+    RepoContext,
+    clangquill_build_argv,
+    clangquill_version,
+    clangquill_work,
+    dir_stats,
+    doxygen_argv,
+    human_bytes,
+    libclang_version,
+    load_configs,
+    machine_info,
+    prepare_repo,
+    run_git,
+    tool_version,
+    wipe,
+    write_doxyfile,
+)
+
 DEFAULT_RESULTS_DIR = HERE / "results"
 
 # The four pipeline stages we know how to drive. ``clangquill-myst`` and
@@ -115,67 +129,6 @@ inline int benchmark_marker(int value) { return value; }
 }  // namespace clangquill_benchmark_patch
 #endif
 """
-
-
-# --------------------------------------------------------------------------- #
-# Configuration
-# --------------------------------------------------------------------------- #
-@dataclass
-class RepoConfig:
-    """One benchmark target, loaded from a TOML file in ``configs/``."""
-
-    name: str
-    repo: str = ""
-    ref: str = ""
-    local: bool = False
-    std: str = "c++20"
-    include_dirs: list[str] = field(default_factory=list)
-    defines: list[str] = field(default_factory=list)
-    compile_args: list[str] = field(default_factory=list)
-    inputs: list[str] = field(default_factory=list)
-    doxygen_input: list[str] = field(default_factory=list)
-    # Workload parity with the clangquill ``inputs`` globs: ``doxygen_recursive``
-    # mirrors whether the glob descends (``**``), and ``doxygen_file_patterns``
-    # pins Doxygen's FILE_PATTERNS to the same extensions, so both tools always
-    # process the identical file set.
-    doxygen_recursive: bool = True
-    doxygen_file_patterns: list[str] = field(default_factory=list)
-    # Page partitioning passed to ``clangquill build --group-by``. Empty keeps
-    # the tool default (``symbol``). Namespace-rooted libraries should set
-    # ``namespace`` (or ``class``): with the default, a single root namespace
-    # collapses the whole subtree onto one page — on eigen, one page held 84 %
-    # of the output bytes, dominating the render, serialising Sphinx's read
-    # phase, and being re-rendered on every symbol change.
-    group_by: str = ""
-    patch_files: list[str] = field(default_factory=list)
-    # Leaf-header counterpart of ``patch_files`` for the ``incremental-leaf``
-    # scenario: headers (almost) nothing else includes, so the stale set is a
-    # handful of translation units instead of most of the module. Empty list =
-    # the scenario is skipped for this config.
-    leaf_patch_files: list[str] = field(default_factory=list)
-
-    @classmethod
-    def from_toml(cls, path: Path) -> RepoConfig:
-        """Load a :class:`RepoConfig` from the TOML file at ``path``."""
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-        patch = data.get("patch", {}) or {}
-        return cls(
-            name=data.get("name", path.stem),
-            repo=data.get("repo", ""),
-            ref=data.get("ref", ""),
-            local=bool(data.get("local", False)),
-            std=data.get("std", "c++20"),
-            include_dirs=list(data.get("include_dirs", [])),
-            defines=list(data.get("defines", [])),
-            compile_args=list(data.get("compile_args", [])),
-            inputs=list(data.get("inputs", [])),
-            doxygen_input=list(data.get("doxygen_input", [])),
-            doxygen_recursive=bool(data.get("doxygen_recursive", True)),
-            doxygen_file_patterns=list(data.get("doxygen_file_patterns", [])),
-            group_by=data.get("group_by", ""),
-            patch_files=list(patch.get("files", [])),
-            leaf_patch_files=list(patch.get("leaf_files", [])),
-        )
 
 
 # --------------------------------------------------------------------------- #
@@ -250,115 +203,8 @@ def _maxrss_kb(ru_maxrss: int) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Small filesystem / git helpers
-# --------------------------------------------------------------------------- #
-def run_git(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
-    """Run ``git args`` in ``cwd``, capturing output as text."""
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        check=check,
-        capture_output=True,
-        text=True,
-    )
-
-
-def wipe(path: Path) -> None:
-    """Remove ``path`` (file or directory tree) if it exists."""
-    if path.is_dir():
-        shutil.rmtree(path, ignore_errors=True)
-    elif path.exists():
-        path.unlink()
-
-
-def dir_stats(path: Path) -> dict:
-    """Return ``{files, bytes}`` for everything under ``path`` (recursively)."""
-    files = 0
-    total = 0
-    if path.is_dir():
-        for p in path.rglob("*"):
-            if p.is_file():
-                files += 1
-                total += p.stat().st_size
-    return {"files": files, "bytes": total}
-
-
-# --------------------------------------------------------------------------- #
 # Repo preparation
 # --------------------------------------------------------------------------- #
-@dataclass
-class RepoContext:
-    """Resolved on-disk locations and git metadata for one benchmark target."""
-
-    config: RepoConfig
-    source_dir: Path  # where the C++ sources live (clone or local working tree)
-    bench_dir: Path  # scratch space for outputs/caches/logs (never the source)
-    resolved_ref: str
-    commit: str
-
-    @property
-    def sphinx_src(self) -> Path:
-        """Sphinx source dir for the render stage (holds conf.py + index.md)."""
-        return self.bench_dir / "sphinx_src"
-
-    @property
-    def myst_out(self) -> Path:
-        """MyST output dir, placed inside the Sphinx srcdir under api/."""
-        return self.sphinx_src / "api"
-
-    @property
-    def sphinx_out(self) -> Path:
-        """Sphinx HTML output dir (also holds the ``.doctrees`` cache)."""
-        return self.bench_dir / "sphinx_out"
-
-    @property
-    def cache_dir(self) -> Path:
-        """Incremental clangquill ``--cache-dir`` for this target."""
-        return self.bench_dir / "cache"
-
-    def doxygen_out(self, mode: str) -> Path:
-        """Doxygen output dir for ``mode`` ("xml" or "html")."""
-        return self.bench_dir / f"doxygen-{mode}"
-
-    @property
-    def logs(self) -> Path:
-        """Directory holding captured per-run stdout/stderr logs."""
-        return self.bench_dir / "logs"
-
-
-def prepare_repo(cfg: RepoConfig, work_dir: Path, *, fresh_clone: bool) -> RepoContext:
-    """Clone (or locate) ``cfg`` and resolve its pinned ref to a commit."""
-    bench_dir = work_dir / "_bench" / cfg.name
-    bench_dir.mkdir(parents=True, exist_ok=True)
-
-    if cfg.local:
-        source = REPO_ROOT
-        commit = run_git(["rev-parse", "HEAD"], source, check=False).stdout.strip()
-        return RepoContext(cfg, source, bench_dir, resolved_ref="(local working tree)", commit=commit)
-
-    source = work_dir / cfg.name
-    if fresh_clone:
-        wipe(source)
-    if not source.exists():
-        print(f"  cloning {cfg.repo} -> {source}")
-        run_git(["clone", "--filter=blob:none", cfg.repo, str(source)], work_dir)
-
-    resolved_ref = cfg.ref
-    if cfg.ref:
-        checkout = run_git(["checkout", "--force", cfg.ref], source, check=False)
-        if checkout.returncode != 0:
-            print(f"  WARNING: ref {cfg.ref!r} not found for {cfg.name}; using default branch", file=sys.stderr)
-            # Actually move HEAD to the remote default; a failed checkout leaves
-            # the worktree where it was, which on a reused clone could be a
-            # previously benchmarked ref and diverge from the recorded label.
-            run_git(["checkout", "--force", "origin/HEAD"], source, check=False)
-            resolved_ref = "(default branch; pinned ref missing)"
-    else:
-        resolved_ref = "(default branch)"
-    commit = run_git(["rev-parse", "HEAD"], source, check=False).stdout.strip()
-    return RepoContext(cfg, source, bench_dir, resolved_ref=resolved_ref, commit=commit)
-
-
 def apply_patch(ctx: RepoContext, files: list[str] | None = None) -> list[Path]:
     """Append the fixed snippet to each target file (default: ``patch_files``).
 
@@ -403,22 +249,6 @@ def reset_state(ctx: RepoContext) -> None:
 # --------------------------------------------------------------------------- #
 # Stage command builders
 # --------------------------------------------------------------------------- #
-def clangquill_build_argv(ctx: RepoContext, clangquill_cmd: list[str]) -> list[str]:
-    """Build the ``clangquill build`` argv (parse stage, with ``--cache-dir``)."""
-    cfg = ctx.config
-    argv = [*clangquill_cmd, "build", *cfg.inputs, "-o", str(ctx.myst_out), "--std", cfg.std]
-    for inc in cfg.include_dirs:
-        argv += ["-I", inc]
-    for define in cfg.defines:
-        argv += ["-D", define]
-    for arg in cfg.compile_args:
-        argv += ["--compile-arg", arg]
-    if cfg.group_by:
-        argv += ["--group-by", cfg.group_by]
-    argv += ["--cache-dir", str(ctx.cache_dir)]
-    return argv
-
-
 def write_sphinx_scaffold(ctx: RepoContext) -> None:
     """Create a minimal MyST-only Sphinx project around the generated api/."""
     ctx.sphinx_src.mkdir(parents=True, exist_ok=True)
@@ -451,70 +281,6 @@ def sphinx_argv(ctx: RepoContext, sphinx_cmd: list[str]) -> list[str]:
     mid-benchmark; serial peaks at the parent alone and completes.
     """
     return [*sphinx_cmd, "-b", "html", "-q", str(ctx.sphinx_src), str(ctx.sphinx_out)]
-
-
-def write_doxyfile(ctx: RepoContext, mode: str) -> Path:
-    """Generate a minimal Doxyfile for ``mode`` ("xml" or "html")."""
-    cfg = ctx.config
-    out_dir = ctx.doxygen_out(mode)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    inputs = " ".join(shlex.quote(str(ctx.source_dir / d)) for d in cfg.doxygen_input)
-    common = [
-        f'PROJECT_NAME = "{cfg.name}"',
-        f"OUTPUT_DIRECTORY = {out_dir}",
-        f"INPUT = {inputs}",
-        # Both knobs exist to keep Doxygen's file set identical to clangquill's
-        # ``inputs`` globs; see RepoConfig.
-        f"RECURSIVE = {'YES' if cfg.doxygen_recursive else 'NO'}",
-        *([f"FILE_PATTERNS = {' '.join(cfg.doxygen_file_patterns)}"] if cfg.doxygen_file_patterns else []),
-        "QUIET = YES",
-        "WARNINGS = NO",
-        "WARN_IF_UNDOCUMENTED = NO",
-        "GENERATE_LATEX = NO",
-        "EXTRACT_ALL = YES",
-        # NUM_PROC_THREADS = 0 lets Doxygen use all available CPUs (mirrors
-        # clangquill's default jobs=0 / hardware_concurrency behaviour).
-        "NUM_PROC_THREADS = 0",
-        "HAVE_DOT = NO",
-    ]
-    if mode == "xml":
-        common += ["GENERATE_XML = YES", "GENERATE_HTML = NO", "XML_OUTPUT = xml"]
-    else:
-        common += [
-            "GENERATE_XML = NO",
-            "GENERATE_HTML = YES",
-            "HTML_OUTPUT = html",
-            "SEARCHENGINE = NO",
-        ]
-    doxyfile = out_dir / "Doxyfile"
-    doxyfile.write_text("\n".join(common) + "\n", encoding="utf-8")
-    return doxyfile
-
-
-def doxygen_argv(doxygen_cmd: list[str], doxyfile: Path) -> list[str]:
-    """Build the ``doxygen`` argv that runs ``doxyfile``."""
-    return [*doxygen_cmd, str(doxyfile)]
-
-
-# --------------------------------------------------------------------------- #
-# Work metrics (a coarse "how much did the tool actually produce" signal)
-# --------------------------------------------------------------------------- #
-def clangquill_work(stdout: str) -> dict:
-    """Extract symbol/file/page counts from ``clangquill build`` output."""
-    work: dict = {}
-    for raw in stdout.splitlines():
-        line = raw.strip()
-        if line.startswith("Parsed "):
-            parts = line.replace("(s)", "").split()
-            # "Parsed N symbol from M file."
-            with contextlib.suppress(ValueError, IndexError):
-                work["symbols"] = int(parts[1])
-                work["files"] = int(parts[4])
-        elif line.startswith("Wrote "):
-            parts = line.split()
-            with contextlib.suppress(ValueError, IndexError):
-                work["pages_written"] = int(parts[1])
-    return work
 
 
 # --------------------------------------------------------------------------- #
@@ -689,63 +455,10 @@ def summarize(values: list[float]) -> dict:
 # --------------------------------------------------------------------------- #
 # Environment / tool metadata
 # --------------------------------------------------------------------------- #
-def tool_version(argv: list[str]) -> str:
-    """Return the first line of ``argv`` output (e.g. ``--version``), or ""."""
-    try:
-        out = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
-        if out.returncode != 0:
-            return ""
-        text = (out.stdout or out.stderr).strip()
-        return text.splitlines()[0] if text else ""
-    except (OSError, subprocess.SubprocessError, IndexError):
-        return ""
-
-
-def clangquill_version(cmd: list[str]) -> str:
-    """Return the clangquill version, robust to a CLI without ``--version``.
-
-    Older published wheels predate the ``--version`` flag (which made earlier
-    reports record ``n/a``), so fall back to the installed package metadata —
-    the harness runs in the same environment as the tool it drives.
-    """
-    version = tool_version([*cmd, "--version"])
-    if version:
-        return version
-    try:
-        import importlib.metadata  # noqa: PLC0415
-
-        return f"clangquill {importlib.metadata.version('clangquill')}"
-    except Exception:
-        return ""
-
-
-def libclang_version() -> str:
-    """Return the linked libclang version string, or "" if unavailable."""
-    try:
-        from clangquill import _core  # noqa: PLC0415
-
-        return str(_core.libclang_version())
-    except Exception:
-        return ""
-
-
-def total_ram_gb() -> float:
-    """Return total physical RAM in GB (0.0 if it cannot be determined)."""
-    try:
-        return round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9, 1)
-    except (ValueError, OSError):
-        return 0.0
-
-
 def environment_info(tools: Tools) -> dict:
     """Collect machine, Python and tool/toolchain versions for the report."""
     return {
-        "timestamp": datetime.now(UTC).isoformat(),
-        "platform": platform.platform(),
-        "processor": platform.processor() or platform.machine(),
-        "cpu_count": os.cpu_count(),
-        "ram_gb": total_ram_gb(),
-        "python": platform.python_version(),
+        **machine_info(),
         "tools": {
             "clangquill": clangquill_version(tools.clangquill),
             "sphinx": tool_version([*tools.sphinx, "--version"]),
@@ -831,15 +544,6 @@ def _cold_sample(results: dict, repo: str, stage: str) -> dict | None:
     return samples[0] if samples else None
 
 
-def _human_bytes(count: float) -> str:
-    """Format a byte count as B/KB/MB for the report."""
-    for unit in ("B", "KB", "MB"):
-        if count < 1024:  # noqa: PLR2004
-            return f"{count:.0f} {unit}" if unit == "B" else f"{count:.1f} {unit}"
-        count /= 1024
-    return f"{count:.1f} GB"
-
-
 def _work_lines(results: dict, repo: str) -> list[str]:
     """Build the per-repo "how much did each tool actually do" lines.
 
@@ -860,13 +564,13 @@ def _work_lines(results: dict, repo: str) -> list[str]:
                 f"{work.get('symbols', '?')} symbols from {work.get('files', '?')} files "
                 f"→ {work.get('pages_written', '?')} pages, "
             )
-        seg += f"output {output.get('files', 0)} files · {_human_bytes(output.get('bytes', 0))}"
+        seg += f"output {output.get('files', 0)} files · {human_bytes(output.get('bytes', 0))}"
         bits.append(seg)
     for stage in ("doxygen-xml", "doxygen-html"):
         sample = _cold_sample(results, repo, stage)
         if sample is not None:
             output = sample.get("output") or {}
-            bits.append(f"{stage}: output {output.get('files', 0)} files · {_human_bytes(output.get('bytes', 0))}")
+            bits.append(f"{stage}: output {output.get('files', 0)} files · {human_bytes(output.get('bytes', 0))}")
     if bits:
         out.append("- **work (cold)** — " + "; ".join(bits))
 
@@ -979,18 +683,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fresh-clone", action="store_true", help="Re-clone even if a clone already exists.")
     p.add_argument("--keep-clones", action="store_true", help="(default) keep clones for reuse; here for clarity.")
     return p.parse_args(argv)
-
-
-def load_configs(config_dir: Path, repos: str) -> list[RepoConfig]:
-    """Load TOML configs from ``config_dir``, filtered to ``repos`` when given."""
-    wanted = {r.strip() for r in repos.split(",") if r.strip()}
-    configs: list[RepoConfig] = []
-    for path in sorted(config_dir.glob("*.toml")):
-        cfg = RepoConfig.from_toml(path)
-        if wanted and cfg.name not in wanted:
-            continue
-        configs.append(cfg)
-    return configs
 
 
 def main(argv: list[str] | None = None) -> int:

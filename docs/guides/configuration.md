@@ -37,7 +37,8 @@ The field-name-to-front-end mapping is mechanical:
 | `comment_parser` | `clangquill_comment_parser` | `None` | Comment-parser override: a registered name or a dotted import path. See the [comment-parser guide](comment-parsers.md). |
 | `group_by` | `clangquill_group_by` | `"symbol"` | How to partition output pages: `"symbol"` (one page per top-level symbol), `"file"` (one page per parsed source file), `"class"` (one page per documented class/namespace — descends through namespaces so a single huge namespace becomes one page per member class, keeping Sphinx's C++ domain resolver fast and giving each class its own URL), or `"namespace"` (a browsable index → namespace → per-symbol hierarchy). For namespace-rooted libraries — everything under one root namespace — prefer `"namespace"` or `"class"`: with `"symbol"`, the single root collapses the entire subtree onto one page, which renders slowest, serialises Sphinx's read phase (one giant document cannot be parsed in parallel), and is re-rendered on every symbol change. Splitting it into balanced pages parallelises the Sphinx build and keeps incremental rebuilds proportional to the edit. |
 | `path_base` | `clangquill_path_base` | `None` | Directory (resolved against the srcdir / CWD) that the file paths in generated "File" headings are shown relative to. `None` keeps the absolute paths libclang reports, which leak the build-machine layout; set e.g. the project root for stable, reproducible headings. Files outside the base keep their absolute path. |
-| `diagnostics_log` | `clangquill_diagnostics_log` | `None` | Path (resolved against the srcdir / CWD) of a plain-text file receiving **every** libclang diagnostic of the run. `None` disables it. Sphinx and the Python API only — `clangquill build` has no `--diagnostics-log` flag. See [the diagnostics log](#the-diagnostics-log). |
+| `diagnostics_log` | `clangquill_diagnostics_log` | `None` | Path (resolved against the srcdir / CWD) of a plain-text file receiving **every** libclang diagnostic of the run. `None` disables it. See [the diagnostics log](#the-diagnostics-log). |
+| `warnings_as_errors` | `clangquill_warnings_as_errors` | `False` | Fail the run when the parse produced any diagnostic of **warning** severity or worse. Off by default; turn it on in CI. See [warnings as errors](#warnings-as-errors). |
 
 ## The diagnostics log
 
@@ -152,6 +153,47 @@ silence one class without silencing the rest:
 Suppressing `clangquill.parse` discards those diagnostics entirely — pair it
 with `clangquill_diagnostics_log` to keep the detail on disk while keeping the
 build output clean.
+
+## Warnings as errors
+
+The diagnostics log tells you what happened; `warnings_as_errors` decides
+whether it should have. Turn it on and any diagnostic of **warning** severity or
+worse ends the run:
+
+```python
+clangquill_warnings_as_errors = True
+```
+
+```console
+$ clangquill build include/geo.hpp -o docs/api --std c++20 -I include --warnings-as-errors
+Parsed 42 symbol(s) from 3 file(s).
+Wrote 12 page(s) to docs/api.
+  include/geo.hpp:4:2: warning: "geo is on its way out" [-W#warnings]
+Parse produced 1 warning(s) — failing because --warnings-as-errors is set.
+$ echo $?
+1
+```
+
+Things worth knowing:
+
+- **The pages are written first.** The check is a verdict on the parse, not an
+  abort, so a failing run still leaves its output behind to inspect.
+- **It is not a `suppress_warnings` entry.** In Sphinx the failure is an
+  `ExtensionError` naming every offender, not another `clangquill.parse`
+  warning — the setting is opt-in, so silencing it again through the back door
+  would serve nobody. A build with `warnings_as_errors` off behaves exactly as
+  it always has: a header full of warnings still cannot fail a `-W` build.
+- **Notes are not offenders.** A `note:` is the explanatory chain hanging off a
+  diagnostic; the diagnostic it explains is what fails the build.
+- **It re-parses everything, every run.** A verdict on the whole input set can
+  only come from a parse of the whole input set: a cached build has no
+  diagnostics at all, and an incremental one has them only for the translation
+  units it re-parsed, so a warning in an untouched header would go unseen.
+  `warnings_as_errors` therefore ignores `cache_dir` for the parse — leave it
+  off for the edit-rebuild loop and turn it on in CI.
+- **The set of warnings depends on `tu_batch` and input order**, for the reason
+  given [above](#the-diagnostics-log). Pin `tu_batch = 1` if you need a verdict
+  that cannot shift with batch composition.
 
 ## Compile databases
 
