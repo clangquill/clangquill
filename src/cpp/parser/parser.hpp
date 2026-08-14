@@ -61,7 +61,8 @@ class Parser {
   ///        can attribute each dependency to the input that requires it.
   /// @return `false` on hard failure (the translation unit could not be
   ///         created). The failure is appended to @p out as an error carrying a
-  ///         `note:` chain that explains it — see @ref report_parse_failure.
+  ///         `note:` chain that explains it — see `report_parse_failure()`
+  ///         below (private: Doxygen does not extract it here).
   bool parse_file(const std::string& path, model::ParsedModule& out,
                   std::vector<std::string>* tu_files = nullptr);
 
