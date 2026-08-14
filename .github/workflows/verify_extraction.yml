@@ -53,18 +53,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends doxygen
       - name: Install build dependencies (LLVM 22)
         # The verification must judge the code on this branch, not a previously
-        # published wheel, so the core is built from this checkout. LLVM 22 from
-        # apt.llvm.org matches the libclang major bundled into release wheels;
-        # the distro libclang is older and would report a different set of
-        # diagnostics, which is precisely what this workflow gates on.
+        # published wheel, so the core is built from this checkout. LLVM 22
+        # matches the libclang major bundled into release wheels; the distro
+        # libclang is older and would report a different set of diagnostics,
+        # which is precisely what this workflow gates on.
+        # Use the repository-controlled installer (pinned key fingerprint +
+        # pinned llvm-toolchain-<codename>-22 suite) rather than executing the
+        # mutable upstream helper script.
         # sqlite3 and nlohmann-json are not installed from apt: they come from
         # vcpkg, which the CMake build bootstraps itself.
         run: |
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 22
-          sudo apt-get install -y --no-install-recommends \
-            libclang-22-dev llvm-22-dev
+          bash tools/ci/install-llvm-22-apt.sh
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
       - name: Set up Python
