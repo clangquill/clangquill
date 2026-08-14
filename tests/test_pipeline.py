@@ -945,6 +945,108 @@ def test_diagnostics_log_leaves_no_staging_file(project: Path) -> None:
     assert list(project.glob("*.tmp")) == []
 
 
+# --- warnings as errors ------------------------------------------------------
+
+
+@requires_libclang
+def test_diagnostic_counts_are_empty_without_full_capture(project: Path) -> None:
+    # Neither knob is on, so the core never collects warnings and there is
+    # nothing to count — an empty dict, not a zeroed one.
+    (project / "demo.hpp").write_text(WARNING_FIXTURE)
+    result = build(Config(input=["demo.hpp"], output_dir="api"), base_dir=project)
+
+    assert result.diagnostic_counts == {}
+
+
+@requires_libclang
+def test_warnings_as_errors_captures_and_counts_warnings(project: Path) -> None:
+    # Turning strict mode on has to switch full capture on by itself: without a
+    # diagnostics log configured there would otherwise be no warning to judge.
+    (project / "demo.hpp").write_text(WARNING_FIXTURE)
+    config = Config(input=["demo.hpp"], output_dir="api", warnings_as_errors=True)
+    result = build(config, base_dir=project)
+
+    assert result.diagnostic_counts.get("warning") == 1
+    offenders = pipeline.warnings_or_worse(result.diagnostic_records)
+    assert [record.severity for record in offenders] == [2]
+    assert "demo is on its way out" in offenders[0].text
+    # The pages are still written: the verdict belongs to the front end.
+    assert (project / "api" / "index.md").is_file()
+
+
+@requires_libclang
+def test_warnings_as_errors_reports_a_clean_parse_as_clean(project: Path) -> None:
+    config = Config(input=["demo.hpp"], output_dir="api", warnings_as_errors=True)
+    result = build(config, base_dir=project)
+
+    assert pipeline.warnings_or_worse(result.diagnostic_records) == []
+
+
+@requires_libclang
+def test_warnings_as_errors_never_serves_a_cached_verdict(project: Path) -> None:
+    # The trap this guards: a second run of an unchanged project normally noops
+    # past the parse, which would leave no diagnostics and silently pass a
+    # strict build over a tree that is still warning.
+    (project / "demo.hpp").write_text(WARNING_FIXTURE)
+    config = Config(
+        input=["demo.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        warnings_as_errors=True,
+    )
+    first = build(config, base_dir=project)
+    second = build(config, base_dir=project)
+
+    assert first.parsed
+    assert second.parsed
+    assert second.diagnostic_counts == first.diagnostic_counts
+
+
+@requires_libclang
+def test_warnings_as_errors_sees_a_warning_in_an_untouched_input(project: Path) -> None:
+    # An incremental re-parse reports only the translation units it touched, so
+    # editing a clean header must not let a warning in its unedited neighbour
+    # drop out of the verdict.
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    (project / "beta.hpp").write_text(
+        '#warning "beta is on its way out"\n/// beta ns\nnamespace beta { /// g\nint g(); }\n',
+    )
+    config = Config(
+        input=["alpha.hpp", "beta.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        warnings_as_errors=True,
+    )
+    build(config, base_dir=project)
+
+    (project / "alpha.hpp").write_text("/// alpha ns edited\nnamespace alpha { /// f\nint f(); }\n")
+    result = build(config, base_dir=project)
+
+    assert any("beta is on its way out" in record.text for record in result.diagnostic_records)
+
+
+def test_severity_counts_omits_severities_that_never_occurred() -> None:
+    records = [
+        pipeline.Diagnostic(severity=3, depth=0, text="a.hpp:1:1: error: bad"),
+        pipeline.Diagnostic(severity=1, depth=1, text="a.hpp:1:1: note: here"),
+        pipeline.Diagnostic(severity=3, depth=0, text="b.hpp:2:1: error: worse"),
+    ]
+
+    assert pipeline.severity_counts(records) == {"note": 1, "error": 2}
+    assert pipeline.severity_counts([]) == {}
+
+
+def test_warnings_or_worse_drops_notes() -> None:
+    records = [
+        pipeline.Diagnostic(severity=2, depth=0, text="warn"),
+        pipeline.Diagnostic(severity=1, depth=1, text="note"),
+        pipeline.Diagnostic(severity=4, depth=0, text="fatal"),
+        pipeline.Diagnostic(severity=0, depth=0, text="ignored"),
+    ]
+
+    assert [record.text for record in pipeline.warnings_or_worse(records)] == ["warn", "fatal"]
+
+
 def test_write_diagnostics_log_orders_and_indents_records(tmp_path: Path) -> None:
     records = [
         pipeline.Diagnostic(severity=3, depth=0, text="a.hpp:1:1: error: bad"),

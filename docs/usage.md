@@ -92,6 +92,18 @@ Wrote 1 page(s) to /path/to/docs/api.
 Run `clangquill build --help` for the full set of options, which mirror the
 `clangquill_*` config values.
 
+To gate CI on a clean parse, add `--warnings-as-errors` (exit 1 if libclang
+emitted any warning or worse) and `--diagnostics-log` (the full diagnostic list,
+all severities, as a file you can archive):
+
+```console
+$ clangquill build include/geo.hpp -o docs/api --std c++20 -I include \
+      --warnings-as-errors --diagnostics-log build/clangquill.log
+```
+
+See [warnings as errors](guides/configuration.md#warnings-as-errors) for what
+counts as an offender and why strict mode always re-parses.
+
 ## Incremental builds
 
 Set `clangquill_cache_dir` to make rebuilds incremental. clangquill then keeps

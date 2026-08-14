@@ -9,13 +9,17 @@ system that is not Sphinx-driven.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
 from clangquill import __version__, _core
 from clangquill.config import GROUP_BY_CHOICES, Config, ConfigError
 from clangquill.pipeline import build as run_pipeline
+from clangquill.pipeline import warnings_or_worse
+
+if TYPE_CHECKING:
+    from clangquill.pipeline import BuildResult
 
 # Kept as a module constant rather than an inline f-string in the option
 # annotation: autoapi/autodoc cannot statically parse an f-string (JoinedStr)
@@ -154,6 +158,17 @@ def build(  # noqa: PLR0913
         int,
         typer.Option("--tu-batch", help="Inputs grouped per translation unit (0 = auto, 1 = one TU per input)."),
     ] = 0,
+    diagnostics_log: Annotated[
+        Path | None,
+        typer.Option("--diagnostics-log", help="Write every libclang diagnostic of the run to this file."),
+    ] = None,
+    warnings_as_errors: Annotated[  # noqa: FBT002 - typer renders this as a --flag/--no-flag option
+        bool,
+        typer.Option(
+            "--warnings-as-errors/--no-warnings-as-errors",
+            help="Exit non-zero if the parse produced any warning or worse (forces a full parse).",
+        ),
+    ] = False,
 ) -> None:
     """Parse C++ inputs and generate MyST Markdown into the output directory."""
     config = Config(
@@ -176,6 +191,8 @@ def build(  # noqa: PLR0913
         path_base=str(path_base) if path_base else None,
         jobs=jobs,
         tu_batch=tu_batch,
+        diagnostics_log=str(diagnostics_log) if diagnostics_log else None,
+        warnings_as_errors=warnings_as_errors,
     )
     try:
         config.validate()
@@ -192,8 +209,33 @@ def build(  # noqa: PLR0913
 
     typer.echo(f"Parsed {result.symbol_count} symbol(s) from {result.file_count} file(s).")
     typer.echo(f"Wrote {len(result.pages)} page(s) to {result.output_dir}.")
-    for diagnostic in result.diagnostics:
-        typer.echo(f"  diagnostic: {diagnostic}", err=True)
+    if result.diagnostics_log is not None:
+        typer.echo(f"Wrote {len(result.diagnostic_records)} diagnostic(s) to {result.diagnostics_log}.")
+    if not warnings_as_errors:
+        # Default reporting: errors only, one line each. Warnings stay off the
+        # console because a header that warns still documents fine.
+        for diagnostic in result.diagnostics:
+            typer.echo(f"  diagnostic: {diagnostic}", err=True)
+        return
+    _report_strict(result)
+
+
+def _report_strict(result: BuildResult) -> None:
+    """Print the strict-mode verdict and exit non-zero if anything warned.
+
+    The pages have already been written by the time this runs: the check is a
+    verdict on the parse, not an abort, so a failing run still leaves the
+    (possibly incomplete) output behind to inspect.
+    """
+    offenders = warnings_or_worse(result.diagnostic_records)
+    for record in offenders:
+        typer.echo(f"  {record.text}", err=True)
+    totals = ", ".join(f"{count} {name}(s)" for name, count in result.diagnostic_counts.items())
+    if not offenders:
+        typer.echo(f"Parse is clean ({totals or 'no diagnostics'}).")
+        return
+    typer.echo(f"Parse produced {totals} — failing because --warnings-as-errors is set.", err=True)
+    raise typer.Exit(code=1)
 
 
 def main() -> None:

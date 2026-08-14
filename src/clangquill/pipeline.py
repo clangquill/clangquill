@@ -29,6 +29,10 @@ module. A change to the input set or compile configuration still forces a full
 re-parse. Without a cache directory the build is stateless: it always re-parses
 into a throwaway IR, rewrites every page, and prunes stale pages via a
 manifest.
+
+``warnings_as_errors`` is the one setting that opts out of the parse cache
+entirely: a verdict on the whole input set can only come from a parse of the
+whole input set (see :func:`_incremental_build`).
 """
 
 from __future__ import annotations
@@ -76,6 +80,11 @@ _INCREMENTAL_TU_BATCH = 8
 
 #: Severity levels as libclang reports them (mirrors ``CXDiagnosticSeverity``).
 SEVERITY_NAMES = {0: "ignored", 1: "note", 2: "warning", 3: "error", 4: "fatal"}
+
+#: Lowest severity ``warnings_as_errors`` fails a build on. ``note`` (1) is
+#: excluded deliberately: notes are the explanatory chain hanging off a
+#: diagnostic, never a problem in their own right.
+WARNING_SEVERITY = 2
 
 
 @dataclass(frozen=True)
@@ -136,6 +145,11 @@ class BuildResult:
     #: behind their parent. Empty unless ``clangquill_diagnostics_log`` asked
     #: for full capture.
     diagnostic_records: list[Diagnostic] = field(default_factory=list)
+    #: How many diagnostics of each severity this run captured, keyed by the
+    #: :data:`SEVERITY_NAMES` word and holding only non-zero entries. Derived
+    #: from :attr:`diagnostic_records`, so it is empty for the same reason that
+    #: list is: nothing asked for full capture, or nothing was parsed.
+    diagnostic_counts: dict[str, int] = field(default_factory=dict)
     #: Path of the diagnostics log this run wrote, or ``None`` — either because
     #: none was configured, or because a fully cached build deliberately left
     #: the previous run's log in place.
@@ -257,10 +271,10 @@ def _parse_options(config: Config, base_dir: Path) -> _core.ParseOptions:
     opt.extra_args = extra
     opt.jobs = config.jobs
     opt.tu_batch = config.tu_batch
-    # One knob: asking for the log is what asks the core to capture more than
-    # errors. Nothing else consumes the extra records, so capturing them
-    # without a log to write would be pure cost.
-    opt.capture_all_diagnostics = bool(config.diagnostics_log)
+    # Two knobs ask the core to capture more than errors: writing them all to a
+    # log, and judging the build on them. Nothing else consumes the extra
+    # records, so capturing them for a run that does neither would be pure cost.
+    opt.capture_all_diagnostics = bool(config.diagnostics_log or config.warnings_as_errors)
     if config.compile_commands:
         # libclang takes the *directory*; the resolver has already proven a
         # loadable compile_commands.json sits inside it.
@@ -299,7 +313,7 @@ def _parse_fingerprint(config: Config, base_dir: Path, inputs: list[str]) -> str
             # without this, switching the log on for an already-cached project
             # would give a no-op build and an empty log. The derived boolean,
             # never the path, so relocating the log costs no re-parse.
-            "capture_all_diagnostics": bool(config.diagnostics_log),
+            "capture_all_diagnostics": bool(config.diagnostics_log or config.warnings_as_errors),
             "clang_resource_dir": config.clang_resource_dir or "",
             "compile_commands": compile_commands_hash,
             "core_version": getattr(_core, "__core_version__", ""),
@@ -321,6 +335,22 @@ def _records(result: _core.ParseResult) -> list[Diagnostic]:
         )
         for record in result.diagnostic_records
     ]
+
+
+def severity_counts(records: list[Diagnostic]) -> dict[str, int]:
+    """Count ``records`` by severity word, omitting severities that never occur."""
+    counts = Counter(record.severity for record in records)
+    return {name: counts[severity] for severity, name in sorted(SEVERITY_NAMES.items()) if counts[severity]}
+
+
+def warnings_or_worse(records: list[Diagnostic]) -> list[Diagnostic]:
+    """Return the top-level records ``warnings_as_errors`` fails a build on.
+
+    Notes are dropped along with their severity: they are only meaningful
+    hanging off the diagnostic they explain, and that diagnostic is already in
+    the list when it is one worth failing on.
+    """
+    return [record for record in records if record.severity >= WARNING_SEVERITY]
 
 
 def _diagnostics_log_path(config: Config, base: Path) -> Path | None:
@@ -591,6 +621,7 @@ def _full_build(config: Config, base: Path, inputs: list[str], output_dir: Path)
         file_count=result.file_count,
         diagnostics=list(result.diagnostics),
         diagnostic_records=records,
+        diagnostic_counts=severity_counts(records),
         diagnostics_log=log_path,
         parsed=True,
         pages_written=sorted(written),
@@ -622,6 +653,16 @@ def _incremental_build(
             # parse produces its contents (diagnostics live in neither the IR
             # nor the cache). Force one rather than nooping past it and leaving
             # the configured path empty. Costs one re-parse per relocation.
+            status = ParseStatus(current=False)
+        if config.warnings_as_errors:
+            # A strict verdict has to cover every input, and only a full parse
+            # produces diagnostics for every input. A cached build has none at
+            # all, and an incremental one reports only the translation units it
+            # re-parsed — so a warning in an untouched header would go unseen
+            # and the build would pass while the tree is dirty. Force the full
+            # parse rather than quietly narrowing what "clean" means. This is
+            # why strict mode costs a full parse every run; leave it off for
+            # the edit-rebuild loop and turn it on in CI.
             status = ParseStatus(current=False)
         parsed = not status.current
         # Fully unchanged build: the parse came from cache (IR identical) and the
@@ -702,6 +743,7 @@ def _incremental_build(
         file_count=file_count,
         diagnostics=diagnostics,
         diagnostic_records=records,
+        diagnostic_counts=severity_counts(records),
         diagnostics_log=written_log,
         parsed=parsed,
         pages_written=written,

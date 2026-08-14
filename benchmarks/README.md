@@ -1,4 +1,20 @@
-# ClangQuill vs Doxygen benchmarks
+# ClangQuill vs Doxygen harnesses
+
+Two drivers run **ClangQuill** and **Doxygen** over the same real C++ codebases
+and answer different questions about them:
+
+| Driver | Question | Failure policy |
+|--------|----------|----------------|
+| `benchmark.py` | How *fast* is each tool? | A non-zero exit is recorded as data. |
+| `verify.py` | Is the extraction *correct*? | Any warning fails the run. |
+
+Both read the same project list — the TOML files in `configs/` — and share
+their configuration schema, cloning, and Doxyfile generation through
+`harness.py`, so "the fast path and the correct path see the same code" is a
+fact rather than a claim. The rest of this page covers the benchmark; the
+verification driver has [its own section](#verifying-extraction).
+
+## Benchmark
 
 A standard-library-only harness that times **ClangQuill** against **Doxygen** on
 real C++ codebases, with each tool's two pipeline stages measured separately.
@@ -103,10 +119,74 @@ By default it benchmarks every config under `configs/` (the external repos are
 cloned blobless); a manual dispatch can narrow `--repos` or change `--tools` via
 the workflow inputs.
 
+## Verifying extraction
+
+`verify.py` runs the same projects to ask whether the extraction is *correct*.
+Nothing is timed. Three checks per project, all of which must pass:
+
+- **parse** — `clangquill build --warnings-as-errors` exits 0: libclang
+  produced no diagnostic of warning severity or worse over the whole input set.
+  The complete diagnostic list is written to a log whatever the outcome.
+- **doxygen** — `doxygen` with `WARNINGS = YES` and
+  `WARN_AS_ERROR = FAIL_ON_WARNINGS` exits 0 over the identical file set.
+  Doxygen finishes the run before failing, so its XML is still there to compare
+  against. Needs Doxygen **1.9.2+**: older releases ignore `FAIL_ON_WARNINGS`
+  and exit 0 however much they warned, so the check fails on them outright
+  rather than reporting a green it cannot back up.
+- **extraction** — every input file Doxygen extracted a documented entity from
+  yielded a documented symbol in ClangQuill's IR too.
+
+The third check is why both tools are run at all. A parse can be perfectly clean
+and the output still be wrong: a regression that stops attaching doc comments to
+symbols shows up here as files Doxygen documented and ClangQuill did not, and
+nowhere else. The comparison is *per file* rather than by raw symbol count,
+because the two tools model symbols differently enough that an exact count
+comparison would be noise — the overall documented-entity ratio is reported
+next to it, and gates the run only for configs that set `min_documented_ratio`.
+That ratio can exceed 100 %: ClangQuill's IR carries documented private members
+which Doxygen omits without `EXTRACT_PRIVATE`, so read it as drift between runs
+rather than as a score out of 100.
+
+```bash
+# Every config (needs doxygen on PATH; the IR is read through clangquill itself)
+uv run --project benchmarks python benchmarks/verify.py
+
+# One project
+uv run --project benchmarks python benchmarks/verify.py --repos clangquill
+```
+
+Flags: `--repos`, `--config-dir`, `--work-dir`, `--results-dir`,
+`--fresh-clone`, `--clangquill`, `--doxygen`. The exit status is 0 only when
+every selected project passed every check. Results land in
+`benchmarks/verify-results/` (gitignored) as a `<ts>.json` / `<ts>.md` pair,
+with the per-project diagnostics and Doxygen warning logs under
+`.work/_bench/<repo>/logs/`.
+
+Unlike the benchmark, **there are no baselines and nothing is tolerated**. The
+dependency-heavy projects are expected to fail until their configs grow the
+`include_dirs`/`defines` their headers need, or narrow `inputs` to a subset that
+parses — a recorded "expected noise" list would make the whole run decorative.
+Strict mode also re-parses everything every run: a verdict on the whole input
+set can only come from a parse of the whole input set, so the harness starts
+each project from a wiped cache.
+
+### Continuous verification
+
+The `verify-extraction` workflow
+(`.github/workflows/verify_extraction.yml`) runs weekly (Mondays, 05:00 UTC) and
+on manual dispatch, with the same checkout-build steps as the benchmark so the
+verdict is about the current commit rather than a published wheel. It appends
+the report to the job summary and uploads the results plus every project's logs
+as an artifact. Weekly rather than per-push because it clones and fully
+re-parses four large upstream projects: the per-push correctness signal is the
+test suite, and this catches the slower drift — an upstream project moving, a
+libclang upgrade changing what parses, or a comment-extraction regression a
+green parse would hide.
+
 ## Configs
 
 One TOML file per target in `configs/` (`clangquill`, `dune-gdt`, `abseil`,
-`eigen`). Schema:
+`eigen`), shared by both drivers. Schema:
 
 ```toml
 name = "eigen"
@@ -124,6 +204,9 @@ doxygen_file_patterns = ["*.h"]     # Doxygen FILE_PATTERNS; pin to the glob's e
 group_by = "namespace"              # clangquill --group-by (empty = tool default "symbol";
                                     # set "namespace" for namespace-rooted libraries so one
                                     # root namespace doesn't collapse onto a single huge page)
+min_documented_ratio = 0.5          # verify.py only: fail when clangquill documents less than
+                                    # this share of doxygen's documented entities (omit to
+                                    # report the ratio without gating on it)
 [patch]
 files = ["Eigen/src/Core/Matrix.h"]      # widely-included incremental-edit targets
 leaf_files = ["Eigen/src/Core/Stride.h"] # leaf targets for incremental-leaf (optional)
@@ -173,9 +256,10 @@ the file exists, making the edit deterministic without shipping brittle diffs.
 
 - **abseil / eigen / dune-gdt** are template- and dependency-heavy. Without their
   full include trees, libclang emits diagnostics and may extract fewer symbols
-  than Doxygen's tolerant, non-compiling lexer. The harness records this (exit
-  codes, symbol counts) and does **not** treat it as a failure. Extend each
-  config's `include_dirs` if you have the dependencies available.
+  than Doxygen's tolerant, non-compiling lexer. The *benchmark* records this
+  (exit codes, symbol counts) and does **not** treat it as a failure; `verify.py`
+  does, deliberately. Extend each config's `include_dirs` if you have the
+  dependencies available.
 - Things this headless harness cannot control are left to the operator: pin the
   CPU governor to `performance`, run on an otherwise-idle, thermally-stable
   machine, and prefer more `--repeat` passes for stable medians.

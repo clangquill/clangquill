@@ -23,6 +23,7 @@ def test_defaults_match_issue_contract():
     assert cfg.group_by == "symbol"
     assert cfg.path_base is None
     assert cfg.diagnostics_log is None
+    assert cfg.warnings_as_errors is False
     assert cfg.std == "c++20"
     assert cfg.toctree_maxdepth == 2
     assert cfg.root_document == "index"
@@ -51,6 +52,7 @@ def test_config_fields_cover_every_documented_value():
         "clangquill_group_by",
         "clangquill_path_base",
         "clangquill_diagnostics_log",
+        "clangquill_warnings_as_errors",
         "clangquill_toctree_maxdepth",
         "clangquill_root_document",
     }
@@ -175,6 +177,12 @@ def test_validate_rejects_list_with_non_str_items(field: str):
 def test_validate_rejects_non_bool_include_undocumented():
     cfg = Config(input=["a.hpp"], include_undocumented="yes")
     with pytest.raises(ConfigError, match="include_undocumented must be a boolean"):
+        cfg.validate()
+
+
+def test_validate_rejects_non_bool_warnings_as_errors():
+    cfg = Config(input=["a.hpp"], warnings_as_errors="yes")
+    with pytest.raises(ConfigError, match="warnings_as_errors must be a boolean"):
         cfg.validate()
 
 

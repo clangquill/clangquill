@@ -24,11 +24,13 @@ from sphinx.util import logging
 
 from clangquill import __version__, _core
 from clangquill.config import CONFIG_FIELDS, CONFIG_PREFIX, Config, ConfigError
-from clangquill.pipeline import COMPILE_COMMANDS_NAME, build
+from clangquill.pipeline import COMPILE_COMMANDS_NAME, build, warnings_or_worse
 
 if TYPE_CHECKING:
     from sphinx.application import Sphinx
     from sphinx.config import Config as SphinxConfig
+
+    from clangquill.pipeline import BuildResult
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +159,27 @@ def _run(app: Sphinx) -> None:
     # Suppressible via ``suppress_warnings = ["clangquill.parse"]``.
     for diagnostic in result.diagnostics:
         logger.warning("%s", diagnostic, type="clangquill", subtype="parse")
+    if config.warnings_as_errors:
+        _enforce_strict(result)
+
+
+def _enforce_strict(result: BuildResult) -> None:
+    """Fail the build when ``clangquill_warnings_as_errors`` saw a warning.
+
+    An :class:`ExtensionError`, not a logger call: this is opt-in, so the point
+    is to stop the build outright rather than to add one more warning that
+    ``suppress_warnings`` could silence. The pages are already written when this
+    runs, so a failing build still leaves its output to inspect. Every offender
+    is listed first — a bare "3 warnings" would send the reader hunting for a
+    diagnostics log that may not be configured.
+    """
+    offenders = warnings_or_worse(result.diagnostic_records)
+    if not offenders:
+        return
+    totals = ", ".join(f"{count} {name}(s)" for name, count in result.diagnostic_counts.items())
+    detail = "\n".join(f"  {record.text}" for record in offenders)
+    msg = f"clangquill: the parse produced {totals} and {CONFIG_PREFIX}warnings_as_errors is set:\n{detail}"
+    raise ExtensionError(msg)
 
 
 def _write_placeholder(app: Sphinx, config: Config) -> None:
