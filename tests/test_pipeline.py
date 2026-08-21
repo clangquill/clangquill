@@ -959,6 +959,93 @@ def test_diagnostic_counts_are_empty_without_full_capture(project: Path) -> None
 
 
 @requires_libclang
+def test_header_only_project_builds_from_a_tests_only_database(tmp_path: Path) -> None:
+    """A library whose only translation units are its tests still documents.
+
+    A compile database lists translation units, never the headers they include,
+    so a header-only library has no entry for anything it wants documented.
+    libclang answers such a lookup with the closest listed file's command, which
+    for this shape is the test that includes the header -- and that carries the
+    include dirs and defines the header is meant to be read with.
+    """
+    (tmp_path / "include").mkdir()
+    (tmp_path / "tests").mkdir()
+    # Only visible with the -D the test's entry carries, so finding it proves
+    # the flags really were borrowed rather than guessed.
+    (tmp_path / "include" / "demo.hpp").write_text(
+        "#pragma once\n#ifdef DEMO_FEATURE\n" + FIXTURE + "#endif\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_demo.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+    (tmp_path / "compile_commands.json").write_text(
+        json.dumps(
+            [
+                {
+                    "directory": str(tmp_path),
+                    "file": str(tmp_path / "tests" / "test_demo.cpp"),
+                    "arguments": [
+                        "c++",
+                        "-std=c++20",
+                        f"-I{tmp_path / 'include'}",
+                        "-DDEMO_FEATURE=1",
+                        "-c",
+                        str(tmp_path / "tests" / "test_demo.cpp"),
+                    ],
+                },
+            ],
+        ),
+        encoding="utf-8",
+    )
+
+    config = Config(input=["include/demo.hpp"], output_dir="api", compile_commands=".")
+    result = build(config, base_dir=tmp_path)
+
+    assert (tmp_path / "api" / "index.md").is_file()
+    assert result.symbol_count > 0
+    # Borrowed flags are never silent, but they are never fatal either.
+    assert result.diagnostics == []
+    borrowed = [r for r in result.diagnostic_records if "no compilation database entry" in r.text]
+    assert len(borrowed) == 1
+    assert borrowed[0].severity == 2
+
+    # Nothing was written next to the sources or into the build.
+    assert not list(tmp_path.glob("*.d"))
+    assert not list(tmp_path.glob("*.o"))
+
+
+@requires_libclang
+def test_warnings_as_errors_fails_on_borrowed_compile_flags(tmp_path: Path) -> None:
+    """Strict mode treats borrowed flags as the not-quite-right parse they are."""
+    (tmp_path / "demo.hpp").write_text(FIXTURE, encoding="utf-8")
+    (tmp_path / "other.cpp").write_text("int other() { return 1; }\n", encoding="utf-8")
+    (tmp_path / "compile_commands.json").write_text(
+        json.dumps(
+            [
+                {
+                    "directory": str(tmp_path),
+                    "file": str(tmp_path / "other.cpp"),
+                    "arguments": ["c++", "-std=c++20", "-c", str(tmp_path / "other.cpp")],
+                },
+            ],
+        ),
+        encoding="utf-8",
+    )
+
+    config = Config(
+        input=["demo.hpp"],
+        output_dir="api",
+        compile_commands=".",
+        warnings_as_errors=True,
+    )
+    result = build(config, base_dir=tmp_path)
+
+    offenders = pipeline.warnings_or_worse(result.diagnostic_records)
+    assert [r.text for r in offenders if "no compilation database entry" in r.text]
+    # The pages are still written: the verdict belongs to the front end.
+    assert (tmp_path / "api" / "index.md").is_file()
+
+
+@requires_libclang
 def test_warnings_as_errors_captures_and_counts_warnings(project: Path) -> None:
     # Turning strict mode on has to switch full capture on by itself: without a
     # diagnostics log configured there would otherwise be no warning to judge.
