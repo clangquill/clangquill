@@ -569,6 +569,53 @@ TEST_CASE("a file the database really lists is not reported as borrowed",
   fs::remove_all(dir);
 }
 
+TEST_CASE("an entry's paths resolve against its own directory, not ours",
+          "[parser]") {
+  // A compile_commands.json entry may spell its flags relative to its own
+  // `directory` -- the format allows it and `-Iinclude` is a common way to
+  // write one. A build system runs the command from there; libclang does not
+  // chdir, so without replaying the working directory clang resolves the
+  // include against whatever directory the docs build runs in. The header then
+  // parses "successfully" with its dependency missing, and the declarations
+  // that needed it quietly vanish from the output.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-workdir";
+  fs::remove_all(dir);
+  fs::create_directories(dir / "include" / "geo" / "detail");
+  fs::create_directories(dir / "src");
+  std::ofstream(dir / "include" / "geo" / "detail" / "traits.hpp")
+      << "#pragma once\nnamespace geo::detail { using scalar_t = double; }\n";
+  // Angle include: only findable through the entry's -I.
+  std::ofstream(dir / "include" / "geo" / "mesh.hpp")
+      << "#pragma once\n#include <geo/detail/traits.hpp>\n"
+         "namespace geo { struct Mesh { detail::scalar_t x; }; }\n";
+  std::ofstream(dir / "src" / "main.cpp") << "int main() { return 0; }\n";
+
+  {
+    // Every path relative to "directory", -I included. The test process runs
+    // somewhere else entirely, which is the whole point.
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"src/main.cpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-Iinclude\", \"-c\", \"src/main.cpp\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  opts.capture_all_diagnostics = true;
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file(
+      (dir / "include" / "geo" / "mesh.hpp").string(), mod));
+
+  CHECK(find(mod, "geo::Mesh") != nullptr);
+  CHECK(find(mod, "geo::Mesh::x") != nullptr);
+  for (const auto& d : mod.diagnostics) {
+    CHECK(d.severity < model::kSeverityError);
+  }
+
+  fs::remove_all(dir);
+}
+
 TEST_CASE("a header borrowing another file's flags is parsed as a header",
           "[parser]") {
   // The common shape, and the one that used to warn on every file: the header

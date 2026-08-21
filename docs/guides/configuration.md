@@ -289,7 +289,7 @@ accuracy improvement, not a prerequisite.
 
 ### How an entry's command line is replayed
 
-An entry's arguments are handed to libclang almost verbatim. Four adjustments
+An entry's arguments are handed to libclang almost verbatim. Five adjustments
 are made. Three exist because libclang appends arguments of its own — the
 source file and `-fsyntax-only` — after whatever it is given:
 
@@ -321,7 +321,19 @@ source file and `-fsyntax-only` — after whatever it is given:
   affected: it has no entry of its own, so it borrows an interpolated command
   from a `.cpp`, which of course names no language.
 
-The fourth is about what a parse may do to your disk:
+The fourth is about where the entry's own paths point:
+
+- **The entry's `directory` is replayed as `-working-directory`.** A
+  `compile_commands.json` entry may spell its flags relative to that directory —
+  the format allows it, and `-Iinclude` is a common way to write one. A build
+  system runs the command from there; libclang does not `chdir`, so without
+  this clang would resolve those paths against whatever directory the docs build
+  runs in. An `-I` that does not resolve is not a loud failure for a header: it
+  parses, and the declarations that needed the missing include quietly go
+  missing from the output. It is prepended, so an entry carrying its own
+  `-working-directory` still wins — clang takes the last one.
+
+And the fifth is about what a parse may do to your disk:
 
 - **Everything that writes a file is dropped** — `-o`, the `-M` dependency-list
   family (`-MD`, `-MF`, `-MT`, …) and `--serialize-diagnostics`. A parse is not

@@ -56,8 +56,9 @@ without it fails the build. Generate the database with
 [Bear](https://github.com/rizsotto/Bear) records one for anything else), and see
 the [compile-database guide](guides/configuration.md#compile-databases) for what
 happens when the file is missing or unloadable, and for how a header with no
-entry of its own — the whole of a header-only library — still gets the right
-flags.
+entry of its own — the whole of a header-only library — borrows the command of
+the nearest listed file, which clangquill reports rather than passes off as
+exact.
 
 Then reference the generated toctree from your root document:
 

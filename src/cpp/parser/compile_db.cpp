@@ -106,6 +106,12 @@ CompileDb::~CompileDb() {
 }
 
 bool CompileDb::load(const std::string& dir) {
+  // The cache below describes the database being replaced, so it has to go
+  // with it -- otherwise lists_file would answer for the old one and the
+  // borrowed-flags warning would be reported (or suppressed) for the wrong
+  // files.
+  files_.clear();
+  files_built_ = false;
   if (db_) {
     clang_CompilationDatabase_dispose(
         static_cast<CXCompilationDatabase>(db_));
@@ -136,6 +142,23 @@ std::vector<std::string> CompileDb::args_for(const std::string& path) const {
     unsigned argc = clang_CompileCommand_getNumArgs(cmd);
     const std::filesystem::path dir(
         to_string(clang_CompileCommand_getDirectory(cmd)));
+    // Replay the entry's working directory. A compile_commands.json entry may
+    // spell every path in it relative to its own `directory` -- the format
+    // explicitly allows it, and `-Iinclude` is a common way to write one --
+    // but a build system runs the command from there while libclang does not
+    // chdir anywhere. Without this, clang resolves those against whatever
+    // directory the docs build happens to run in and the include is simply not
+    // found, which for a header means its declarations quietly go missing.
+    //
+    // Prepended, so an entry carrying its own -working-directory still wins:
+    // clang takes the last such option.
+    if (!dir.empty()) {
+      std::error_code ec;
+      const std::filesystem::path resolved =
+          dir.is_absolute() ? dir : std::filesystem::absolute(dir, ec);
+      args.push_back("-working-directory=" +
+                     (ec ? dir : resolved).string());
+    }
     // Skip argv[0] (the compiler) and drop any token naming the source file
     // itself, however the database spells it; libclang adds the file back.
     for (unsigned i = 1; i < argc; ++i) {
