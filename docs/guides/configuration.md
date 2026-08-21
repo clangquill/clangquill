@@ -259,12 +259,33 @@ path, so the degraded run is visible rather than silent.
 ### Headers with no entry of their own
 
 A compile database lists translation units (`.cpp`), never the headers they
-include, so most documented headers have no entry. clangquill tries the
-same-directory `.cpp` of the same name (`foo.hpp` → `foo.cpp`), which usually
-shares the header's include dirs and defines, before falling back to
-`std`/`include_dirs`/`defines`. Header-only libraries, where that sibling does
-not exist either, are the case for generating a database that lists the headers
-themselves — `docs/conf.py` in this repository does exactly that.
+include, so most documented headers have no entry. libclang fills the gap
+itself: the database it hands back is wrapped in an *interpolating* one, which
+answers a lookup for an unlisted file with the command of the closest listed
+file — matched on path segments, stem and extension — and the filename
+substituted for that entry's own.
+
+In practice that means a header is parsed with the include directories, defines
+and standard of whichever translation unit the build system compiles nearest to
+it. **Header-only libraries work without special setup**: a library whose only
+translation units are its tests gets its tests' flags, which are the flags those
+headers are meant to be read with.
+
+Interpolated flags are still a guess — the closest translation unit may define
+something this header does not want, or miss an include directory only some
+other target passes. clangquill reports the substitution as a warning naming
+both files, so it shows up in the [diagnostics log](#the-diagnostics-log) and
+fails a build run with `warnings_as_errors`:
+
+```text
+no compilation database entry for 'include/geo/api.hpp'; libclang supplied the
+command of 'tests/test_geo.cpp' instead. Its include directories and defines may
+not match this file.
+```
+
+Generating a database that lists the headers themselves — as `docs/conf.py` in
+this repository does — is how to replace that guess with exact flags. It is an
+accuracy improvement, not a prerequisite.
 
 ### How an entry's command line is replayed
 
