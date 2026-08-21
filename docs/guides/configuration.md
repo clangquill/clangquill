@@ -289,8 +289,8 @@ accuracy improvement, not a prerequisite.
 
 ### How an entry's command line is replayed
 
-An entry's arguments are handed to libclang almost verbatim. Three adjustments
-are made, and they exist because libclang appends arguments of its own — the
+An entry's arguments are handed to libclang almost verbatim. Four adjustments
+are made. Three exist because libclang appends arguments of its own — the
 source file and `-fsyntax-only` — after whatever it is given:
 
 - **The source operand is dropped**, however the database spells it (relative to
@@ -312,6 +312,18 @@ source file and `-fsyntax-only` — after whatever it is given:
   `c++-header` with `c++` would report a `#pragma once` as being in a main file
   — which such a project's own `-Werror` then turns into an error on a header
   that compiles cleanly.
+
+The fourth is about what a parse may do to your disk:
+
+- **Everything that writes a file is dropped** — `-o`, the `-M` dependency-list
+  family (`-MD`, `-MF`, `-MT`, …) and `--serialize-diagnostics`. A parse is not
+  a build: `-fsyntax-only` means those outputs are never legitimately produced,
+  and clang reports them as `-Wunused-command-line-argument` anyway. Left in
+  they are actively harmful, because the entry a header borrows is not its own:
+  every documented header inherits one entry's `-MF` path and the parse threads
+  race to write it — and a relative path resolves against the *process*
+  directory (the Sphinx srcdir), not the entry's `directory`, so the files land
+  next to your sources.
 
 ## Toctree / root
 

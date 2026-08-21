@@ -484,6 +484,86 @@ TEST_CASE("an entry's own -x survives, and is supplied when it has none",
   fs::remove_all(dir);
 }
 
+TEST_CASE("replaying a database entry never writes the files it names",
+          "[parser]") {
+  // A real entry names an object file, a make-style dependency list and often
+  // a serialized diagnostics file. libclang appends -fsyntax-only, so none of
+  // those outputs belongs to this run -- but clang still writes the dependency
+  // list and the diagnostics file when asked, into the user's tree.
+  //
+  // It is worse than one stray file. The database libclang hands back
+  // interpolates: a header with no entry of its own gets the nearest entry's
+  // command with only the filename substituted, so every documented header
+  // inherits the *same* -MF path, and batches parse concurrently.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-no-outputs";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.hpp") << "inline int widget_value() { return 3; }\n";
+
+  {
+    std::ofstream cc(dir / "compile_commands.json");
+    // Absolute output paths, because clang resolves a relative one against the
+    // *process* working directory -- libclang never chdir's into the entry's
+    // `directory` -- which for a real build is the Sphinx srcdir.
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-MD\", \"-MF\", \"" << (dir / "widget.d").string()
+       << "\", \"-MT\", \"widget.o\", \"--serialize-diagnostics\", \""
+       << (dir / "widget.dia").string() << "\", \"-o\", \""
+       << (dir / "widget.o").string() << "\", \"-c\", \"widget.hpp\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  opts.capture_all_diagnostics = true;
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+
+  // The rest of the command line still applied.
+  CHECK(find(mod, "widget_value") != nullptr);
+  CHECK_FALSE(fs::exists(dir / "widget.d"));
+  CHECK_FALSE(fs::exists(dir / "widget.dia"));
+  CHECK_FALSE(fs::exists(dir / "widget.o"));
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("an interpolated entry's outputs are not written either", "[parser]") {
+  // The case that actually bites: the header has no entry at all, so the
+  // command -- output paths included -- is borrowed wholesale from a file it
+  // has nothing to do with.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-interp-outputs";
+  fs::remove_all(dir);
+  fs::create_directories(dir / "include");
+  fs::create_directories(dir / "tests");
+  std::ofstream(dir / "include" / "widget.hpp")
+      << "inline int widget_value() { return 3; }\n";
+  std::ofstream(dir / "tests" / "test_widget.cpp") << "int main() { return 0; }\n";
+
+  {
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"tests/test_widget.cpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-MD\", \"-MF\", \"" << (dir / "test_widget.d").string()
+       << "\", \"-o\", \"" << (dir / "test_widget.o").string()
+       << "\", \"-c\", \"tests/test_widget.cpp\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file(
+      (dir / "include" / "widget.hpp").string(), mod));
+
+  CHECK(find(mod, "widget_value") != nullptr);
+  CHECK_FALSE(fs::exists(dir / "test_widget.d"));
+  CHECK_FALSE(fs::exists(dir / "test_widget.o"));
+
+  fs::remove_all(dir);
+}
+
 TEST_CASE("an unloadable compile database is reported with the path searched",
           "[parser]") {
   // libclang reports a database it cannot open exactly like "no entry for this
