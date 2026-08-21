@@ -26,6 +26,27 @@ namespace {
 
 CXIndex as_index(void* p) { return static_cast<CXIndex>(p); }
 
+// The `-x` language to parse `path` as.
+//
+// `c++-header` rather than `c++` for a header, because under `c++` its own
+// `#pragma once` is in the main file -- clang says so
+// ([-Wpragma-once-outside-header]), and a project whose flags carry -Werror
+// then fails on a header that compiles perfectly well. Nearly every documented
+// header hits this: a compile database lists translation units, so a header
+// borrows an interpolated command from some .cpp, which of course names no
+// language of its own and leaves us to supply one.
+//
+// An extension-less input is treated as a header too: that spelling belongs to
+// the standard library and to libraries that imitate it, never to a
+// translation unit.
+const char* language_flag_for(const std::string& path) {
+  static const std::unordered_set<std::string> kHeaderExtensions = {
+      ".h", ".hpp", ".hh", ".hxx", ".h++", ".hp", ".inc", ".ipp", ".tpp", ".tcc"};
+  const std::string ext = std::filesystem::path(path).extension().string();
+  if (ext.empty() || kHeaderExtensions.count(ext) != 0) return "-xc++-header";
+  return "-xc++";
+}
+
 // Inputs grouped per umbrella translation unit when ParseOptions::tu_batch is
 // 0 (auto). Fixed — independent of the job count — so the batch composition,
 // and with it the extracted IR, is identical no matter how many threads run.
@@ -227,19 +248,25 @@ Parser::~Parser() {
   if (index_) clang_disposeIndex(as_index(index_));
 }
 
-std::vector<std::string> Parser::default_args() const {
+std::vector<std::string> Parser::default_args(const std::string& path) const {
   std::vector<std::string> args;
   args.push_back("-std=" + options_.std_flag);
   for (const auto& inc : options_.include_dirs) args.push_back("-I" + inc);
   for (const auto& def : options_.defines) args.push_back("-D" + def);
   for (const auto& extra : options_.extra_args) args.push_back(extra);
-  // Parse headers as C++ even without a .cpp extension.
-  args.push_back("-xc++");
+  // Parse headers as C++ even without a .cpp extension, and as headers rather
+  // than main files -- see language_flag_for.
+  args.push_back(language_flag_for(path));
   return args;
 }
 
 std::vector<std::string> Parser::build_args(const std::string& path,
-                                            bool* from_compile_db) const {
+                                            bool* from_compile_db,
+                                            const std::string* main_file) const {
+  // The language has to describe what libclang is actually handed, which for a
+  // batch is the synthetic umbrella .cpp rather than the member the flags were
+  // looked up for.
+  const std::string& language_of = main_file != nullptr ? *main_file : path;
   if (from_compile_db != nullptr) *from_compile_db = false;
   std::vector<std::string> args;
 
@@ -264,21 +291,19 @@ std::vector<std::string> Parser::build_args(const std::string& path,
     }
   }
 
-  if (args.empty()) return default_args();
+  if (args.empty()) return default_args(language_of);
 
   if (from_compile_db != nullptr) *from_compile_db = true;
-  // Parse headers as C++ even without a .cpp extension -- but only when the
-  // entry has not already said what the file is. `-x` applies to the inputs
-  // that follow it and libclang appends the source last, so appending our own
-  // would win over the entry's. That matters for the `-x c++-header` commands
-  // CMake generates for header sets: under `c++` a `#pragma once` in the main
-  // file is -Wpragma-once-outside-header, which such a project's own -Werror
-  // then turns into an error on a header that compiles perfectly well.
+  // Supply the language -- but only when the entry has not already said what
+  // the file is. `-x` applies to the inputs that follow it and libclang appends
+  // the source last, so appending our own would win over the entry's, and an
+  // entry that states the language knows better than we do. That matters for
+  // the `-x c++-header` commands CMake generates for header sets.
   const bool entry_sets_language =
       std::any_of(args.begin(), args.end(), [](const std::string& a) {
         return a == "-x" || a.rfind("-x", 0) == 0;
       });
-  if (!entry_sets_language) args.push_back("-xc++");
+  if (!entry_sets_language) args.push_back(language_flag_for(language_of));
   return args;
 }
 
@@ -560,7 +585,7 @@ void Parser::report_parse_failure(const std::string& path, int error_code,
   // would be byte-for-byte the same command and fail the same way.
   if (!args_from_compile_db) return;
 
-  const std::vector<std::string> retry_args = default_args();
+  const std::vector<std::string> retry_args = default_args(path);
   std::vector<const char*> retry_argv;
   retry_argv.reserve(retry_args.size());
   for (const auto& a : retry_args) retry_argv.push_back(a.c_str());
@@ -676,7 +701,8 @@ bool Parser::parse_batch(const std::vector<std::string>& paths,
   std::string contents;
   for (const auto& p : abs) contents += "#include \"" + p + "\"\n";
 
-  std::vector<std::string> args = build_args(abs.front());
+  std::vector<std::string> args =
+      build_args(abs.front(), /*from_compile_db=*/nullptr, &umbrella);
   report_compile_db_failure(out);
   std::vector<const char*> argv;
   argv.reserve(args.size());

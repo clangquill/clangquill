@@ -306,12 +306,20 @@ source file and `-fsyntax-only` — after whatever it is given:
   documented header has. The operand the separator protected is the source
   file, dropped above and re-supplied by libclang, so nothing is left for it to
   separate.
-- **`-xc++` is appended only when the entry names no language itself.** It is
-  there so a header without a `.cpp` extension is not parsed as C; an entry
-  carrying its own `-x` has already said what the file is, and overriding
-  `c++-header` with `c++` would report a `#pragma once` as being in a main file
-  — which such a project's own `-Werror` then turns into an error on a header
-  that compiles cleanly.
+- **The language is supplied only when the entry names none itself.** An entry
+  carrying its own `-x` has already said what the file is, and `-x` applies to
+  the inputs after it while libclang appends the source last, so anything
+  clangquill added would override it. Otherwise `-xc++-header` is appended for a
+  header — anything with a header extension (`.h`, `.hpp`, `.hh`, `.hxx`,
+  `.inc`, `.ipp`, …) or no extension at all, the spelling the standard library
+  uses — and `-xc++` for a translation unit.
+
+  `c++-header` rather than `c++` because under `c++` a header's own
+  `#pragma once` is in the main file, which clang reports
+  (`[-Wpragma-once-outside-header]`) and a project's own `-Werror` turns into an
+  error on a header that compiles cleanly. Nearly every documented header is
+  affected: it has no entry of its own, so it borrows an interpolated command
+  from a `.cpp`, which of course names no language.
 
 The fourth is about what a parse may do to your disk:
 

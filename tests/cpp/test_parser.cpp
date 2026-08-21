@@ -484,6 +484,73 @@ TEST_CASE("an entry's own -x survives, and is supplied when it has none",
   fs::remove_all(dir);
 }
 
+TEST_CASE("a header borrowing another file's flags is parsed as a header",
+          "[parser]") {
+  // The common shape, and the one that used to warn on every file: the header
+  // has no entry, so libclang interpolates the nearest .cpp's command -- which
+  // names no language, leaving clangquill to supply one. Under plain `c++` the
+  // header's own `#pragma once` is in the main file, which clang reports and a
+  // project's -Werror turns into an error on a header that compiles cleanly.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-header-lang";
+  fs::remove_all(dir);
+  fs::create_directories(dir / "include");
+  fs::create_directories(dir / "tests");
+  std::ofstream(dir / "include" / "widget.hpp")
+      << "#pragma once\ninline int widget_value() { return 4; }\n";
+  std::ofstream(dir / "tests" / "test_widget.cpp") << "int main() { return 0; }\n";
+
+  {
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"tests/test_widget.cpp\", \"arguments\": [\"c++\", "
+          "\"-Wall\", \"-Werror\", \"-std=c++20\", \"-c\", "
+          "\"tests/test_widget.cpp\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  opts.capture_all_diagnostics = true;
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file(
+      (dir / "include" / "widget.hpp").string(), mod));
+
+  CHECK(find(mod, "widget_value") != nullptr);
+  for (const auto& d : mod.diagnostics) {
+    CHECK(d.text.find("pragma-once-outside-header") == std::string::npos);
+  }
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("a header is parsed as a header under the fallback flags too",
+          "[parser]") {
+  // Same reasoning with no database at all: `#pragma once` is how headers are
+  // written, so the -std/-I/-D path must not report it either. An
+  // extension-less input counts as a header as well -- that spelling belongs to
+  // the standard library and its imitators, never to a translation unit.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-header-lang-default";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.hpp")
+      << "#pragma once\ninline int widget_value() { return 4; }\n";
+  std::ofstream(dir / "vector_like")
+      << "#pragma once\nnamespace demo { inline int extensionless() { return 5; } }\n";
+
+  parser::ParseOptions opts;
+  opts.capture_all_diagnostics = true;
+  for (const std::string& input : {"widget.hpp", "vector_like"}) {
+    model::ParsedModule mod;
+    REQUIRE(parser::Parser(opts).parse_file((dir / input).string(), mod));
+    for (const auto& d : mod.diagnostics) {
+      CHECK(d.text.find("pragma-once-outside-header") == std::string::npos);
+    }
+  }
+
+  fs::remove_all(dir);
+}
+
 TEST_CASE("replaying a database entry never writes the files it names",
           "[parser]") {
   // A real entry names an object file, a make-style dependency list and often

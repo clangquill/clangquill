@@ -94,12 +94,18 @@ class Parser {
   // Compiler arguments for @p path: the compilation database entry when there
   // is one, else the configured -std/-I/-D fallback. Sets `*from_compile_db`
   // (when given) to which of the two it was, so a failure can name the source
-  // of the flags it is blaming.
+  // of the flags it is blaming. @p main_file, when given, is the file libclang
+  // will actually be handed -- the synthetic umbrella for a batch -- and
+  // decides the appended `-x` language; it defaults to @p path.
   std::vector<std::string> build_args(const std::string& path,
-                                      bool* from_compile_db = nullptr) const;
+                                      bool* from_compile_db = nullptr,
+                                      const std::string* main_file = nullptr) const;
 
-  // The -std/-I/-D fallback arguments, independent of any database entry.
-  std::vector<std::string> default_args() const;
+  // The -std/-I/-D fallback arguments for @p path, independent of any database
+  // entry. Only the trailing `-x` depends on the path: a header is parsed as
+  // `c++-header` so its own `#pragma once` is not reported as being in a main
+  // file.
+  std::vector<std::string> default_args(const std::string& path) const;
 
   // Appends the "failed to parse" record for @p path to @p out, followed by
   // the `note:` chain diagnosing it.
