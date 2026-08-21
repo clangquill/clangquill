@@ -278,14 +278,27 @@ std::vector<std::string> Parser::build_args(const std::string& path,
       compile_db_failed_ = !compile_db_->load(*options_.compile_commands_dir);
     }
     if (compile_db_->loaded()) {
+      // Answers for a header too: libclang wraps the database in an
+      // interpolating one, which serves a file it does not list the command of
+      // the file it lists that looks closest, with the filename substituted. A
+      // compile database lists translation units and never the headers they
+      // include, so that is how nearly every documented header gets its flags
+      // -- and for a header-only library, whose only translation units may be
+      // its tests, it is the only way.
       auto from_db = compile_db_->args_for(path);
-      if (from_db.empty()) {
-        // Headers are rarely their own compile_commands.json entry. Fall back
-        // to the same-directory .cpp of the same name, e.g. foo.hpp ->
-        // foo.cpp, which usually shares the header's include dirs/defines.
-        std::filesystem::path sibling =
-            std::filesystem::path(path).replace_extension(".cpp");
-        from_db = compile_db_->args_for(sibling.string());
+      if (!from_db.empty() && !compile_db_->lists_file(path)) {
+        // Those flags describe another file. Usually close enough -- a header
+        // is meant to be read with the flags of whatever compiles it -- but it
+        // is a guess, and a guess that quietly produces plausible, wrong
+        // documentation is exactly what this project reports rather than hides.
+        borrowed_note_ = model::Diagnostic{
+            .severity = model::kSeverityWarning,
+            .depth = 0,
+            .text = "no compilation database entry for '" + path +
+                    "'; libclang supplied the command of another file instead. "
+                    "Its include directories and defines may not match this "
+                    "file.",
+            .file = path};
       }
       args.insert(args.end(), from_db.begin(), from_db.end());
     }
@@ -320,6 +333,17 @@ void Parser::report_compile_db_failure(model::ParsedModule& out) const {
       .text = "could not load a compilation database from '" + dir.string() +
               "'; looked for '" + (dir / "compile_commands.json").string() +
               "'. Falling back to -std/-I/-D flags."});
+}
+
+void Parser::report_borrowed_flags(model::ParsedModule& out) const {
+  if (!borrowed_note_) return;
+  // Warning, not error: the parse is sound enough to document, and a
+  // header-only project would otherwise fail on every one of its files. At this
+  // severity it stays off the console -- which prints errors only -- while
+  // still reaching the diagnostics log and failing a build that asked for
+  // warnings_as_errors, which is precisely the "gate CI on a clean parse" case.
+  out.diagnostics.push_back(*std::move(borrowed_note_));
+  borrowed_note_.reset();
 }
 
 namespace {
@@ -636,6 +660,7 @@ bool Parser::parse_file(const std::string& path, model::ParsedModule& out,
   bool args_from_compile_db = false;
   std::vector<std::string> args = build_args(path, &args_from_compile_db);
   report_compile_db_failure(out);
+  report_borrowed_flags(out);
   std::vector<const char*> argv;
   argv.reserve(args.size());
   for (const auto& a : args) argv.push_back(a.c_str());
@@ -704,6 +729,7 @@ bool Parser::parse_batch(const std::vector<std::string>& paths,
   std::vector<std::string> args =
       build_args(abs.front(), /*from_compile_db=*/nullptr, &umbrella);
   report_compile_db_failure(out);
+  report_borrowed_flags(out);
   std::vector<const char*> argv;
   argv.reserve(args.size());
   for (const auto& a : args) argv.push_back(a.c_str());

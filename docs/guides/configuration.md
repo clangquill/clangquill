@@ -279,8 +279,8 @@ fails a build run with `warnings_as_errors`:
 
 ```text
 no compilation database entry for 'include/geo/api.hpp'; libclang supplied the
-command of 'tests/test_geo.cpp' instead. Its include directories and defines may
-not match this file.
+command of another file instead. Its include directories and defines may not
+match this file.
 ```
 
 Generating a database that lists the headers themselves — as `docs/conf.py` in

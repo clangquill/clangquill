@@ -309,12 +309,14 @@ TEST_CASE("umbrella batching attributes dependencies per member exactly",
   }
 }
 
-TEST_CASE("compile_commands_dir falls back to the sibling .cpp for a header",
+TEST_CASE("a header with no entry of its own gets a sibling .cpp's flags",
           "[parser]") {
   // compile_commands.json only ever lists translation units (.cpp), never the
-  // headers they include. A header with no entry of its own should still pick
-  // up its sibling .cpp's flags (e.g. the -I it needs to resolve an include),
-  // rather than falling through to the parser's bare defaults.
+  // headers they include. A header with no entry of its own still picks up its
+  // sibling .cpp's flags (e.g. the -I it needs to resolve an include) rather
+  // than falling through to the parser's bare defaults -- libclang wraps the
+  // database in an interpolating one that answers for unlisted files. Pinned
+  // here because output silently degrades if that ever stops happening.
   namespace fs = std::filesystem;
   const fs::path dir =
       fs::temp_directory_path() / "clangquill-sibling-cc-test";
@@ -338,8 +340,12 @@ TEST_CASE("compile_commands_dir falls back to the sibling .cpp for a header",
   opts.compile_commands_dir = dir.string();
   model::ParsedModule mod;
   REQUIRE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
-  CHECK(mod.diagnostics.empty());
   CHECK(find(mod, "widget_value") != nullptr);
+  // Borrowed flags, so exactly one record saying so -- and nothing worse.
+  REQUIRE(mod.diagnostics.size() == 1);
+  CHECK(mod.diagnostics[0].severity == model::kSeverityWarning);
+  CHECK(mod.diagnostics[0].text.find("no compilation database entry") !=
+        std::string::npos);
 
   fs::remove_all(dir);
 }
@@ -480,6 +486,85 @@ TEST_CASE("an entry's own -x survives, and is supplied when it has none",
   for (const auto& d : mod.diagnostics) {
     CHECK(d.severity < model::kSeverityError);
   }
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("flags that describe another file are reported", "[parser]") {
+  // A header-only library parses with its tests' flags, which is the right
+  // answer far more often than not -- but it is still a guess, and this project
+  // reports a guess rather than let it produce plausible, wrong documentation
+  // in silence.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-borrow-report";
+  fs::remove_all(dir);
+  fs::create_directories(dir / "include" / "geo");
+  fs::create_directories(dir / "tests");
+  std::ofstream(dir / "include" / "geo" / "api.hpp")
+      << "#pragma once\nnamespace geo {\n#ifdef GEO_FEATURE\n"
+         "inline int api_value() { return 7; }\n#endif\n}\n";
+  std::ofstream(dir / "tests" / "test_geo.cpp") << "int main() { return 0; }\n";
+
+  {
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"tests/test_geo.cpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-DGEO_FEATURE=1\", \"-c\", "
+          "\"tests/test_geo.cpp\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  const fs::path header = dir / "include" / "geo" / "api.hpp";
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file(header.string(), mod));
+
+  // The borrowed -D really did apply.
+  CHECK(find(mod, "geo::api_value") != nullptr);
+
+  REQUIRE(mod.diagnostics.size() == 1);
+  const model::Diagnostic& note = mod.diagnostics[0];
+  CHECK(note.severity == model::kSeverityWarning);
+  CHECK(note.depth == 0);
+  CHECK(note.file == header.string());
+  CHECK(note.text.find("no compilation database entry") != std::string::npos);
+  CHECK(note.text.find(header.string()) != std::string::npos);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("a file the database really lists is not reported as borrowed",
+          "[parser]") {
+  // The report has to distinguish an entry from an interpolated one, including
+  // when the database spells its file differently from the path we look up.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-borrow-exact";
+  fs::remove_all(dir);
+  fs::create_directories(dir / "sub");
+  std::ofstream(dir / "sub" / "widget.hpp")
+      << "#pragma once\ninline int widget_value() { return 3; }\n";
+  std::ofstream(dir / "other.cpp") << "int other() { return 1; }\n";
+
+  {
+    // "file" is relative to "directory" while the lookup is by resolved path.
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"sub/widget.hpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-c\", \"sub/widget.hpp\"]},"
+       << "{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"other.cpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-c\", \"other.cpp\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  opts.capture_all_diagnostics = true;
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file((dir / "sub" / "widget.hpp").string(),
+                                          mod));
+
+  CHECK(find(mod, "widget_value") != nullptr);
+  CHECK(mod.diagnostics.empty());
 
   fs::remove_all(dir);
 }

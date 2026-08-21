@@ -168,4 +168,39 @@ std::vector<std::string> CompileDb::args_for(const std::string& path) const {
   return args;
 }
 
+bool CompileDb::lists_file(const std::string& path) const {
+  if (!db_) return false;
+  if (!files_built_) {
+    files_built_ = true;
+    CXCompileCommands all = clang_CompilationDatabase_getAllCompileCommands(
+        static_cast<CXCompilationDatabase>(db_));
+    if (all) {
+      const unsigned n = clang_CompileCommands_getSize(all);
+      files_.reserve(n);
+      for (unsigned i = 0; i < n; ++i) {
+        CXCompileCommand cmd = clang_CompileCommands_getCommand(all, i);
+        // Canonicalized against the entry's own `directory`, because an entry
+        // is free to spell its file relatively while we are asked about a
+        // resolved path -- the same mismatch names_same_file exists for.
+        const std::filesystem::path dir(
+            to_string(clang_CompileCommand_getDirectory(cmd)));
+        std::filesystem::path file(
+            to_string(clang_CompileCommand_getFilename(cmd)));
+        if (file.is_relative() && !dir.empty()) file = dir / file;
+        std::error_code ec;
+        const std::filesystem::path resolved =
+            std::filesystem::weakly_canonical(file, ec);
+        files_.insert(ec ? file.lexically_normal().string() : resolved.string());
+      }
+      clang_CompileCommands_dispose(all);
+    }
+  }
+  if (files_.count(path) != 0) return true;
+  std::error_code ec;
+  const std::filesystem::path resolved =
+      std::filesystem::weakly_canonical(std::filesystem::path(path), ec);
+  if (ec) return false;
+  return files_.count(resolved.string()) != 0;
+}
+
 }  // namespace clangquill::parser

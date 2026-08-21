@@ -139,11 +139,22 @@ class Parser {
   // once per translation unit.
   mutable bool compile_db_failed_ = false;
   mutable bool compile_db_reported_ = false;
+  // Set by build_args when the database answered for a file it does not list,
+  // and drained by report_borrowed_flags into the module the file is parsed
+  // into. Stashed rather than returned because build_args yields only
+  // arguments and has no module to write to -- the same reason for the flags
+  // above.
+  mutable std::optional<model::Diagnostic> borrowed_note_;
 
   // Appends the one-shot compile-database failure diagnostic to @p out, naming
   // the path that was searched. No-op when the database loaded (or none was
   // configured), and after the first report.
   void report_compile_db_failure(model::ParsedModule& out) const;
+
+  // Appends the "these flags describe another file" diagnostic for the input
+  // build_args was last called for, and clears it. No-op when the database
+  // listed that input itself.
+  void report_borrowed_flags(model::ParsedModule& out) const;
 };
 
 /// @brief Parses every input file and merges the per-batch IR into one module.
