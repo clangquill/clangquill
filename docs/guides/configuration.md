@@ -259,17 +259,38 @@ path, so the degraded run is visible rather than silent.
 ### Headers with no entry of their own
 
 A compile database lists translation units (`.cpp`), never the headers they
-include, so most documented headers have no entry. clangquill tries the
-same-directory `.cpp` of the same name (`foo.hpp` → `foo.cpp`), which usually
-shares the header's include dirs and defines, before falling back to
-`std`/`include_dirs`/`defines`. Header-only libraries, where that sibling does
-not exist either, are the case for generating a database that lists the headers
-themselves — `docs/conf.py` in this repository does exactly that.
+include, so most documented headers have no entry. libclang fills the gap
+itself: the database it hands back is wrapped in an *interpolating* one, which
+answers a lookup for an unlisted file with the command of the closest listed
+file — matched on path segments, stem and extension — and the filename
+substituted for that entry's own.
+
+In practice that means a header is parsed with the include directories, defines
+and standard of whichever translation unit the build system compiles nearest to
+it. **Header-only libraries work without special setup**: a library whose only
+translation units are its tests gets its tests' flags, which are the flags those
+headers are meant to be read with.
+
+Interpolated flags are still a guess — the closest translation unit may define
+something this header does not want, or miss an include directory only some
+other target passes. clangquill reports the substitution as a warning naming
+both files, so it shows up in the [diagnostics log](#the-diagnostics-log) and
+fails a build run with `warnings_as_errors`:
+
+```text
+no compilation database entry for 'include/geo/api.hpp'; libclang supplied the
+command of another file instead. Its include directories and defines may not
+match this file.
+```
+
+Generating a database that lists the headers themselves — as `docs/conf.py` in
+this repository does — is how to replace that guess with exact flags. It is an
+accuracy improvement, not a prerequisite.
 
 ### How an entry's command line is replayed
 
-An entry's arguments are handed to libclang almost verbatim. Three adjustments
-are made, and they exist because libclang appends arguments of its own — the
+An entry's arguments are handed to libclang almost verbatim. Five adjustments
+are made. Three exist because libclang appends arguments of its own — the
 source file and `-fsyntax-only` — after whatever it is given:
 
 - **The source operand is dropped**, however the database spells it (relative to
@@ -285,12 +306,44 @@ source file and `-fsyntax-only` — after whatever it is given:
   documented header has. The operand the separator protected is the source
   file, dropped above and re-supplied by libclang, so nothing is left for it to
   separate.
-- **`-xc++` is appended only when the entry names no language itself.** It is
-  there so a header without a `.cpp` extension is not parsed as C; an entry
-  carrying its own `-x` has already said what the file is, and overriding
-  `c++-header` with `c++` would report a `#pragma once` as being in a main file
-  — which such a project's own `-Werror` then turns into an error on a header
-  that compiles cleanly.
+- **The language is supplied only when the entry names none itself.** An entry
+  carrying its own `-x` has already said what the file is, and `-x` applies to
+  the inputs after it while libclang appends the source last, so anything
+  clangquill added would override it. Otherwise `-xc++-header` is appended for a
+  header — anything with a header extension (`.h`, `.hpp`, `.hh`, `.hxx`,
+  `.inc`, `.ipp`, …) or no extension at all, the spelling the standard library
+  uses — and `-xc++` for a translation unit.
+
+  `c++-header` rather than `c++` because under `c++` a header's own
+  `#pragma once` is in the main file, which clang reports
+  (`[-Wpragma-once-outside-header]`) and a project's own `-Werror` turns into an
+  error on a header that compiles cleanly. Nearly every documented header is
+  affected: it has no entry of its own, so it borrows an interpolated command
+  from a `.cpp`, which of course names no language.
+
+The fourth is about where the entry's own paths point:
+
+- **The entry's `directory` is replayed as `-working-directory`.** A
+  `compile_commands.json` entry may spell its flags relative to that directory —
+  the format allows it, and `-Iinclude` is a common way to write one. A build
+  system runs the command from there; libclang does not `chdir`, so without
+  this clang would resolve those paths against whatever directory the docs build
+  runs in. An `-I` that does not resolve is not a loud failure for a header: it
+  parses, and the declarations that needed the missing include quietly go
+  missing from the output. It is prepended, so an entry carrying its own
+  `-working-directory` still wins — clang takes the last one.
+
+And the fifth is about what a parse may do to your disk:
+
+- **Everything that writes a file is dropped** — `-o`, the `-M` dependency-list
+  family (`-MD`, `-MF`, `-MT`, …) and `--serialize-diagnostics`. A parse is not
+  a build: `-fsyntax-only` means those outputs are never legitimately produced,
+  and clang reports them as `-Wunused-command-line-argument` anyway. Left in
+  they are actively harmful, because the entry a header borrows is not its own:
+  every documented header inherits one entry's `-MF` path and the parse threads
+  race to write it — and a relative path resolves against the *process*
+  directory (the Sphinx srcdir), not the entry's `directory`, so the files land
+  next to your sources.
 
 ## Toctree / root
 

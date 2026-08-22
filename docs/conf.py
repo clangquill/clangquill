@@ -147,11 +147,12 @@ def _write_compile_commands():
     The Sphinx extension requires a compilation database -- it will not guess
     compile flags. clangquill has no CMake build tree that would cover *these*
     inputs: a real compile_commands.json lists translation units (.cpp), and
-    most of the headers documented here have no .cpp of their own. So we
-    generate the database, giving every input exactly the command line the
-    flags above describe. A project that already builds with
-    `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` just points at its build directory
-    instead.
+    most of the headers documented here have no .cpp of their own. libclang
+    would interpolate a command for them from the nearest listed unit, so this
+    is not strictly necessary; generating the database gives every input exactly
+    the command line the flags above describe instead of a borrowed one. A
+    project that already builds with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` just
+    points at its build directory instead.
     """
     import glob  # noqa: PLC0415
     import json  # noqa: PLC0415

@@ -94,12 +94,18 @@ class Parser {
   // Compiler arguments for @p path: the compilation database entry when there
   // is one, else the configured -std/-I/-D fallback. Sets `*from_compile_db`
   // (when given) to which of the two it was, so a failure can name the source
-  // of the flags it is blaming.
+  // of the flags it is blaming. @p main_file, when given, is the file libclang
+  // will actually be handed -- the synthetic umbrella for a batch -- and
+  // decides the appended `-x` language; it defaults to @p path.
   std::vector<std::string> build_args(const std::string& path,
-                                      bool* from_compile_db = nullptr) const;
+                                      bool* from_compile_db = nullptr,
+                                      const std::string* main_file = nullptr) const;
 
-  // The -std/-I/-D fallback arguments, independent of any database entry.
-  std::vector<std::string> default_args() const;
+  // The -std/-I/-D fallback arguments for @p path, independent of any database
+  // entry. Only the trailing `-x` depends on the path: a header is parsed as
+  // `c++-header` so its own `#pragma once` is not reported as being in a main
+  // file.
+  std::vector<std::string> default_args(const std::string& path) const;
 
   // Appends the "failed to parse" record for @p path to @p out, followed by
   // the `note:` chain diagnosing it.
@@ -133,11 +139,22 @@ class Parser {
   // once per translation unit.
   mutable bool compile_db_failed_ = false;
   mutable bool compile_db_reported_ = false;
+  // Set by build_args when the database answered for a file it does not list,
+  // and drained by report_borrowed_flags into the module the file is parsed
+  // into. Stashed rather than returned because build_args yields only
+  // arguments and has no module to write to -- the same reason for the flags
+  // above.
+  mutable std::optional<model::Diagnostic> borrowed_note_;
 
   // Appends the one-shot compile-database failure diagnostic to @p out, naming
   // the path that was searched. No-op when the database loaded (or none was
   // configured), and after the first report.
   void report_compile_db_failure(model::ParsedModule& out) const;
+
+  // Appends the "these flags describe another file" diagnostic for the input
+  // build_args was last called for, and clears it. No-op when the database
+  // listed that input itself.
+  void report_borrowed_flags(model::ParsedModule& out) const;
 };
 
 /// @brief Parses every input file and merges the per-batch IR into one module.

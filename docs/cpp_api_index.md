@@ -9,7 +9,9 @@ The configuration that drives this lives in `docs/conf.py` (`clangquill_input`,
 `clangquill_compile_commands`, `clangquill_include_dirs`,
 `clangquill_output_dir`, `clangquill_std`). The extension requires a
 `compile_commands.json`, and these headers have no translation unit of their
-own, so `conf.py` generates a small database listing them — see the
+own. libclang would interpolate flags for them from the nearest listed unit, but
+`conf.py` generates a small database listing the headers themselves so they are
+parsed with exact flags rather than borrowed ones — see the
 [compile-database guide](guides/configuration.md#compile-databases).
 
 ```{toctree}
