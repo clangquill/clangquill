@@ -216,6 +216,31 @@ std::set<std::string> symbol_usrs(const model::ParsedModule& m) {
   return usrs;
 }
 
+// A pair of headers that is *not* self-contained: order_b.hpp spells its own
+// type name with a macro order_a.hpp defines and never includes it. Kept out of
+// all_inputs() on purpose -- these two are the counterexample to "umbrella
+// batching extracts the same symbols as per-file parsing", so folding them into
+// that fixture set would legitimately break it.
+std::vector<std::string> order_pair(bool a_first) {
+  const std::string dir = CLANGQUILL_FIXTURE_DIR;
+  const std::string a = dir + "/order_a.hpp";
+  const std::string b = dir + "/order_b.hpp";
+  return a_first ? std::vector<std::string>{a, b} : std::vector<std::string>{b, a};
+}
+
+std::set<std::string> file_paths(const model::ParsedModule& m) {
+  std::set<std::string> paths;
+  for (const auto& f : m.files) paths.insert(f.path);
+  return paths;
+}
+
+std::vector<std::string> diagnostic_texts(const model::ParsedModule& m) {
+  std::vector<std::string> texts;
+  for (const auto& d : m.diagnostics) texts.push_back(d.text);
+  std::sort(texts.begin(), texts.end());
+  return texts;
+}
+
 }  // namespace
 
 TEST_CASE("parse_files merges every input into one module", "[parser]") {
@@ -251,8 +276,9 @@ TEST_CASE("parse_files is deterministic regardless of job count", "[parser]") {
   CHECK(a.references.size() == b.references.size());
   CHECK(a.files.size() == b.files.size());
 
-  // Merge order follows input order, not thread completion order: the file
-  // rows land in a stable sequence whether parsed serially or concurrently.
+  // Merge order follows the parser's canonical order, not thread completion
+  // order: the file rows land in a stable sequence whether parsed serially or
+  // concurrently.
   std::vector<std::string> pa;
   std::vector<std::string> pb;
   for (const auto& f : a.files) pa.push_back(f.path);
@@ -279,6 +305,55 @@ TEST_CASE("umbrella batching extracts the same symbols as per-file parsing",
   for (const auto& f : a.files) fa.insert(f.path);
   for (const auto& f : b.files) fb.insert(f.path);
   CHECK(fa == fb);
+}
+
+TEST_CASE("parse_files does not depend on input order", "[parser]") {
+  // The IR is a function of the input *set*. order_b.hpp only parses into the
+  // name `Tagged` once order_a.hpp has been seen, so before inputs were sorted
+  // into a canonical order this pair extracted different symbols depending on
+  // which spelling came first on the command line.
+  parser::ParseOptions opts;
+  opts.tu_batch = 2;
+
+  auto a = parser::parse_files(order_pair(true), opts);
+  auto b = parser::parse_files(order_pair(false), opts);
+
+  CHECK(symbol_usrs(a) == symbol_usrs(b));
+  CHECK(a.symbols.size() == b.symbols.size());
+  CHECK(file_paths(a) == file_paths(b));
+  CHECK(diagnostic_texts(a) == diagnostic_texts(b));
+}
+
+TEST_CASE("a repeated input is included once per umbrella", "[parser]") {
+  // Canonical ordering puts duplicate spellings next to each other, so an
+  // umbrella would `#include` them back to back. Everything a caller passes
+  // twice must still be parsed exactly once.
+  parser::ParseOptions opts;  // default batch: one umbrella for all three
+
+  auto once = parser::parse_files(order_pair(true), opts);
+
+  auto inputs = order_pair(false);
+  inputs.push_back(inputs.front());  // {b, a, b}
+  auto twice = parser::parse_files(inputs, opts);
+
+  CHECK(symbol_usrs(twice) == symbol_usrs(once));
+  CHECK(twice.symbols.size() == once.symbols.size());
+  CHECK(file_paths(twice) == file_paths(once));
+}
+
+TEST_CASE("per-member sinks follow the caller's order", "[parser]") {
+  // Inputs are parsed in canonical order, but tu_files/tu_parsed are indexed by
+  // the position the caller used -- bindings/module.cpp relies on that.
+  parser::ParseOptions opts;
+  opts.tu_batch = 2;
+  std::vector<std::vector<std::string>> tu_files;
+  std::vector<bool> tu_ok;
+  parser::parse_files(order_pair(false), opts, &tu_files, &tu_ok);
+
+  REQUIRE(tu_files.size() == 2);
+  REQUIRE(tu_ok.size() == 2);
+  CHECK(tu_files[0].front().find("order_b.hpp") != std::string::npos);
+  CHECK(tu_files[1].front().find("order_a.hpp") != std::string::npos);
 }
 
 TEST_CASE("umbrella batching attributes dependencies per member exactly",

@@ -35,7 +35,10 @@ struct ParseOptions {
   /// dominant parse cost — re-lexing the shared `#include` closure — across the
   /// batch. `0` selects a default batch size; `1` parses every input as its own
   /// translation unit. Forced to `1` when `compile_commands_dir` is set, since
-  /// per-file compile flags cannot be merged into one unit.
+  /// per-file compile flags cannot be merged into one unit. Batch *composition*
+  /// is fixed by the input set (see @ref parse_files), so this value still
+  /// changes what a header that is not self-contained sees; `1` is the setting
+  /// that removes that effect entirely.
   int tu_batch = 0;
 };
 
@@ -68,15 +71,19 @@ class Parser {
 
   /// @brief Parses a batch of inputs as one umbrella translation unit.
   ///
-  /// A synthetic in-memory main file `#include`s every member, so the shared
-  /// transitive include closure is lexed and parsed once for the whole batch
-  /// instead of once per input. Only declarations physically located in the
-  /// member files are extracted, so the result matches per-file parsing for
-  /// self-contained headers. A batch of one delegates to @ref parse_file. If
-  /// the umbrella itself cannot be created, every member is re-parsed
+  /// A synthetic in-memory main file `#include`s every member once, so the
+  /// shared transitive include closure is lexed and parsed once for the whole
+  /// batch instead of once per input. Only declarations physically located in
+  /// the member files are extracted, so the result matches per-file parsing for
+  /// self-contained headers. A header that is *not* self-contained sees the
+  /// preprocessor state its predecessors left behind, so it still depends on
+  /// batch composition — which is why @ref parse_files fixes that composition
+  /// from the input set alone, and why `tu_batch = 1` remains the way to ask
+  /// for exact per-file isolation. A batch of one delegates to @ref parse_file.
+  /// If the umbrella itself cannot be created, every member is re-parsed
   /// individually as a fallback.
   ///
-  /// @param paths The batch members, in input order.
+  /// @param paths The batch members, in the order they should be included.
   /// @param out Module that extracted rows are appended to.
   /// @param member_files Optional sink (sized to @p paths) receiving each
   ///        member's file set — the member plus its transitive `#include`s,
@@ -164,12 +171,15 @@ class Parser {
 /// `#include` closure is parsed once per batch rather than once per input.
 /// Batches are parsed concurrently across up to `min(batches, effective_jobs)`
 /// threads, each owning its own `Parser`/`CXIndex` (libclang indices must not
-/// be shared between threads, but one per thread is safe). Batch composition
-/// depends only on the input order — never on the job count — and results merge
-/// back in batch order, so the output is deterministic regardless of how many
-/// threads ran. `options.jobs <= 0` selects the hardware concurrency.
+/// be shared between threads, but one per thread is safe). Inputs are parsed in
+/// a canonical order (absolute, lexically-normalised, lexicographic) rather
+/// than the order given, so batch composition — and with it the merged IR and
+/// the diagnostics — is a function of the input *set*, never of the sequence a
+/// caller happened to pass nor of the job count. Results merge back in that
+/// canonical order. `options.jobs <= 0` selects the hardware concurrency.
 ///
-/// @param inputs Translation units to parse, in the order they should merge.
+/// @param inputs Translation units to parse. Their order does not affect the
+///        result; it only fixes the indexing of @p tu_files and @p tu_parsed.
 /// @param options Parse configuration applied to every file.
 /// @param tu_files Optional sink, sized to and indexed by @p inputs, receiving
 ///        each input's file set (the input plus every transitive `#include`).

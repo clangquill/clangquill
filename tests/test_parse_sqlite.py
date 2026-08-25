@@ -255,6 +255,27 @@ def test_batched_parse_matches_per_file_parse(tmp_path: Path) -> None:
     assert rows("batched.sqlite", 0) == rows("isolated.sqlite", 1)
 
 
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_parse_is_order_independent(tmp_path: Path) -> None:
+    # The IR is a function of the input *set*. `b.hpp` spells its own type with
+    # a macro `a.hpp` defines and does not include it, so before inputs were
+    # canonicalised this pair stored a differently named symbol depending only
+    # on which path came first in the argument list.
+    a = tmp_path / "a.hpp"
+    a.write_text("#pragma once\n#define ORDER_NAME Tagged\nusing OrderIndex = int;\n")
+    b = tmp_path / "b.hpp"
+    b.write_text("#pragma once\n/// tagged\nstruct ORDER_NAME { OrderIndex value; };\n")
+
+    def rows(db_name: str, inputs: list[Path]) -> list[tuple]:
+        opts = _core.ParseOptions()
+        db = tmp_path / db_name
+        _core.parse_to_sqlite([str(p) for p in inputs], str(db), opts)
+        with Store.open(db) as store:
+            return sorted((s.usr, s.qualified_name, s.kind, s.is_documented) for s in store.symbols())
+
+    assert rows("forward.sqlite", [a, b]) == rows("reversed.sqlite", [b, a])
+
+
 def test_schema_version_exposed() -> None:
     assert isinstance(_core.SCHEMA_VERSION, int)
     assert _core.SCHEMA_VERSION >= 1

@@ -75,6 +75,12 @@ IR_NAME = "clangquill.sqlite"
 # batch composition only affects the TUs being re-parsed here, so the
 # determinism rationale for the fixed cold batch (see ``kDefaultTuBatch`` in
 # ``parser.cpp``) does not bind on this path.
+#
+# What this path cannot make identical to a cold build is a header that is not
+# self-contained: an incremental run parses a *subset*, so its batches are
+# composed differently whatever the batch size. That is a property of umbrella
+# batching, not of input order, and it is what ``verify.py``'s isolation check
+# measures.
 _INCREMENTAL_TU_BATCH = 8
 
 
@@ -166,7 +172,9 @@ class BuildResult:
 def _resolve_inputs(patterns: list[str], base_dir: Path) -> list[str]:
     """Expand ``patterns`` (paths or globs) relative to ``base_dir``.
 
-    Order is preserved and duplicates removed so the parse is deterministic.
+    Duplicates are removed so no file is parsed twice; the order patterns are
+    listed in is preserved for readable diagnostics only, since the parse itself
+    is order-independent (``parse_files`` in ``parser.cpp`` canonicalises).
     Raises :class:`FileNotFoundError` if a pattern matches nothing.
     """
     resolved: list[str] = []
@@ -303,6 +311,9 @@ def _parse_fingerprint(config: Config, base_dir: Path, inputs: list[str]) -> str
             compile_commands_hash = "missing"
     return fingerprint(
         {
+            # Sorted because the parse is a function of the input *set*: two
+            # runs that name the same files in a different order genuinely do
+            # produce the same IR, so they must share a cache entry.
             "inputs": sorted(inputs),
             "std": config.std,
             "include_dirs": [str((base_dir / d).resolve()) for d in config.include_dirs],
@@ -398,7 +409,7 @@ def write_diagnostics_log(
         # verbatim — libclang already prefixed it with file:line:col, the
         # severity word and any [-Wflag], so re-stating those would only
         # duplicate them. Records stay in parse order, which is deterministic
-        # (batches merge in input order) and meaningful.
+        # (batches merge in the parser's canonical order) and meaningful.
         if record.depth == 0 and index:
             lines.append("")
         indent = "  " * record.depth
