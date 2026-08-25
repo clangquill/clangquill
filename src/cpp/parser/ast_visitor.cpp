@@ -126,6 +126,36 @@ std::string first_token(const std::string& s) {
   return s.substr(a, b == std::string::npos ? std::string::npos : b - a);
 }
 
+// True for the kinds whose non-defining declaration is a forward declaration
+// rather than the API a header publishes. A function or variable declared and
+// not defined is exactly what a header is for; a tag declared and not defined
+// carries nothing.
+bool is_forward_declarable(model::SymbolKind kind) {
+  return is_record(kind) || kind == model::SymbolKind::Enum;
+}
+
+// True when @p c carries a doc comment of its *own*.
+//
+// clang_Cursor_getRawCommentText answers for one declaration with a comment
+// written on another declaration of the same entity elsewhere in the
+// translation unit. That inheritance is what keeps `is_documented` true across
+// an umbrella batch, and it also means the raw text cannot say which
+// declaration was documented — a forward declaration reports its definition's
+// comment whenever both are in the same unit. So ask where the comment sits: it
+// belongs to this cursor when it ends in the same file, on or just above the
+// line the cursor starts on. Trailing `///<` comments end on that line too.
+bool documented_here(CXCursor c) {
+  CXSourceRange range = clang_Cursor_getCommentRange(c);
+  if (clang_Range_isNull(range) != 0) return false;
+  CXFile comment_file = nullptr;
+  CXFile cursor_file = nullptr;
+  unsigned comment_end = 0, cursor_line = 0, col = 0, off = 0;
+  clang_getSpellingLocation(clang_getRangeEnd(range), &comment_file, &comment_end, &col, &off);
+  clang_getSpellingLocation(clang_getCursorLocation(c), &cursor_file, &cursor_line, &col, &off);
+  if (comment_file == nullptr || clang_File_isEqual(comment_file, cursor_file) == 0) return false;
+  return comment_end + 1 >= cursor_line;
+}
+
 // Records a symbol row (and its details) for a cursor, then recurses into
 // scopes. Returns the symbol's USR (empty if skipped).
 std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx) {
@@ -133,6 +163,27 @@ std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx) {
   if (usr.empty()) return {};  // anonymous/local entity: no stable identity
 
   bool is_def = clang_isCursorDefinition(c);
+
+  // An undocumented forward declaration of a tag type carries nothing and must
+  // not produce a row. `symbols.usr` is a primary key written with INSERT OR
+  // REPLACE, and modules from separate translation units are concatenated
+  // without a USR merge, so two rows for one tag are settled by whichever file
+  // is written last — which would hand the definition's identity, location and
+  // parent to something like the `class CompileDb` inside
+  // `std::unique_ptr<class CompileDb>`. Skipping leaves the definition as the
+  // only row, wherever it lives.
+  //
+  // Tag types only: for a function or a variable a non-defining declaration is
+  // exactly what a header publishes, and skipping those would empty the IR.
+  // A forward declaration that *is* documented still emits — documenting an
+  // opaque type where it is declared is a deliberate thing to write.
+  //
+  // Before the comment block below, not after: `comments.symbol_usr` is a
+  // foreign key onto `symbols.usr`, and a forward declaration inherits its
+  // definition's comment (see `documented_here`). Recording that comment and
+  // then dropping the row leaves it dangling whenever the definition itself is
+  // outside the input set — which is every tag an upstream header defines.
+  if (!is_def && is_forward_declarable(kind) && !documented_here(c)) return {};
 
   // Raw comment (verbatim). Track documented USRs so the symbol flag is set
   // even if the comment is seen on a different (re)declaration.

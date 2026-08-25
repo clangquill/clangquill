@@ -276,6 +276,60 @@ def test_parse_is_order_independent(tmp_path: Path) -> None:
     assert rows("forward.sqlite", [a, b]) == rows("reversed.sqlite", [b, a])
 
 
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_forward_declaration_does_not_displace_the_definition(tmp_path: Path) -> None:
+    # `symbols.usr` is a primary key written with INSERT OR REPLACE, so if a bare
+    # forward declaration produced a row it would settle the definition's
+    # identity by whichever file the store happened to write last.
+    decl = tmp_path / "a_decl.hpp"
+    decl.write_text("#pragma once\n#include <memory>\nstruct Owner { std::unique_ptr<class Opaque> held; };\n")
+    defn = tmp_path / "b_def.hpp"
+    defn.write_text(
+        "#pragma once\n/// The definition, and the only documentation.\nclass Opaque { public: int v = 0; };\n",
+    )
+
+    def opaque(db_name: str, tu_batch: int) -> list[tuple]:
+        opts = _core.ParseOptions()
+        opts.tu_batch = tu_batch
+        db = tmp_path / db_name
+        _core.parse_to_sqlite([str(decl), str(defn)], str(db), opts)
+        with Store.open(db) as store:
+            paths = {f.id: f.path for f in store.files()}
+            return [
+                (s.qualified_name, s.is_documented, paths[s.file_id].rsplit("/", 1)[-1])
+                for s in store.symbols()
+                if s.qualified_name == "Opaque"
+            ]
+
+    assert opaque("batched.sqlite", 0) == [("Opaque", True, "b_def.hpp")]
+    assert opaque("isolated.sqlite", 1) == [("Opaque", True, "b_def.hpp")]
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_forward_declaration_of_an_external_type_is_dropped_cleanly(tmp_path: Path) -> None:
+    # The shape every dependency-heavy project has: the input header names a tag
+    # that an upstream header, not itself an input, defines and documents.
+    # libclang hands the forward declaration that upstream comment, so dropping
+    # the declaration's row must drop the comment with it -- comments.symbol_usr
+    # is a foreign key onto symbols.usr, and the definition never gets a row
+    # because it is outside the input set.
+    upstream = tmp_path / "upstream.hpp"
+    upstream.write_text("#pragma once\n/// Defined and documented elsewhere.\nclass Hidden { public: int v = 0; };\n")
+    header = tmp_path / "input.hpp"
+    header.write_text(
+        '#pragma once\n#include <memory>\n#include "upstream.hpp"\n'
+        "/// Owns one.\nstruct Owner { std::unique_ptr<class Hidden> held; };\n",
+    )
+
+    db = tmp_path / "out.sqlite"
+    _core.parse_to_sqlite([str(header)], str(db), _core.ParseOptions())
+
+    with Store.open(db) as store:
+        names = {s.qualified_name for s in store.symbols()}
+    assert "Owner" in names
+    assert "Hidden" not in names
+
+
 def test_schema_version_exposed() -> None:
     assert isinstance(_core.SCHEMA_VERSION, int)
     assert _core.SCHEMA_VERSION >= 1

@@ -59,6 +59,7 @@ import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -383,22 +384,41 @@ def check_isolation(ctx: RepoContext, clangquill_cmd: list[str], logs: Path) -> 
 
     batched = symbol_rows(batched_ir)
     isolated = symbol_rows(isolated_ir)
-    if batched == isolated:
+    # A symbol that agrees on name, kind and documented but not on USR is not a
+    # difference this project can act on: libclang renders a dependent template
+    # argument differently depending on how much of the translation unit it has
+    # seen, so abseil's FormatConvertImpl overloads come out with
+    # ArgConvertResult<absl::FormatConversionCharSet::v> one way and
+    # ArgConvertResult<524288> the other, and `<! X` versus `<!X`. Counted into
+    # the summary, never gated on — the same treatment doxygen's warnings get.
+    # The multiset intersection is what pairs those up; whatever is left over is
+    # a symbol that really is present on one side only.
+    batched_only = Counter(row[1:] for row in batched - isolated)
+    isolated_only = Counter(row[1:] for row in isolated - batched)
+    drift = sum((batched_only & isolated_only).values())
+    missing_when_batched = isolated_only - batched_only
+    missing_when_isolated = batched_only - isolated_only
+
+    drift_note = "" if not drift else f"; {drift} symbol(s) differ only in libclang's USR spelling"
+    if not missing_when_batched and not missing_when_isolated:
         return Check(
             "isolation",
             passed=True,
-            summary=f"{len(batched)} symbol(s) identical under --tu-batch 1",
+            summary=f"{len(batched)} symbol(s) identical under --tu-batch 1{drift_note}",
         )
-    only_batched = sorted(f"{name} ({kind}, documented={doc})" for _, name, kind, doc in batched - isolated)
-    only_isolated = sorted(f"{name} ({kind}, documented={doc})" for _, name, kind, doc in isolated - batched)
-    detail = [f"only when batched: {line}" for line in only_batched]
-    detail += [f"only when isolated: {line}" for line in only_isolated]
+    detail = [
+        f"only when batched: {name} ({kind}, documented={doc})" for name, kind, doc in sorted(missing_when_isolated)
+    ]
+    detail += [
+        f"only when isolated: {name} ({kind}, documented={doc})" for name, kind, doc in sorted(missing_when_batched)
+    ]
     return Check(
         "isolation",
         passed=False,
         summary=(
-            f"batching changes the IR: {len(only_batched)} symbol(s) only when batched, "
-            f"{len(only_isolated)} only when isolated, of {len(batched)} vs {len(isolated)}"
+            f"batching changes the IR: {sum(missing_when_isolated.values())} symbol(s) only when batched, "
+            f"{sum(missing_when_batched.values())} only when isolated, "
+            f"of {len(batched)} vs {len(isolated)}{drift_note}"
         ),
         detail=detail[:MAX_REPORTED_LINES],
     )

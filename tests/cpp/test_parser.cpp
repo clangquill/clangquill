@@ -356,6 +356,59 @@ TEST_CASE("per-member sinks follow the caller's order", "[parser]") {
   CHECK(tu_files[1].front().find("order_a.hpp") != std::string::npos);
 }
 
+TEST_CASE("an undocumented forward declaration does not displace the definition",
+          "[parser]") {
+  // fwd_decl.hpp names Opaque only through `std::unique_ptr<class Opaque>`, the
+  // same elaborated-type-specifier the parser's own headers use for CompileDb.
+  // That declaration carries no documentation and is not the definition, so it
+  // must not produce a row: symbols collide on the USR primary key, and the
+  // store's INSERT OR REPLACE would let whichever file is written last win —
+  // handing the definition's identity to a pointer member's type name.
+  const std::string dir = CLANGQUILL_FIXTURE_DIR;
+  std::vector<std::string> inputs{dir + "/fwd_decl.hpp", dir + "/fwd_def.hpp"};
+
+  parser::ParseOptions isolated;
+  isolated.tu_batch = 1;  // no umbrella, so nothing hides the collision
+  auto m = parser::parse_files(inputs, isolated);
+
+  int rows = 0;
+  const model::Symbol* opaque = nullptr;
+  for (const auto& sym : m.symbols) {
+    if (sym.qualified_name == "Opaque") {
+      ++rows;
+      opaque = &sym;
+    }
+  }
+  REQUIRE(rows == 1);
+  REQUIRE(opaque != nullptr);
+  CHECK(opaque->is_definition);
+  CHECK(opaque->is_documented);
+  CHECK(opaque->location.file_path.find("fwd_def.hpp") != std::string::npos);
+  // Namespace scope, not nested under Owner: the surviving row is the
+  // definition's, so it keeps the definition's parent.
+  CHECK(opaque->parent_usr.empty());
+}
+
+TEST_CASE("a documented forward declaration is still extracted", "[parser]") {
+  // The skip is for declarations that carry nothing. Documenting an opaque type
+  // where it is declared is a deliberate thing to write, so it must survive.
+  const std::string dir = CLANGQUILL_FIXTURE_DIR;
+  const std::string header = dir + "/.fwd_documented.hpp";
+  {
+    std::ofstream out(header);
+    out << "#pragma once\n/// An opaque handle, documented where it is declared.\nclass Handle;\n";
+  }
+
+  parser::ParseOptions opts;
+  auto m = parser::parse_files({header}, opts);
+  std::filesystem::remove(header);
+
+  const auto* handle = find(m, "Handle");
+  REQUIRE(handle != nullptr);
+  CHECK(handle->is_documented);
+  CHECK_FALSE(handle->is_definition);
+}
+
 TEST_CASE("umbrella batching attributes dependencies per member exactly",
           "[parser]") {
   // m7.hpp is self-contained while shapes.hpp has no includes: inside one
