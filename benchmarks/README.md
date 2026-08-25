@@ -162,10 +162,13 @@ every selected project passed every check. Results land in
 with the per-project diagnostics and Doxygen warning logs under
 `.work/_bench/<repo>/logs/`.
 
-Unlike the benchmark, **there are no baselines and nothing is tolerated**. The
-dependency-heavy projects are expected to fail until their configs grow the
-`include_dirs`/`defines` their headers need, or narrow `inputs` to a subset that
-parses — a recorded "expected noise" list would make the whole run decorative.
+Unlike the benchmark, **there are no baselines and nothing is tolerated**. A
+dependency-heavy project fails until its config grows the `include_dirs`,
+`defines` or `cmake_preset` its headers need, or narrows `inputs` to a subset
+that parses — a recorded "expected noise" list would make the whole run
+decorative. `dune-gdt` is the worked example: it only parses against a
+configured build tree, so its config names a CMake preset and the harness runs
+it, which on a cold vcpkg cache takes about an hour.
 Strict mode also re-parses everything every run: a verdict on the whole input
 set can only come from a parse of the whole input set, so the harness starts
 each project from a wiped cache.
@@ -196,11 +199,16 @@ local = false
 std = "c++17"
 include_dirs = ["."]            # -I dirs for clangquill, relative to repo root
 defines = []                    # -D defines
-compile_args = []               # extra clang args
+compile_args = []               # extra clang args; "{llvm_includedir}" expands to the
+                                # dir holding clang-c/Index.h (see clangquill.toml)
+cmake_preset = ""               # when set, `cmake --preset <it>` runs before either driver
+cmake_args = []                 # extra -D flags for that configure (see dune-gdt.toml)
 inputs = ["Eigen/src/Core/**/*.h"]  # clangquill globs (relative to repo root)
 doxygen_input = ["Eigen/src/Core"]  # Doxygen INPUT dirs, same tree as the globs
 doxygen_recursive = true            # Doxygen RECURSIVE; false when the glob is single-level
 doxygen_file_patterns = ["*.h"]     # Doxygen FILE_PATTERNS; pin to the glob's extension
+doxygen_extra = []                  # verbatim Doxyfile lines appended last, for a project
+                                    # Doxygen cannot read on the shared settings
 group_by = "namespace"              # clangquill --group-by (empty = tool default "symbol";
                                     # set "namespace" for namespace-rooted libraries so one
                                     # root namespace doesn't collapse onto a single huge page)
@@ -254,12 +262,18 @@ the file exists, making the edit deterministic without shipping brittle diffs.
 
 ### Caveats
 
-- **abseil / eigen / dune-gdt** are template- and dependency-heavy. Without their
-  full include trees, libclang emits diagnostics and may extract fewer symbols
-  than Doxygen's tolerant, non-compiling lexer. The *benchmark* records this
-  (exit codes, symbol counts) and does **not** treat it as a failure; `verify.py`
-  does, deliberately. Extend each config's `include_dirs` if you have the
-  dependencies available.
+- **abseil / eigen** are template- and dependency-heavy. Without their full
+  include trees, libclang emits diagnostics and may extract fewer symbols than
+  Doxygen's tolerant, non-compiling lexer. The *benchmark* records this (exit
+  codes, symbol counts) and does **not** treat it as a failure; `verify.py`
+  does, deliberately. Both are red today: abseil's glob pulls in gtest-dependent
+  test helpers, and eigen's `Eigen/src/Core/*.h` are not standalone translation
+  units — they expect to be reached through the `Eigen/Core` umbrella. Extend
+  each config's `include_dirs` if you have the dependencies available.
+- **dune-gdt** used to be in that list and no longer is: its config names a
+  CMake preset, so the harness configures the project first and parses against
+  the real build tree. That is the pattern to copy for a project whose headers
+  cannot resolve from a bare checkout.
 - Things this headless harness cannot control are left to the operator: pin the
   CPU governor to `performance`, run on an otherwise-idle, thermally-stable
   machine, and prefer more `--repeat` passes for stable medians.

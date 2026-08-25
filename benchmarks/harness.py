@@ -52,6 +52,13 @@ class RepoConfig:
     include_dirs: list[str] = field(default_factory=list)
     defines: list[str] = field(default_factory=list)
     compile_args: list[str] = field(default_factory=list)
+    # A project whose headers only resolve against a configured build tree names
+    # its CMake preset here; :func:`cmake_configure` runs it before either driver
+    # parses, and ``include_dirs`` may then point into the preset's binary dir.
+    # ``cmake_args`` carries the project-specific ``-D`` flags that configure
+    # needs, so this module stays free of per-project knowledge.
+    cmake_preset: str = ""
+    cmake_args: list[str] = field(default_factory=list)
     inputs: list[str] = field(default_factory=list)
     doxygen_input: list[str] = field(default_factory=list)
     # Workload parity with the clangquill ``inputs`` globs: ``doxygen_recursive``
@@ -60,6 +67,10 @@ class RepoConfig:
     # process the identical file set.
     doxygen_recursive: bool = True
     doxygen_file_patterns: list[str] = field(default_factory=list)
+    # Verbatim Doxyfile lines appended last, so they win over the generated
+    # ones. The escape hatch for a project Doxygen cannot read on the shared
+    # settings — not a place to re-tune the input set, which both tools share.
+    doxygen_extra: list[str] = field(default_factory=list)
     # Page partitioning passed to ``clangquill build --group-by``. Empty keeps
     # the tool default (``symbol``). Namespace-rooted libraries should set
     # ``namespace`` (or ``class``): with the default, a single root namespace
@@ -95,10 +106,13 @@ class RepoConfig:
             include_dirs=list(data.get("include_dirs", [])),
             defines=list(data.get("defines", [])),
             compile_args=list(data.get("compile_args", [])),
+            cmake_preset=data.get("cmake_preset", ""),
+            cmake_args=list(data.get("cmake_args", [])),
             inputs=list(data.get("inputs", [])),
             doxygen_input=list(data.get("doxygen_input", [])),
             doxygen_recursive=bool(data.get("doxygen_recursive", True)),
             doxygen_file_patterns=list(data.get("doxygen_file_patterns", [])),
+            doxygen_extra=list(data.get("doxygen_extra", [])),
             group_by=data.get("group_by", ""),
             patch_files=list(patch.get("files", [])),
             leaf_patch_files=list(patch.get("leaf_files", [])),
@@ -207,7 +221,9 @@ def prepare_repo(cfg: RepoConfig, work_dir: Path, *, fresh_clone: bool) -> RepoC
     if cfg.local:
         source = REPO_ROOT
         commit = run_git(["rev-parse", "HEAD"], source, check=False).stdout.strip()
-        return RepoContext(cfg, source, bench_dir, resolved_ref="(local working tree)", commit=commit)
+        ctx = RepoContext(cfg, source, bench_dir, resolved_ref="(local working tree)", commit=commit)
+        cmake_configure(ctx)
+        return ctx
 
     source = work_dir / cfg.name
     if fresh_clone:
@@ -229,7 +245,36 @@ def prepare_repo(cfg: RepoConfig, work_dir: Path, *, fresh_clone: bool) -> RepoC
     else:
         resolved_ref = "(default branch)"
     commit = run_git(["rev-parse", "HEAD"], source, check=False).stdout.strip()
-    return RepoContext(cfg, source, bench_dir, resolved_ref=resolved_ref, commit=commit)
+    ctx = RepoContext(cfg, source, bench_dir, resolved_ref=resolved_ref, commit=commit)
+    cmake_configure(ctx)
+    return ctx
+
+
+def cmake_configure(ctx: RepoContext) -> None:
+    """Run ``cmake --preset`` for a project that declares one.
+
+    A DUNE-style project's headers do not resolve against the checkout alone:
+    the dependency stack arrives through the preset's package manager, and the
+    generated ``config.h`` only exists once configure has completed. Running it
+    here means both drivers see the same tree, and that ``include_dirs``
+    pointing into the binary dir are not a promise the harness leaves unkept.
+
+    Configure is re-run on every invocation rather than skipped when the binary
+    dir looks populated: CMake already knows what is stale, and a cached "looks
+    configured" guess is how a run ends up parsing against a half-built tree.
+    """
+    cfg = ctx.config
+    if not cfg.cmake_preset:
+        return
+    argv = ["cmake", "--preset", cfg.cmake_preset, *cfg.cmake_args]
+    print(f"  cmake --preset {cfg.cmake_preset} (this can take a long time on a cold dependency cache)")
+    run = subprocess.run(argv, cwd=str(ctx.source_dir), capture_output=True, text=True, check=False)
+    if run.returncode != 0:
+        log = ctx.logs
+        log.mkdir(parents=True, exist_ok=True)
+        (log / "cmake-configure.log").write_text(run.stdout + run.stderr, encoding="utf-8")
+        message = f"cmake --preset {cfg.cmake_preset} failed for {cfg.name} ({log / 'cmake-configure.log'})"
+        raise RuntimeError(message)
 
 
 # --------------------------------------------------------------------------- #
@@ -260,7 +305,11 @@ def clangquill_build_argv(
     for define in cfg.defines:
         argv += ["-D", define]
     for arg in cfg.compile_args:
-        argv += ["--compile-arg", arg]
+        # str.replace, not str.format: a compile arg may legitimately contain a
+        # literal brace. Resolved lazily so configs without the placeholder work
+        # on a machine that has no llvm-config at all.
+        resolved = arg.replace("{llvm_includedir}", llvm_includedir()) if "{llvm_includedir}" in arg else arg
+        argv += ["--compile-arg", resolved]
     if cfg.group_by:
         argv += ["--group-by", cfg.group_by]
     argv += ["--cache-dir", str(ctx.cache_dir if cache_dir is None else cache_dir)]
@@ -293,6 +342,13 @@ def write_doxyfile(ctx: RepoContext, mode: str, *, strict: bool = False, warn_lo
         # ``inputs`` globs; see RepoConfig.
         f"RECURSIVE = {'YES' if cfg.doxygen_recursive else 'NO'}",
         *([f"FILE_PATTERNS = {' '.join(cfg.doxygen_file_patterns)}"] if cfg.doxygen_file_patterns else []),
+        # Third knob of the same rule: Doxygen's default is to run its
+        # preprocessor across ``#include``s reaching outside INPUT, which is the
+        # opposite of an identical file set. It is not a complete fence —
+        # a quoted include still resolves against the including file's own
+        # directory — so a project whose deep tree Doxygen mis-preprocesses may
+        # still need ``doxygen_extra``; see dune-gdt.
+        "SEARCH_INCLUDES = NO",
         "QUIET = YES",
         "WARN_IF_UNDOCUMENTED = NO",
         "GENERATE_LATEX = NO",
@@ -331,6 +387,8 @@ def write_doxyfile(ctx: RepoContext, mode: str, *, strict: bool = False, warn_lo
             "HTML_OUTPUT = html",
             "SEARCHENGINE = NO",
         ]
+    # Last, so a config's override beats the generated value for the same tag.
+    common += cfg.doxygen_extra
     doxyfile = out_dir / "Doxyfile"
     doxyfile.write_text("\n".join(common) + "\n", encoding="utf-8")
     return doxyfile
@@ -400,6 +458,51 @@ def libclang_version() -> str:
         return str(_core.libclang_version())
     except Exception:
         return ""
+
+
+def llvm_includedir() -> str:
+    """Return the LLVM include dir holding ``clang-c/Index.h``.
+
+    A config whose headers include ``<clang-c/Index.h>`` (clangquill's own, via
+    ``compile_args = ["-I{llvm_includedir}"]``) needs a path that is not on the
+    default search path and differs per machine. ``docs/conf.py`` resolves the
+    same thing for the self-documentation build; the two cannot share code
+    because ``benchmarks/`` is a separate uv project.
+
+    Only a directory that actually contains the header is returned, so a version
+    mismatch yields a clear error rather than a bogus ``-I``.
+    """
+
+    def holds_clang_c(directory: str) -> bool:
+        return bool(directory) and (Path(directory) / "clang-c" / "Index.h").is_file()
+
+    # The CI build pins the prefix this way; prefer it over whatever is on PATH.
+    # Spelled the way CMake spells it, hence the not-upper-case name.
+    root = os.environ.get("LibClang_ROOT", "")  # noqa: SIM112
+    if holds_clang_c(str(Path(root) / "include") if root else ""):
+        return str(Path(root) / "include")
+
+    major = ""
+    with contextlib.suppress(Exception):
+        from clangquill._libclang import libclang_major  # noqa: PLC0415
+
+        major = str(libclang_major() or "")
+    # Prefer the llvm-config matching the linked libclang: a different major's
+    # headers would describe a backend the parse never actually uses.
+    for exe in ([f"llvm-config-{major}"] if major else []) + ["llvm-config"]:
+        path = shutil.which(exe)
+        if not path:
+            continue
+        with contextlib.suppress(OSError, subprocess.CalledProcessError):
+            out = subprocess.run([path, "--includedir"], capture_output=True, text=True, check=True)
+            if holds_clang_c(out.stdout.strip()):
+                return out.stdout.strip()
+
+    message = (
+        f"no LLVM include dir with clang-c/Index.h found (linked libclang major {major or '?'}); "
+        f"install libclang-{major or 'N'}-dev, or set LibClang_ROOT to the LLVM prefix"
+    )
+    raise RuntimeError(message)
 
 
 def total_ram_gb() -> float:
