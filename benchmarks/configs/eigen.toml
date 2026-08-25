@@ -6,49 +6,34 @@ repo = "https://gitlab.com/libeigen/eigen.git"
 ref = "3.4.0"
 std = "c++17"
 include_dirs = ["."]
-# The trailing recursive glob is what gives clangquill the same tree Doxygen
-# scans (arch/, functors/, products/, util/ — not just the top-level Core
-# headers); FILE_PATTERNS keeps Doxygen on the identical file set.
-#
-# The named headers ahead of it are an include order, not an input list.
-# clangquill builds one umbrella translation unit including its inputs in the
-# order given, and a single glob is alphabetical — so ArithmeticSequence.h and
-# Stride.h would land before the util/ headers defining Index, FixedInt,
-# symbolic:: and EIGEN_DEVICE_FUNC. Naming those first, in Eigen/Core's own
-# order (the only order they work in), fixes it; the glob then picks up
-# everything including util/ again, and the include guards make the repeats
-# no-ops. This list is a transcription of Eigen/Core at 3.4.0 — re-check it
-# when bumping `ref`.
-#
-# This does not make the parse clean. Reshaped.h, ArithmeticSequence.h and
-# BlasUtil.h still need util/IndexedViewHelper.h and util/ReshapedHelper.h,
-# and plugins/*.h are textual includes that are not translation units at all,
-# so finishing the job means transcribing the whole of Eigen/Core's ~100-line
-# include order into this file and keeping it correct across releases. What is
-# here takes the cross-check from 49 % to 91 % of Doxygen's documented
-# entities, which is the useful part of the signal.
-inputs = [
-    "Eigen/src/Core/util/Macros.h",
-    "Eigen/src/Core/util/ConfigureVectorization.h",
-    "Eigen/src/Core/util/MKL_support.h",
-    "Eigen/src/Core/util/Constants.h",
-    "Eigen/src/Core/util/Meta.h",
-    "Eigen/src/Core/util/ForwardDeclarations.h",
-    "Eigen/src/Core/util/StaticAssert.h",
-    "Eigen/src/Core/util/XprHelper.h",
-    "Eigen/src/Core/util/Memory.h",
-    "Eigen/src/Core/util/IntegralConstant.h",
-    "Eigen/src/Core/util/SymbolicIndex.h",
-    "Eigen/src/Core/**/*.h",
-]
-# Eigen/Core includes these before its own headers; util/Constants.h and
-# util/Memory.h use std::string and std::allocator without including either.
+# Recursive glob so clangquill covers the same tree Doxygen scans (arch/,
+# functors/, products/, util/ — not just the top-level Core headers);
+# FILE_PATTERNS keeps Doxygen on the identical file set.
+inputs = ["Eigen/src/Core/**/*.h"]
+# Eigen/src/Core/*.h are not translation units: they expect to be reached
+# through the Eigen/Core umbrella, which establishes Index, FixedInt, symbolic::
+# and EIGEN_DEVICE_FUNC first. Supplying that prologue as a forced include gives
+# every batch the same starting state no matter which members it holds, which an
+# input ordering could only fake for one batch composition. Listed in Eigen/Core's
+# own order — the only order they work in — after the std headers Eigen/Core
+# includes ahead of them. Re-check against Eigen/Core when bumping `ref`.
 compile_args = [
     "-include", "string",
     "-include", "sstream",
     "-include", "memory",
     "-include", "complex",
     "-include", "limits",
+    "-include", "Eigen/src/Core/util/Macros.h",
+    "-include", "Eigen/src/Core/util/ConfigureVectorization.h",
+    "-include", "Eigen/src/Core/util/MKL_support.h",
+    "-include", "Eigen/src/Core/util/Constants.h",
+    "-include", "Eigen/src/Core/util/Meta.h",
+    "-include", "Eigen/src/Core/util/ForwardDeclarations.h",
+    "-include", "Eigen/src/Core/util/StaticAssert.h",
+    "-include", "Eigen/src/Core/util/XprHelper.h",
+    "-include", "Eigen/src/Core/util/Memory.h",
+    "-include", "Eigen/src/Core/util/IntegralConstant.h",
+    "-include", "Eigen/src/Core/util/SymbolicIndex.h",
 ]
 doxygen_input = ["Eigen/src/Core"]
 doxygen_file_patterns = ["*.h"]
