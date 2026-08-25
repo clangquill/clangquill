@@ -8,7 +8,7 @@ runs over the same projects — the TOML files under ``configs/``, shared throug
 :mod:`harness` — so "the fast path and the correct path see the same code" is a
 fact rather than a claim.
 
-Three checks per project, all of which must pass:
+Four checks per project, all of which must pass:
 
     parse       ``clangquill build --warnings-as-errors`` exits 0, i.e. libclang
                 produced no diagnostic of warning severity or worse over the
@@ -19,9 +19,12 @@ Three checks per project, all of which must pass:
                 logged and counted in the report, and do not fail the run.
     extraction  every input file Doxygen extracted a documented entity from
                 yielded a documented symbol in ClangQuill's IR too.
+    isolation   re-parsing at ``--tu-batch 1`` yields the same symbols as the
+                default umbrella batching, i.e. batching really is only an
+                optimisation on this project's headers.
 
-The last check is the reason both tools are run, and it is what this driver is
-for: a parse can be clean and the output still be wrong, and a regression that
+The extraction check is the reason both tools are run, and it is what this
+driver is for: a parse can be clean and the output still be wrong, and a regression that
 silently stops attaching doc comments to symbols shows up here as files Doxygen
 documented and ClangQuill did not, and nowhere else. Comparing *per file*
 rather than by raw symbol count is deliberate — the two tools model symbols
@@ -257,6 +260,19 @@ def clangquill_extraction(ir_path: Path, source_root: Path) -> tuple[dict[str, i
     return per_file, total
 
 
+def symbol_rows(ir_path: Path) -> set[tuple]:
+    """Return the identity of every symbol in an IR, order-insensitively.
+
+    ``is_documented`` rides along in the tuple, so a symbol whose doc comment
+    stops being attached shows up as a pair — once on each side of the
+    comparison — rather than silently matching.
+    """
+    from clangquill.store import Store  # noqa: PLC0415 - optional at import time, required here
+
+    with Store.open(ir_path) as store:
+        return {(s.usr, s.qualified_name, s.kind, s.is_documented) for s in store.symbols()}
+
+
 # --------------------------------------------------------------------------- #
 # The checks
 # --------------------------------------------------------------------------- #
@@ -323,6 +339,69 @@ def check_doxygen(ctx: RepoContext, doxygen_cmd: list[str], logs: Path) -> tuple
     count = len(DOXYGEN_MESSAGE_RE.findall(warnings))
     noted = "no warnings" if not count else f"{count} warning(s), not gating ({warn_log})"
     return Check("doxygen", passed=True, summary=f"{noted} (doxygen {version})"), xml_dir
+
+
+def check_isolation(ctx: RepoContext, clangquill_cmd: list[str], logs: Path) -> Check:
+    """Re-parse with ``--tu-batch 1`` and demand the same symbols.
+
+    Umbrella batching is meant to be an optimisation: a batch shares one
+    translation unit so the common ``#include`` closure is parsed once instead
+    of once per input, and the extracted IR is supposed to be what fully
+    isolated per-file parsing would have produced. That holds for self-contained
+    headers and quietly fails for the rest, which see whatever preprocessor state
+    their batch-mates left behind. Canonical input ordering makes the outcome
+    reproducible; only this check says whether it is also *right*.
+
+    Compared against the IR the parse check already built, so a project costs one
+    extra parse rather than two. Diagnostics are counted into the summary but do
+    not decide it: libclang reports a batched diagnostic through the synthetic
+    umbrella main file, and the parser dedups per run, so the two logs are not
+    comparable line for line even when the IR agrees.
+    """
+    batched_ir = ctx.cache_dir / "clangquill.sqlite"
+    isolated_cache = ctx.bench_dir / "cache-isolated"
+    wipe(isolated_cache)
+    wipe(ctx.bench_dir / "myst-isolated")
+    diagnostics_log = logs / "clangquill-isolated-diagnostics.log"
+    argv = clangquill_build_argv(
+        ctx,
+        clangquill_cmd,
+        output_dir=ctx.bench_dir / "myst-isolated",
+        cache_dir=isolated_cache,
+        extra=["--tu-batch", "1", "--diagnostics-log", str(diagnostics_log)],
+    )
+    run = run_logged(argv, ctx.source_dir, logs / "clangquill-isolated.log")
+    isolated_ir = isolated_cache / "clangquill.sqlite"
+    if not batched_ir.is_file() or not isolated_ir.is_file():
+        missing = batched_ir if not batched_ir.is_file() else isolated_ir
+        return Check(
+            "isolation",
+            passed=False,
+            summary=f"no IR to compare at {missing} (isolated build exited {run.exit_code})",
+            detail=_tail(run.output),
+        )
+
+    batched = symbol_rows(batched_ir)
+    isolated = symbol_rows(isolated_ir)
+    if batched == isolated:
+        return Check(
+            "isolation",
+            passed=True,
+            summary=f"{len(batched)} symbol(s) identical under --tu-batch 1",
+        )
+    only_batched = sorted(f"{name} ({kind}, documented={doc})" for _, name, kind, doc in batched - isolated)
+    only_isolated = sorted(f"{name} ({kind}, documented={doc})" for _, name, kind, doc in isolated - batched)
+    detail = [f"only when batched: {line}" for line in only_batched]
+    detail += [f"only when isolated: {line}" for line in only_isolated]
+    return Check(
+        "isolation",
+        passed=False,
+        summary=(
+            f"batching changes the IR: {len(only_batched)} symbol(s) only when batched, "
+            f"{len(only_isolated)} only when isolated, of {len(batched)} vs {len(isolated)}"
+        ),
+        detail=detail[:MAX_REPORTED_LINES],
+    )
 
 
 def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
@@ -427,8 +506,10 @@ def verify_repo(cfg: RepoConfig, args: argparse.Namespace, tools: Tools) -> dict
     print(f"  doxygen: {'ok' if doxygen_check.passed else 'FAILED'} — {doxygen_check.summary}")
     extraction_check, stats = check_extraction(ctx, xml_dir)
     print(f"  extraction: {'ok' if extraction_check.passed else 'FAILED'} — {extraction_check.summary}")
+    isolation_check = check_isolation(ctx, tools.clangquill, logs)
+    print(f"  isolation: {'ok' if isolation_check.passed else 'FAILED'} — {isolation_check.summary}")
 
-    checks = [parse_check, doxygen_check, extraction_check]
+    checks = [parse_check, doxygen_check, extraction_check, isolation_check]
     return {
         "resolved_ref": ctx.resolved_ref,
         "commit": ctx.commit,
@@ -485,8 +566,8 @@ def render_markdown(payload: dict) -> str:
         "",
     ]
     lines += [
-        "| project | parse | doxygen | extraction | documented (clangquill / doxygen) |",
-        "| --- | --- | --- | --- | --- |",
+        "| project | parse | doxygen | extraction | isolation | documented (clangquill / doxygen) |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for name, result in results.items():
         marks = {check["name"]: "✅" if check["passed"] else "❌" for check in result["checks"]}
@@ -498,7 +579,7 @@ def render_markdown(payload: dict) -> str:
         )
         lines.append(
             f"| {name} | {marks.get('parse', '—')} | {marks.get('doxygen', '—')} "
-            f"| {marks.get('extraction', '—')} | {counts} |",
+            f"| {marks.get('extraction', '—')} | {marks.get('isolation', '—')} | {counts} |",
         )
     lines.append("")
 

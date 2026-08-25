@@ -122,7 +122,7 @@ the workflow inputs.
 ## Verifying extraction
 
 `verify.py` runs the same projects to ask whether the extraction is *correct*.
-Nothing is timed. Three checks per project, all of which must pass:
+Nothing is timed. Four checks per project, all of which must pass:
 
 - **parse** — `clangquill build --warnings-as-errors` exits 0: libclang
   produced no diagnostic of warning severity or worse over the whole input set.
@@ -135,6 +135,15 @@ Nothing is timed. Three checks per project, all of which must pass:
   no documentation in at all — abseil comments its headers in plain `//`, which
   Doxygen does not read as documentation — has no reference to measure against;
   the check says so and passes, leaving **parse** as the project's real gate.
+- **isolation** — re-parsing at `--tu-batch 1` yields the same symbols as the
+  default umbrella batching. Batching is supposed to be an optimisation: a batch
+  shares one translation unit so the common `#include` closure is parsed once
+  rather than once per input, and the IR is supposed to be what per-file parsing
+  would have produced. That holds for self-contained headers and fails for the
+  rest, which see whatever preprocessor state their batch-mates left behind.
+  Inputs are parsed in a canonical order, so the outcome is reproducible
+  whatever order a config lists them in; this check is what says whether it is
+  also *right*. It costs one extra parse per project.
 
 Doxygen's own warnings are not gated because they are not evidence about
 ClangQuill. Real projects make Doxygen warn for reasons no generated Doxyfile
