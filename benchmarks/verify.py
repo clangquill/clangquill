@@ -368,6 +368,21 @@ def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
         "ratio": ratio,
     }
 
+    # An empty comparison is not a passing one. When doxygen dies before writing
+    # any XML its output dir still exists, so every later test is vacuously
+    # satisfied: no missed files, no ratio, "ok over 0 file(s)". The whole check
+    # is "did clangquill keep up with doxygen", which is unanswerable when
+    # doxygen documented nothing.
+    if not doxygen_files:
+        return (
+            Check(
+                "extraction",
+                passed=False,
+                summary=f"doxygen documented no file under {xml_dir} — nothing to compare against",
+            ),
+            stats,
+        )
+
     floor = ctx.config.min_documented_ratio
     summary = (
         f"{quill_total} vs {doxygen_total} documented entities "
