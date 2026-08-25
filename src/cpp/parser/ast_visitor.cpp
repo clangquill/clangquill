@@ -34,6 +34,7 @@ struct VisitCtx {
   std::unordered_set<std::string>* seen_groups;
   DocAboveLine* doc_above_line;
   const ICommentParser* comment_parser;
+  const FileIdSet* main_ids;
 };
 
 std::pair<std::string, unsigned> cursor_file_line(CXCursor c) {
@@ -67,7 +68,10 @@ void fill_location(CXCursor c, model::Symbol& sym) {
   unsigned line = 0, column = 0, offset = 0;
   clang_getFileLocation(loc, &file, &line, &column, &offset);
   if (file != nullptr) {
-    sym.location.file_path = to_string(clang_getFileName(file));
+    // Normalized: libclang spells a file by the path it was reached with, and a
+    // location that says "./Eigen/src/Core/Matrix.h" means something different
+    // to whoever reopens the IR from another directory.
+    sym.location.file_path = normalized_path(to_string(clang_getFileName(file)));
   }
   sym.location.line = line;
   sym.location.column = column;
@@ -637,7 +641,7 @@ void scan_free_comments(CXTranslationUnit tu, CXFile file, VisitCtx& ctx) {
 CXChildVisitResult visit(CXCursor c, CXCursor /*parent*/, CXClientData data) {
   auto& ctx = *static_cast<VisitCtx*>(data);
 
-  if (!in_file(c, *ctx.main_files, ctx.trust_main_file)) {
+  if (!in_file(c, *ctx.main_files, *ctx.main_ids, ctx.trust_main_file)) {
     return CXChildVisit_Continue;
   }
 
@@ -686,6 +690,7 @@ void visit_translation_unit(CXCursor tu_cursor,
 
   std::unordered_set<std::string> main_set(main_files.begin(),
                                            main_files.end());
+  FileIdSet main_ids;
 
   VisitCtx ctx;
   ctx.mod = &out;
@@ -698,6 +703,7 @@ void visit_translation_unit(CXCursor tu_cursor,
   ctx.seen_groups = &seen_groups;
   ctx.doc_above_line = &doc_above_line;
   ctx.comment_parser = &comment_parser;
+  ctx.main_ids = &main_ids;
 
   // Capture free-floating `\defgroup` blocks first so groups carry their title
   // and description before any `\ingroup` membership creates a stub for them.
@@ -708,6 +714,11 @@ void visit_translation_unit(CXCursor tu_cursor,
   for (const auto& mf : main_files) {
     CXFile file = clang_getFile(tu, mf.c_str());
     if (file == nullptr) continue;
+    // Identity, not the name, is what decides whether a cursor is in one of
+    // these files: libclang answers clang_getFileName with the path a file was
+    // *requested* by, so an umbrella including it absolutely and an `-include`
+    // prologue reaching it relatively produce two names for one file.
+    if (auto id = file_identity(file)) main_ids.insert(*id);
     std::string name = to_string(clang_getFileName(file));
     if (!scanned.insert(name).second) continue;
     main_set.insert(name);

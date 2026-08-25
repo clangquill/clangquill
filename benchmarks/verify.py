@@ -199,14 +199,29 @@ def _location(element: ET.Element, root: Path) -> str | None:
         return None
 
 
-def doxygen_extraction(xml_dir: Path, source_root: Path) -> tuple[dict[str, int], int]:
+def _qualified_name(element: ET.Element) -> str:
+    """Doxygen's fully qualified name for a compound or member, or ``""``."""
+    # `<qualifiedname>` when Doxygen emits one, which is already exactly the
+    # form ClangQuill stores. Not `<definition>`: that is the whole declaration
+    # and Doxygen spaces out template brackets inside it, so the last token of
+    # "... Eigen::MatrixBase< Derived >::diagonal" is ">::diagonal".
+    qualified = element.findtext("qualifiedname")
+    if qualified:
+        return qualified.strip()
+    return (element.findtext("compoundname") or "").strip()
+
+
+def doxygen_extraction(xml_dir: Path, source_root: Path) -> tuple[dict[str, int], int, dict[str, set[str]]]:
     """Count Doxygen's documented entities per source file.
 
-    Returns ``({relative path: documented entity count}, total)``. Files with
-    no documented entity are omitted, because the cross-check only asks about
-    files Doxygen *did* find documentation in.
+    Returns ``({relative path: documented entity count}, total, {path: names})``.
+    Files with no documented entity are omitted, because the cross-check only
+    asks about files Doxygen *did* find documentation in. The names ride along
+    so a file can be cleared when what it documents lives, in ClangQuill's IR,
+    under the header that *declares* it — see :func:`check_extraction`.
     """
     per_file: dict[str, int] = {}
+    names: dict[str, set[str]] = {}
     total = 0
     for path in sorted(xml_dir.glob("*.xml")):
         if path.name in {"index.xml", "Doxyfile.xml"}:
@@ -223,31 +238,38 @@ def doxygen_extraction(xml_dir: Path, source_root: Path) -> tuple[dict[str, int]
                 rel = _location(compound, source_root)
                 if rel is not None:
                     per_file[rel] = per_file.get(rel, 0) + 1
+                    names.setdefault(rel, set()).add(_qualified_name(compound))
                     total += 1
         for member in root.iter("memberdef"):
             if _documented(member):
                 rel = _location(member, source_root)
                 if rel is not None:
                     per_file[rel] = per_file.get(rel, 0) + 1
+                    names.setdefault(rel, set()).add(_qualified_name(member))
                     total += 1
-    return per_file, total
+    return per_file, total, names
 
 
-def clangquill_extraction(ir_path: Path, source_root: Path) -> tuple[dict[str, int], int]:
+def clangquill_extraction(ir_path: Path, source_root: Path) -> tuple[dict[str, int], int, set[str]]:
     """Count ClangQuill's documented symbols per source file, from the IR.
 
     Reads the SQLite IR the build left in its ``--cache-dir``, which already
     records ``is_documented`` and the owning file per symbol — no re-parse and
-    no scraping of rendered Markdown.
+    no scraping of rendered Markdown. The third value is every documented
+    symbol's qualified name regardless of which file it was attributed to.
     """
     from clangquill.store import Store  # noqa: PLC0415 - optional at import time, required here
 
     per_file: dict[str, int] = {}
+    documented_names: set[str] = set()
     total = 0
     with Store.open(ir_path) as store:
         paths = {f.id: f.path for f in store.files()}
         for symbol in store.symbols():
-            if not symbol.is_documented or symbol.file_id is None:
+            if not symbol.is_documented:
+                continue
+            documented_names.add(symbol.qualified_name)
+            if symbol.file_id is None:
                 continue
             raw = paths.get(symbol.file_id)
             if raw is None:
@@ -258,7 +280,7 @@ def clangquill_extraction(ir_path: Path, source_root: Path) -> tuple[dict[str, i
                 continue
             per_file[rel] = per_file.get(rel, 0) + 1
             total += 1
-    return per_file, total
+    return per_file, total, documented_names
 
 
 def symbol_rows(ir_path: Path) -> set[tuple]:
@@ -443,9 +465,20 @@ def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
     if not ir_path.is_file():
         return Check("extraction", passed=False, summary=f"no clangquill IR at {ir_path}"), stats
 
-    doxygen_files, doxygen_total = doxygen_extraction(xml_dir, source_root)
-    quill_files, quill_total = clangquill_extraction(ir_path, source_root)
-    missed = sorted(path for path in doxygen_files if path not in quill_files)
+    doxygen_files, doxygen_total, doxygen_names = doxygen_extraction(xml_dir, source_root)
+    quill_files, quill_total, quill_names = clangquill_extraction(ir_path, source_root)
+    # A file Doxygen documented and ClangQuill did not is only a gap when the
+    # documentation went missing, not when it was filed elsewhere. C++ puts an
+    # out-of-line definition in a different header from its declaration, and
+    # Doxygen's `\fn` blocks document an entity from a third file again;
+    # ClangQuill attributes both to the declaration. Eigen's Dot.h is the case
+    # in point — it carries the prose for MatrixBase::dot, which ClangQuill
+    # records, documented, against MatrixBase.h.
+    missed = sorted(
+        path
+        for path in doxygen_files
+        if path not in quill_files and not (doxygen_names.get(path, set()) <= quill_names)
+    )
     ratio = (quill_total / doxygen_total) if doxygen_total else None
     stats = {
         "doxygen_documented": doxygen_total,

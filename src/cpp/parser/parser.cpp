@@ -88,8 +88,12 @@ struct CachedFileHash {
 // validation mirrors the fast-path the Python-side build cache already trusts
 // for exactly these files, so an edited file (changed stat) is re-hashed while
 // a long-lived process (the Sphinx extension) reuses digests across builds.
-void record_file(const std::string& path, model::ParsedModule& out,
+void record_file(const std::string& raw_path, model::ParsedModule& out,
                  std::unordered_set<std::string>& seen) {
+  // One row per file, keyed on the normalized path: the same header reached
+  // through an `-include` prologue and through the umbrella arrives under two
+  // spellings, and both name the same bytes.
+  const std::string path = normalized_path(raw_path);
   if (!seen.insert(path).second) return;
 
   static std::mutex cache_mutex;
@@ -215,8 +219,12 @@ std::unordered_map<std::string, std::vector<std::string>> include_edges(
         if (from == nullptr) return CXChildVisit_Continue;
         auto& e = *static_cast<
             std::unordered_map<std::string, std::vector<std::string>>*>(data);
-        e[to_string(clang_getFileName(from))].push_back(
-            to_string(clang_getFileName(included)));
+        // Normalized on both ends: these names reach the IR's per-TU
+        // dependency map, which the incremental cache joins against the file
+        // rows. A raw spelling on one side of that join silently costs a full
+        // rebuild.
+        e[normalized_path(to_string(clang_getFileName(from)))].push_back(
+            normalized_path(to_string(clang_getFileName(included))));
         return CXChildVisit_Continue;
       },
       &edges);
@@ -804,8 +812,8 @@ bool Parser::parse_batch(const std::vector<std::string>& paths,
       continue;
     }
     if (member_files != nullptr) {
-      (*member_files)[i] =
-          include_closure(edges, to_string(clang_getFileName(file)));
+      (*member_files)[i] = include_closure(
+          edges, normalized_path(to_string(clang_getFileName(file))));
     }
   }
   return all_ok;

@@ -23,7 +23,6 @@ import contextlib
 import fnmatch
 import os
 import platform
-import shlex
 import shutil
 import subprocess
 import sys
@@ -340,7 +339,15 @@ def clangquill_build_argv(
         # str.replace, not str.format: a compile arg may legitimately contain a
         # literal brace. Resolved lazily so configs without the placeholder work
         # on a machine that has no llvm-config at all.
-        resolved = arg.replace("{llvm_includedir}", llvm_includedir()) if "{llvm_includedir}" in arg else arg
+        # `{source_dir}` matters for a forced-include prologue: clang resolves a
+        # relative `-include` against the working directory and then spells
+        # every file that prologue pulls in the same relative way, so the IR
+        # ends up carrying `./x/y.h` where the umbrella carries the absolute
+        # path. Same file, two spellings, and anything that renders a path — an
+        # anonymous entity's name — then differs with the batching.
+        resolved = arg.replace("{source_dir}", str(ctx.source_dir))
+        if "{llvm_includedir}" in resolved:
+            resolved = resolved.replace("{llvm_includedir}", llvm_includedir())
         argv += ["--compile-arg", resolved]
     if cfg.group_by:
         argv += ["--group-by", cfg.group_by]
@@ -365,7 +372,10 @@ def write_doxyfile(ctx: RepoContext, mode: str, *, strict: bool = False, warn_lo
     cfg = ctx.config
     out_dir = ctx.doxygen_out(mode)
     out_dir.mkdir(parents=True, exist_ok=True)
-    inputs = " ".join(shlex.quote(str(ctx.source_dir / d)) for d in cfg.doxygen_input)
+    # Doxygen quotes with `"`, not shell-style: shlex.quote would only kick in
+    # for a path containing a space, and would then produce single quotes it
+    # takes literally.
+    inputs = " ".join(f'"{ctx.source_dir / d}"' for d in cfg.doxygen_input)
     common = [
         f'PROJECT_NAME = "{cfg.name}"',
         f"OUTPUT_DIRECTORY = {out_dir}",
@@ -378,9 +388,11 @@ def write_doxyfile(ctx: RepoContext, mode: str, *, strict: bool = False, warn_lo
         # patterns are repo-relative and Doxygen matches them against absolute
         # paths, hence the leading ``*/``.
         *(
-            [f"EXCLUDE_PATTERNS = {' '.join(shlex.quote('*/' + pattern) for pattern in cfg.exclude)}"]
-            if cfg.exclude
-            else []
+            # Double quotes, not shlex: Doxygen's config parser understands `"`
+            # for a value containing spaces and takes `'` literally, so
+            # shell-style quoting produced patterns that matched nothing and
+            # silently left the excluded files in Doxygen's input.
+            [f"""EXCLUDE_PATTERNS = {" ".join(f'"*/{pattern}"' for pattern in cfg.exclude)}"""] if cfg.exclude else []
         ),
         # Third knob of the same rule: Doxygen's default is to run its
         # preprocessor across ``#include``s reaching outside INPUT, which is the

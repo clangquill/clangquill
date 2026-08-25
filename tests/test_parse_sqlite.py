@@ -330,6 +330,35 @@ def test_forward_declaration_of_an_external_type_is_dropped_cleanly(tmp_path: Pa
     assert "Hidden" not in names
 
 
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_inputs_reached_through_a_forced_include_are_attributed(tmp_path: Path) -> None:
+    # The Eigen shape: the inputs are not translation units, so a prologue is
+    # force-included and pulls them in itself, by a different spelling than the
+    # umbrella uses. libclang names a file by the path it was requested with, so
+    # matching those names drops every symbol -- the file has to be identified,
+    # not spelled.
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "part.hpp").write_text("#pragma once\n/// Documented.\nstruct Part { int v = 0; };\n")
+    prologue = tmp_path / "prologue.hpp"
+    prologue.write_text('#pragma once\n#include "sub/part.hpp"\n')
+
+    def count(db_name: str, tu_batch: int) -> int:
+        opts = _core.ParseOptions()
+        opts.tu_batch = tu_batch
+        opts.include_dirs = [str(tmp_path)]
+        opts.extra_args = ["-include", "prologue.hpp"]
+        db = tmp_path / db_name
+        # Two inputs so tu_batch>1 really builds an umbrella rather than
+        # delegating to the single-file path.
+        inputs = [str(tmp_path / "sub" / "part.hpp"), str(prologue)]
+        _core.parse_to_sqlite(inputs, str(db), opts)
+        with Store.open(db) as store:
+            return sum(1 for s in store.symbols() if s.qualified_name == "Part")
+
+    assert count("isolated.sqlite", 1) == 1
+    assert count("batched.sqlite", 2) == 1
+
+
 def test_schema_version_exposed() -> None:
     assert isinstance(_core.SCHEMA_VERSION, int)
     assert _core.SCHEMA_VERSION >= 1

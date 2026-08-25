@@ -217,7 +217,8 @@ std = "c++17"
 include_dirs = ["."]            # -I dirs for clangquill, relative to repo root
 defines = []                    # -D defines
 compile_args = []               # extra clang args; "{llvm_includedir}" expands to the
-                                # dir holding clang-c/Index.h (see clangquill.toml)
+                                # dir holding clang-c/Index.h (see clangquill.toml),
+                                # "{source_dir}" to the checkout root (see eigen.toml)
 cmake_preset = ""               # when set, `cmake --preset <it>` runs before either driver
 cmake_args = []                 # extra -D flags for that configure (see dune-gdt.toml)
 inputs = ["Eigen/src/Core/**/*.h"]  # clangquill globs (relative to repo root)

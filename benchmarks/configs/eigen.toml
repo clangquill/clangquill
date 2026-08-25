@@ -11,30 +11,58 @@ include_dirs = ["."]
 # FILE_PATTERNS keeps Doxygen on the identical file set.
 inputs = ["Eigen/src/Core/**/*.h"]
 # Eigen/src/Core/*.h are not translation units: they expect to be reached
-# through the Eigen/Core umbrella, which establishes Index, FixedInt, symbolic::
-# and EIGEN_DEVICE_FUNC first. Supplying that prologue as a forced include gives
-# every batch the same starting state no matter which members it holds, which an
-# input ordering could only fake for one batch composition. Listed in Eigen/Core's
-# own order — the only order they work in — after the std headers Eigen/Core
-# includes ahead of them. Re-check against Eigen/Core when bumping `ref`.
+# through the Eigen/Core umbrella, which establishes Index, symbolic::,
+# EIGEN_DEVICE_FUNC and the whole internal:: layer first. Force-including it is
+# the only prologue that is complete — a hand-picked list of util/ headers gets
+# ArithmeticSequence.h and Stride.h to parse and then fails on Swap.h,
+# Transpose.h and the plugins/. The include guards make the umbrella's own
+# repeats no-ops, and each header's declarations are still attributed to it,
+# because symbols are filtered by the file they are physically in rather than
+# by how that file was entered.
+#
+# The -m flags are load-bearing, not tuning: Eigen/Core includes arch/AVX and
+# arch/AVX512 only when the target has those ISAs enabled, so without them
+# those headers are in `inputs` but never reached through the umbrella, and get
+# parsed cold. Enabling the widest x86 ISA is what covers the most of the
+# library. No code is run, so the host CPU does not need to support it.
 compile_args = [
-    "-include", "string",
-    "-include", "sstream",
-    "-include", "memory",
-    "-include", "complex",
-    "-include", "limits",
-    "-include", "Eigen/src/Core/util/Macros.h",
-    "-include", "Eigen/src/Core/util/ConfigureVectorization.h",
-    "-include", "Eigen/src/Core/util/MKL_support.h",
-    "-include", "Eigen/src/Core/util/Constants.h",
-    "-include", "Eigen/src/Core/util/Meta.h",
-    "-include", "Eigen/src/Core/util/ForwardDeclarations.h",
-    "-include", "Eigen/src/Core/util/StaticAssert.h",
-    "-include", "Eigen/src/Core/util/XprHelper.h",
-    "-include", "Eigen/src/Core/util/Memory.h",
-    "-include", "Eigen/src/Core/util/IntegralConstant.h",
-    "-include", "Eigen/src/Core/util/SymbolicIndex.h",
+    "-mavx512f",
+    "-mavx512dq",
+    "-mavx512bw",
+    "-mavx512vl",
+    "-mfma",
+    # Absolute: clang resolves a relative -include against the working
+    # directory and then spells everything it pulls in the same way, so the IR
+    # would carry `./Eigen/...` for files the umbrella names absolutely.
+    "-include", "{source_dir}/Eigen/Core",
 ]
+# What Eigen/Core never includes on this target, and so what no compiler here
+# ever sees. The vector backends for other ISAs cannot be enabled on x86 at all;
+# Assign_MKL.h and the *_BLAS.h backends need EIGEN_USE_MKL_VML / EIGEN_USE_BLAS
+# and an external BLAS; and upstream has commented ForceAlignedAccess.h out of
+# Eigen/Core (line 290 at 3.4.0), leaving its out-of-line definitions no longer
+# matching their declarations. Excluding them is what makes `inputs` the set of
+# headers this configuration actually compiles — 125 of 165. Re-check when
+# bumping `ref`, and when verifying on another architecture.
+exclude = [
+    "Eigen/src/Core/arch/AltiVec/*",
+    "Eigen/src/Core/arch/CUDA/*",
+    "Eigen/src/Core/arch/GPU/*",
+    "Eigen/src/Core/arch/HIP/*",
+    "Eigen/src/Core/arch/MSA/*",
+    "Eigen/src/Core/arch/NEON/*",
+    "Eigen/src/Core/arch/SVE/*",
+    "Eigen/src/Core/arch/SYCL/*",
+    "Eigen/src/Core/arch/ZVector/*",
+    "Eigen/src/Core/Assign_MKL.h",
+    "Eigen/src/Core/ForceAlignedAccess.h",
+    "Eigen/src/Core/**/*_BLAS.h",
+]
+# Doxygen's preprocessor follows quoted includes out of INPUT and past
+# EXCLUDE_PATTERNS, so it documents Eigen/src/plugins/*.h and the arch/
+# backends this configuration deliberately excludes, and then reports them as
+# files clangquill missed. Both tools are meant to be looking at the same set.
+doxygen_extra = ["ENABLE_PREPROCESSING = NO"]
 doxygen_input = ["Eigen/src/Core"]
 doxygen_file_patterns = ["*.h"]
 # Everything lives under the single `Eigen` namespace: the default
