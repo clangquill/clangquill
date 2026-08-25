@@ -3,8 +3,8 @@
 
 The sibling :mod:`benchmark` driver asks how *fast* the two tools are, and
 treats a non-zero exit as a data point. This one asks whether the extraction is
-*correct*, and treats anything short of silence as a failure. It runs over the
-same projects — the TOML files under ``configs/``, shared through
+*correct*, and treats anything short of silence from ClangQuill as a failure. It
+runs over the same projects — the TOML files under ``configs/``, shared through
 :mod:`harness` — so "the fast path and the correct path see the same code" is a
 fact rather than a claim.
 
@@ -14,26 +14,32 @@ Three checks per project, all of which must pass:
                 produced no diagnostic of warning severity or worse over the
                 whole input set. The full diagnostic list is written to a log
                 next to the report whatever the outcome.
-    doxygen     ``doxygen`` with ``WARNINGS = YES`` and
-                ``WARN_AS_ERROR = FAIL_ON_WARNINGS`` exits 0 over the identical
-                file set. Doxygen finishes the run before failing, so its XML is
-                still there to compare against.
+    doxygen     ``doxygen`` ran over the identical file set and wrote XML. This
+                is a precondition, not a verdict on Doxygen: its warnings are
+                logged and counted in the report, and do not fail the run.
     extraction  every input file Doxygen extracted a documented entity from
                 yielded a documented symbol in ClangQuill's IR too.
 
-The third check is the reason both tools are run. A parse can be clean and the
-output still be wrong: a regression that silently stops attaching doc comments
-to symbols shows up here as files Doxygen documented and ClangQuill did not,
-and nowhere else. Comparing *per file* rather than by raw symbol count is
-deliberate — the two tools model symbols differently enough that an exact count
-comparison would be noise. The overall documented-entity ratio is reported
-alongside it, and gates the run only for configs that set
-``min_documented_ratio``.
+The last check is the reason both tools are run, and it is what this driver is
+for: a parse can be clean and the output still be wrong, and a regression that
+silently stops attaching doc comments to symbols shows up here as files Doxygen
+documented and ClangQuill did not, and nowhere else. Comparing *per file*
+rather than by raw symbol count is deliberate — the two tools model symbols
+differently enough that an exact count comparison would be noise. The overall
+documented-entity ratio is reported alongside it, and gates the run only for
+configs that set ``min_documented_ratio``.
 
-Why the checks are hard failures with no baseline: a project that cannot be
-parsed cleanly is telling you its config lacks include directories or defines,
-which is fixable in ``configs/<name>.toml``. Recording the noise as "expected"
-instead would make the whole run decorative.
+Doxygen's own warnings are not gated because they are not evidence about
+ClangQuill. Real projects make Doxygen warn for reasons no generated Doxyfile
+can fix — abseil's ``friend Type;`` and ``extern template`` declarations are
+valid C++11 that Doxygen mis-parses as members to match, and Eigen's comments
+reference an ``EXAMPLE_PATH`` and ``ALIASES`` that live in the project's own
+Doxyfile. Gating on that would make the run red for facts about Doxygen.
+
+Why the two remaining checks are hard failures with no baseline: a project that
+cannot be parsed cleanly is telling you its config lacks include directories or
+defines, which is fixable in ``configs/<name>.toml``. Recording the noise as
+"expected" instead would make the whole run decorative.
 
 The driver depends only on the standard library plus ``clangquill`` itself
 (whose SQLite IR it reads); ``doxygen`` is required and the run fails without
@@ -75,11 +81,10 @@ from harness import (
 
 DEFAULT_RESULTS_DIR = HERE / "verify-results"
 
-# Doxygen understands WARN_AS_ERROR = FAIL_ON_WARNINGS from 1.9.2 on; older
-# releases only accept YES/NO and quietly treat the unknown value as NO, which
-# would make the doxygen half of the run pass unconditionally. The check below
-# turns that into a visible note in the report instead of a silent free pass.
-MIN_DOXYGEN_FOR_FAIL_ON_WARNINGS = (1, 9, 2)
+# One doxygen diagnostic, as written to WARN_LOGFILE: a location, then the
+# severity. Counting lines instead would inflate the number, since doxygen wraps
+# a single message over its "Possible candidates:" list.
+DOXYGEN_MESSAGE_RE = re.compile(r"^.+:\d+: (?:warning|error):", re.MULTILINE)
 
 # Compound kinds whose *own* description is about a file rather than an API
 # symbol. ClangQuill models no symbol for a file, so a `\file` comment must not
@@ -287,10 +292,14 @@ def check_clangquill(ctx: RepoContext, clangquill_cmd: list[str], logs: Path) ->
 
 
 def check_doxygen(ctx: RepoContext, doxygen_cmd: list[str], logs: Path) -> tuple[Check, Path]:
-    """Run Doxygen strictly over the same file set; return the check and XML dir.
+    """Run Doxygen over the same file set to produce the reference XML.
 
-    The XML directory is returned whatever the verdict, so the extraction check
-    can still compare against whatever Doxygen managed to write.
+    Doxygen is the yardstick the extraction check measures ClangQuill against,
+    so what this asserts is that the yardstick exists: that Doxygen ran and
+    wrote XML. Its warnings are counted into the summary and written to
+    ``doxygen-warnings.log``, but they do not fail the run — see the module
+    docstring for why. The XML directory is returned whatever the verdict, so
+    the extraction check can still compare against whatever was written.
     """
     warn_log = logs / "doxygen-warnings.log"
     doxyfile = write_doxyfile(ctx, "xml", strict=True, warn_log=warn_log)
@@ -298,7 +307,9 @@ def check_doxygen(ctx: RepoContext, doxygen_cmd: list[str], logs: Path) -> tuple
     xml_dir = ctx.doxygen_out("xml") / "xml"
     # The warn log holds the diagnostics; the run log holds whatever doxygen
     # printed around them. Prefer the former and fall back to the latter.
-    detail = _tail(warn_log.read_text(encoding="utf-8", errors="replace")) if warn_log.is_file() else []
+    warnings = warn_log.read_text(encoding="utf-8", errors="replace") if warn_log.is_file() else ""
+    detail = _tail(warnings) if warnings else []
+    version = tool_version([*doxygen_cmd, "--version"])
     if run.exit_code != 0:
         return (
             Check(
@@ -309,31 +320,9 @@ def check_doxygen(ctx: RepoContext, doxygen_cmd: list[str], logs: Path) -> tuple
             ),
             xml_dir,
         )
-    # A clean exit only means something if this doxygen can enforce the setting
-    # that was asked of it. Releases before 1.9.2 do not understand
-    # WARN_AS_ERROR = FAIL_ON_WARNINGS, treat the unknown value as NO, and exit
-    # 0 no matter how much they warned — so trusting the exit code there would
-    # report a green check for a run that never enforced anything. A version
-    # that cannot be parsed at all gets the same treatment: an unidentifiable
-    # doxygen is not evidence of a clean extraction. Recording the version in
-    # the report is not enough, because CI gates on the exit status rather than
-    # on the prose.
-    version = tool_version([*doxygen_cmd, "--version"])
-    if doxygen_release(version) < MIN_DOXYGEN_FOR_FAIL_ON_WARNINGS:
-        wanted = ".".join(str(part) for part in MIN_DOXYGEN_FOR_FAIL_ON_WARNINGS)
-        return (
-            Check(
-                "doxygen",
-                passed=False,
-                summary=(
-                    f"doxygen {version or 'of unknown version'} cannot fail on its own warnings "
-                    f"(WARN_AS_ERROR = FAIL_ON_WARNINGS needs {wanted}), so its exit code proves nothing"
-                ),
-                detail=detail,
-            ),
-            xml_dir,
-        )
-    return Check("doxygen", passed=True, summary=f"no warnings (doxygen {version})"), xml_dir
+    count = len(DOXYGEN_MESSAGE_RE.findall(warnings))
+    noted = "no warnings" if not count else f"{count} warning(s), not gating ({warn_log})"
+    return Check("doxygen", passed=True, summary=f"{noted} (doxygen {version})"), xml_dir
 
 
 def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
@@ -368,17 +357,27 @@ def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
         "ratio": ratio,
     }
 
-    # An empty comparison is not a passing one. When doxygen dies before writing
-    # any XML its output dir still exists, so every later test is vacuously
-    # satisfied: no missed files, no ratio, "ok over 0 file(s)". The whole check
-    # is "did clangquill keep up with doxygen", which is unanswerable when
-    # doxygen documented nothing.
+    # Two different ways to end up with nothing to compare, and they are not the
+    # same verdict. Doxygen dying before it writes any XML leaves its output
+    # directory in place, so every test below is vacuously satisfied: no missed
+    # files, no ratio, "ok over 0 file(s)" on top of a broken run. That is a
+    # failure. A project whose sources carry no Doxygen-style comment at all —
+    # abseil documents its 60 headers in plain ``//``, which Doxygen does not
+    # read as documentation — produces a full set of XML with nothing documented
+    # in it. There is no reference to measure against, but nothing went wrong,
+    # and this driver's own gate is the parse check.
     if not doxygen_files:
+        wrote_xml = any(path.name not in {"index.xml", "Doxyfile.xml"} for path in xml_dir.glob("*.xml"))
         return (
             Check(
                 "extraction",
-                passed=False,
-                summary=f"doxygen documented no file under {xml_dir} — nothing to compare against",
+                passed=wrote_xml,
+                summary=(
+                    f"no doxygen-documented entity in this project, nothing to cross-check "
+                    f"(clangquill documented {quill_total})"
+                    if wrote_xml
+                    else f"doxygen wrote no XML under {xml_dir} — nothing to compare against"
+                ),
             ),
             stats,
         )
@@ -452,17 +451,6 @@ class Tools:
     doxygen: list[str]
 
 
-def doxygen_release(version: str) -> tuple[int, ...]:
-    """Extract the ``(major, minor, patch)`` tuple from a doxygen version string.
-
-    An empty tuple for anything unrecognisable, which compares below every real
-    release — so an unidentifiable doxygen fails the version gate rather than
-    slipping past it.
-    """
-    match = re.search(r"(\d+)\.(\d+)\.(\d+)", version)
-    return tuple(int(part) for part in match.groups()) if match else ()
-
-
 def environment_info(tools: Tools) -> dict:
     """Collect machine, Python and tool versions for the report."""
     doxygen = tool_version([*tools.doxygen, "--version"])
@@ -473,10 +461,6 @@ def environment_info(tools: Tools) -> dict:
             "doxygen": doxygen,
             "libclang": libclang_version(),
         },
-        # Surfaced in the report header so a red doxygen check on an old
-        # toolchain reads as "this doxygen cannot enforce the setting" rather
-        # than "this project warns". The verdict itself is `check_doxygen`'s.
-        "doxygen_fails_on_warnings": doxygen_release(doxygen) >= MIN_DOXYGEN_FOR_FAIL_ON_WARNINGS,
     }
 
 
@@ -500,12 +484,6 @@ def render_markdown(payload: dict) -> str:
         f"- doxygen: `{tools.get('doxygen') or 'n/a'}`",
         "",
     ]
-    if not env.get("doxygen_fails_on_warnings", True):
-        lines += [
-            "> **Warning:** this doxygen predates `WARN_AS_ERROR = FAIL_ON_WARNINGS`"
-            " (1.9.2), so the doxygen check cannot fail on warnings here.",
-            "",
-        ]
     lines += [
         "| project | parse | doxygen | extraction | documented (clangquill / doxygen) |",
         "| --- | --- | --- | --- | --- |",

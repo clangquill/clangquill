@@ -43,12 +43,6 @@ inputs = ["dune/gdt/*.hh"]
 doxygen_input = ["dune/gdt"]
 doxygen_recursive = false
 doxygen_file_patterns = ["*.hh"]
-# Doxygen's preprocessor follows quoted includes relative to the including
-# file's own directory whatever SEARCH_INCLUDES says, descends into the
-# upstream dune/xt/ headers that are not in INPUT, and loses its #if/#endif
-# balance somewhere down there — every file it names is balanced itself. Fatal
-# under WARN_AS_ERROR, and about code neither tool was asked to document.
-doxygen_extra = ["ENABLE_PREPROCESSING = NO"]
 
 [patch]
 files = ["dune/gdt/operators/interfaces.hh"]

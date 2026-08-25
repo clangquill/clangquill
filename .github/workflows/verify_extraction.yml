@@ -2,10 +2,12 @@
 # Verify — rather than time — ClangQuill and Doxygen across the same real C++
 # codebases the benchmark measures. For every repo configured under
 # benchmarks/configs/ the harness asserts that ClangQuill parses it with no
-# diagnostic of warning severity or worse, that Doxygen extracts from the
-# identical file set without a single warning, and that ClangQuill did not
-# document fewer source files than Doxygen did. Nothing is timed and nothing is
-# published; the job is red exactly when one of those three claims is false.
+# diagnostic of warning severity or worse, that Doxygen produced the reference
+# XML from the identical file set, and that ClangQuill did not document fewer
+# source files than Doxygen did. Doxygen's own warnings are logged and counted
+# but do not gate: they are facts about Doxygen, not about the tool under test.
+# Nothing is timed and nothing is published; the job is red exactly when one of
+# those three claims is false.
 #
 # Runs weekly (Mondays) and on manual dispatch. Weekly rather than per-push
 # because it clones and fully re-parses large upstream projects — the

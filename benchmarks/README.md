@@ -6,7 +6,7 @@ and answer different questions about them:
 | Driver | Question | Failure policy |
 |--------|----------|----------------|
 | `benchmark.py` | How *fast* is each tool? | A non-zero exit is recorded as data. |
-| `verify.py` | Is the extraction *correct*? | Any warning fails the run. |
+| `verify.py` | Is the extraction *correct*? | Any ClangQuill diagnostic fails the run. |
 
 Both read the same project list — the TOML files in `configs/` — and share
 their configuration schema, cloning, and Doxyfile generation through
@@ -127,14 +127,22 @@ Nothing is timed. Three checks per project, all of which must pass:
 - **parse** — `clangquill build --warnings-as-errors` exits 0: libclang
   produced no diagnostic of warning severity or worse over the whole input set.
   The complete diagnostic list is written to a log whatever the outcome.
-- **doxygen** — `doxygen` with `WARNINGS = YES` and
-  `WARN_AS_ERROR = FAIL_ON_WARNINGS` exits 0 over the identical file set.
-  Doxygen finishes the run before failing, so its XML is still there to compare
-  against. Needs Doxygen **1.9.2+**: older releases ignore `FAIL_ON_WARNINGS`
-  and exit 0 however much they warned, so the check fails on them outright
-  rather than reporting a green it cannot back up.
+- **doxygen** — `doxygen` ran over the identical file set and wrote XML. This
+  is a precondition for the next check, not a verdict on Doxygen: its warnings
+  are logged and counted into the report, and do not fail the run.
 - **extraction** — every input file Doxygen extracted a documented entity from
-  yielded a documented symbol in ClangQuill's IR too.
+  yielded a documented symbol in ClangQuill's IR too. A project Doxygen finds
+  no documentation in at all — abseil comments its headers in plain `//`, which
+  Doxygen does not read as documentation — has no reference to measure against;
+  the check says so and passes, leaving **parse** as the project's real gate.
+
+Doxygen's own warnings are not gated because they are not evidence about
+ClangQuill. Real projects make Doxygen warn for reasons no generated Doxyfile
+can fix: abseil's `friend Type;` and `extern template` declarations are valid
+C++11 that Doxygen mis-parses as members to match, and Eigen's comments
+reference an `EXAMPLE_PATH` and `ALIASES` that live in the project's own
+Doxyfile, which this harness replaces. Gating on that would paint the run red
+for facts about Doxygen.
 
 The third check is why both tools are run at all. A parse can be perfectly clean
 and the output still be wrong: a regression that stops attaching doc comments to
@@ -162,11 +170,11 @@ every selected project passed every check. Results land in
 with the per-project diagnostics and Doxygen warning logs under
 `.work/_bench/<repo>/logs/`.
 
-Unlike the benchmark, **there are no baselines and nothing is tolerated**. A
-dependency-heavy project fails until its config grows the `include_dirs`,
-`defines` or `cmake_preset` its headers need, or narrows `inputs` to a subset
-that parses — a recorded "expected noise" list would make the whole run
-decorative. `dune-gdt` is the worked example: it only parses against a
+Unlike the benchmark, **there are no baselines and no ClangQuill diagnostic is
+tolerated**. A dependency-heavy project fails until its config grows the
+`include_dirs`, `defines` or `cmake_preset` its headers need, or narrows
+`inputs` to a subset that parses — a recorded "expected noise" list would make
+the whole run decorative. `dune-gdt` is the worked example: it only parses against a
 configured build tree, so its config names a CMake preset and the harness runs
 it, which on a cold vcpkg cache takes about an hour.
 Strict mode also re-parses everything every run: a verdict on the whole input
