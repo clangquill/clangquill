@@ -20,6 +20,7 @@ Standard library only, like the drivers themselves.
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import os
 import platform
 import shlex
@@ -60,6 +61,14 @@ class RepoConfig:
     cmake_preset: str = ""
     cmake_args: list[str] = field(default_factory=list)
     inputs: list[str] = field(default_factory=list)
+    # Repo-relative fnmatch patterns dropped from the input set on *both* sides:
+    # the harness expands ``inputs`` itself and passes explicit paths to
+    # clangquill, and writes the same patterns into the Doxyfile's
+    # EXCLUDE_PATTERNS. One knob rather than two is what keeps the file sets
+    # identical. For a header the project itself does not ship as API — a
+    # test helper needing gtest, say — not for hiding a file that fails to
+    # parse for a reason worth fixing.
+    exclude: list[str] = field(default_factory=list)
     doxygen_input: list[str] = field(default_factory=list)
     # Workload parity with the clangquill ``inputs`` globs: ``doxygen_recursive``
     # mirrors whether the glob descends (``**``), and ``doxygen_file_patterns``
@@ -109,6 +118,7 @@ class RepoConfig:
             cmake_preset=data.get("cmake_preset", ""),
             cmake_args=list(data.get("cmake_args", [])),
             inputs=list(data.get("inputs", [])),
+            exclude=list(data.get("exclude", [])),
             doxygen_input=list(data.get("doxygen_input", [])),
             doxygen_recursive=bool(data.get("doxygen_recursive", True)),
             doxygen_file_patterns=list(data.get("doxygen_file_patterns", [])),
@@ -280,6 +290,24 @@ def cmake_configure(ctx: RepoContext) -> None:
 # --------------------------------------------------------------------------- #
 # Command builders
 # --------------------------------------------------------------------------- #
+def resolved_inputs(ctx: RepoContext) -> list[str]:
+    """Return the ``inputs`` globs, or the explicit file list when excluding.
+
+    clangquill expands globs itself, so the globs are passed through untouched
+    whenever nothing is excluded — that is the common case and it keeps the
+    command line short. With ``exclude`` set the harness has to expand them
+    here instead: there is no exclude flag on ``clangquill build``, and the
+    file set has to end up identical to the one the Doxyfile's EXCLUDE_PATTERNS
+    produces.
+    """
+    cfg = ctx.config
+    if not cfg.exclude:
+        return list(cfg.inputs)
+    root = ctx.source_dir
+    found = sorted({p.relative_to(root).as_posix() for glob in cfg.inputs for p in root.glob(glob) if p.is_file()})
+    return [path for path in found if not any(fnmatch.fnmatch(path, pattern) for pattern in cfg.exclude)]
+
+
 def clangquill_build_argv(
     ctx: RepoContext,
     clangquill_cmd: list[str],
@@ -299,7 +327,7 @@ def clangquill_build_argv(
     """
     cfg = ctx.config
     out = ctx.myst_out if output_dir is None else output_dir
-    argv = [*clangquill_cmd, "build", *cfg.inputs, "-o", str(out), "--std", cfg.std]
+    argv = [*clangquill_cmd, "build", *resolved_inputs(ctx), "-o", str(out), "--std", cfg.std]
     for inc in cfg.include_dirs:
         argv += ["-I", inc]
     for define in cfg.defines:
@@ -342,6 +370,14 @@ def write_doxyfile(ctx: RepoContext, mode: str, *, strict: bool = False, warn_lo
         # ``inputs`` globs; see RepoConfig.
         f"RECURSIVE = {'YES' if cfg.doxygen_recursive else 'NO'}",
         *([f"FILE_PATTERNS = {' '.join(cfg.doxygen_file_patterns)}"] if cfg.doxygen_file_patterns else []),
+        # Same file set as :func:`resolved_inputs` drops for clangquill. The
+        # patterns are repo-relative and Doxygen matches them against absolute
+        # paths, hence the leading ``*/``.
+        *(
+            [f"EXCLUDE_PATTERNS = {' '.join(shlex.quote('*/' + pattern) for pattern in cfg.exclude)}"]
+            if cfg.exclude
+            else []
+        ),
         # Third knob of the same rule: Doxygen's default is to run its
         # preprocessor across ``#include``s reaching outside INPUT, which is the
         # opposite of an identical file set. It is not a complete fence —

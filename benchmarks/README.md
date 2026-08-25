@@ -204,6 +204,8 @@ compile_args = []               # extra clang args; "{llvm_includedir}" expands 
 cmake_preset = ""               # when set, `cmake --preset <it>` runs before either driver
 cmake_args = []                 # extra -D flags for that configure (see dune-gdt.toml)
 inputs = ["Eigen/src/Core/**/*.h"]  # clangquill globs (relative to repo root)
+exclude = []                        # repo-relative fnmatch patterns dropped from *both*
+                                    # tools' input sets (see abseil.toml)
 doxygen_input = ["Eigen/src/Core"]  # Doxygen INPUT dirs, same tree as the globs
 doxygen_recursive = true            # Doxygen RECURSIVE; false when the glob is single-level
 doxygen_file_patterns = ["*.h"]     # Doxygen FILE_PATTERNS; pin to the glob's extension

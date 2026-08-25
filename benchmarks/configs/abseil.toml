@@ -12,6 +12,10 @@ include_dirs = ["."]
 # including absl/strings/internal/; FILE_PATTERNS keeps Doxygen on the same
 # extension so both tools process the identical file set.
 inputs = ["absl/strings/**/*.h"]
+# A gtest/gmock-dependent test helper that the recursive glob sweeps in. It is
+# not part of abseil's API, neither tool is meant to document it, and it
+# accounts for every one of the parse errors this project used to report.
+exclude = ["absl/strings/cordz_test_helpers.h"]
 doxygen_input = ["absl/strings"]
 doxygen_file_patterns = ["*.h"]
 
