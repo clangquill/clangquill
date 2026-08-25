@@ -304,7 +304,21 @@ def resolved_inputs(ctx: RepoContext) -> list[str]:
     if not cfg.exclude:
         return list(cfg.inputs)
     root = ctx.source_dir
-    found = sorted({p.relative_to(root).as_posix() for glob in cfg.inputs for p in root.glob(glob) if p.is_file()})
+    # Glob order is load-bearing and must survive expansion. clangquill builds
+    # one umbrella translation unit that includes the inputs in the order it is
+    # given them, so a config listing a prerequisite header ahead of the glob
+    # that would otherwise sweep it up alphabetically (see eigen.toml) is
+    # choosing an include order. Sorting the whole set here would silently undo
+    # that: expand each pattern in turn, sorted within itself for determinism,
+    # and keep the first occurrence of a file.
+    found: list[str] = []
+    seen: set[str] = set()
+    for glob in cfg.inputs:
+        for path in sorted(root.glob(glob)):
+            rel = path.relative_to(root).as_posix()
+            if path.is_file() and rel not in seen:
+                seen.add(rel)
+                found.append(rel)
     return [path for path in found if not any(fnmatch.fnmatch(path, pattern) for pattern in cfg.exclude)]
 
 
