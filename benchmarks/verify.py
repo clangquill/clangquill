@@ -102,6 +102,12 @@ GROUP_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:+-]*$")
 # evidence of prose that went astray.
 VERBATIM_COMMANDS = frozenset({"code", "verbatim", "dot", "msc"})
 
+# Commands whose argument is one or more group ids on a single line, e.g.
+# `\ingroup Geometry_Module Another_Group`. Legitimately multi-word, so a
+# multi-word value is only evidence of swallowed prose when some token is not
+# itself a group id.
+GROUP_COMMANDS = frozenset({"ingroup", "defgroup", "addtogroup"})
+
 # Compound kinds whose *own* description is about a file rather than an API
 # symbol. ClangQuill models no symbol for a file, so a `\file` comment must not
 # count as something it failed to extract. Their members are still counted:
@@ -495,14 +501,23 @@ def check_comments(ctx: RepoContext) -> Check:
         """Return the commands holding prose when nothing renders, else ``[]``."""
         if any(getattr(model, name) for name in renderable):
             return []
+
         # `/** \ingroup Geometry_Module */` is a real thing to write: the symbol
         # is documented (it carries a comment) and has nothing to render, and
         # that is not a defect. A command argument holding a *sentence* is —
         # one token is a name or an id, several are prose that went astray.
+        def has_prose(name: str, value: str) -> bool:
+            words = value.split()
+            if len(words) <= 1:
+                return False
+            if name in GROUP_COMMANDS:
+                return not all(GROUP_ID_RE.match(w) for w in words)
+            return True
+
         return sorted(
             name
             for name, values in model.custom.items()
-            if name not in VERBATIM_COMMANDS and any(len(v.split()) > 1 for v in values)
+            if name not in VERBATIM_COMMANDS and any(has_prose(name, v) for v in values)
         )
 
     gaps: list[str] = []
