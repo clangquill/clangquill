@@ -10,13 +10,29 @@
 # not about the tool under test. Nothing is timed and nothing is published; the
 # job is red exactly when one of those four claims is false.
 #
-# Runs weekly (Mondays) and on manual dispatch. Weekly rather than per-push
-# because it clones and fully re-parses large upstream projects — the
-# per-push correctness signal is the test suite, and this catches the slower
-# drift: an upstream project moving, a libclang upgrade changing what parses,
-# or a regression in comment extraction that a green parse would hide.
+# Full weekly matrix plus a narrow per-push slice. The weekly run (Mondays) and
+# manual dispatch cover every configured project, because most of them clone
+# and fully re-parse large upstream sources — the per-push correctness signal
+# for those is the test suite, and this catches the slower drift: an upstream
+# project moving, a libclang upgrade changing what parses, or a regression in
+# comment extraction that a green parse would hide.
+#
+# `clangquill` itself is the exception: `local = true` means no clone and no
+# upstream-flakiness surface, and it exercises the whole pipeline against this
+# repo's own headers in ~8s of check time (see issue #173). So push/PR/merge
+# queue runs verify only that project, giving every PR the same real-parser
+# signal that first caught the input-order, forward-declaration and comment
+# swallowing bugs this workflow exists for — without paying per-push for
+# abseil/eigen's clone cost or dune-gdt's vcpkg build.
 name: verify-extraction
 on:
+  push:
+    branches: [main]
+  merge_group:
+  # No `branches:` filter: a stacked PR based on another feature branch must
+  # still be verified, and GitHub's auto-retarget to main fires only `edited`,
+  # which would never re-trigger a filtered workflow.
+  pull_request:
   schedule:
     # 05:00 UTC on Mondays — off-peak for hosted runners, and early enough in
     # the week that a red result has somewhere to go.
@@ -32,11 +48,12 @@ on:
           checkout
         type: boolean
         default: false
-# One verification run per ref at a time; a newer dispatch cancels an in-flight
-# run rather than having two of them fight over the same clones.
+# One verification run per ref at a time; a newer run cancels an in-flight one
+# rather than having two of them fight over the same clones. Push/merge_group
+# runs are left to finish, matching test.yml and cpp_tests.yml.
 concurrency:
   group: verify-extraction-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   verify:
     runs-on: ubuntu-24.04
@@ -113,7 +130,17 @@ jobs:
           # runner with no cache at all and ~14 GB of disk. So the schedule
           # names its projects explicitly; add new configs here when they are
           # cheap enough to run unattended, and verify dune-gdt by dispatch.
-          VERIFY_REPOS: ${{ inputs.repos || (github.event_name == 'schedule' && 'clangquill,abseil,eigen' || '') }}
+          # Push/PR/merge_group get neither: they run only clangquill, the one
+          # project with no clone and no upstream flakiness surface. Order
+          # matters here: an empty `inputs.repos` is falsy, so the dispatch
+          # case (meaning "every config") must be the last term, or a later
+          # `|| 'clangquill'` fallback would silently override it.
+          VERIFY_REPOS: >-
+            ${{ (github.event_name == 'push' || github.event_name == 'pull_request'
+                 || github.event_name == 'merge_group') && 'clangquill' ||
+                (github.event_name == 'schedule' && 'clangquill,abseil,eigen') ||
+                inputs.repos ||
+                '' }}
           VERIFY_FRESH_CLONE: ${{ inputs.fresh_clone }}
         run: |
           actual=$(benchmarks/.venv/bin/python -c "import importlib.metadata as m; print(m.version('clangquill'))")
