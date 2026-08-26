@@ -67,6 +67,15 @@ class Owned {
   int v = 0;
 };
 
+/** \relates Widget
+  *
+  * Streams a widget. This prose belongs to the function, not to the command
+  * above it, which names one entity and nothing more.
+  *
+  * \sa Widget
+  */
+int stream_widget(int w);
+
 namespace deep {
 int scale(int factor);
 int over(int a);

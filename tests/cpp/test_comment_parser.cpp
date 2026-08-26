@@ -136,6 +136,27 @@ TEST_CASE("an entity's own comment beats a structural block naming it",
   CHECK(briefs <= 1);
 }
 
+TEST_CASE("a single-name command does not swallow the prose after it",
+          "[comments]") {
+  // `\relates X` names one entity; the paragraphs below it document the
+  // function itself. Routing the whole block as the command's argument loses
+  // the function's description entirely.
+  auto m = parse_fixture("structural.hpp");
+  const auto* fn = find(m, "stream_widget");
+  REQUIRE(fn != nullptr);
+  auto fs = fields_of(m, fn->usr);
+
+  const Field* rel = field(fs, "relates");
+  REQUIRE(rel != nullptr);
+  CHECK(rel->value == "Widget");
+
+  const Field* brief = field(fs, "brief");
+  REQUIRE(brief != nullptr);
+  CHECK(brief->value.find("Streams a widget") != std::string::npos);
+  // The entity the command named must not leak into the prose.
+  CHECK(brief->value.find("Widget") == std::string::npos);
+}
+
 TEST_CASE("doxygen parser covers the common commands", "[comments]") {
   auto m = parse_fixture("doxygen.hpp");
   const auto* divide = find(m, "doc::divide");

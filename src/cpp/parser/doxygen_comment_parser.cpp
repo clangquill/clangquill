@@ -106,6 +106,16 @@ std::string text_of(CXComment c) {
 // as verbatim-line commands and spills into the detail text — so `\class Select`
 // would put a bare "Select" in the description. Such comments are parsed from
 // the raw text instead, where both families route cleanly into `custom`.
+// Commands whose argument is a single entity name, with anything after it
+// belonging to the enclosing documentation rather than to the command. Doxygen
+// writes `\relates DenseBase` and then several paragraphs about the function;
+// without this the whole description becomes the command's argument.
+bool takes_single_name(const std::string& cmd) {
+  return cmd == "class" || cmd == "struct" || cmd == "union" ||
+         cmd == "enum" || cmd == "namespace" || cmd == "fn" || cmd == "var" ||
+         cmd == "typedef" || cmd == "relates";
+}
+
 bool raw_has_unroutable_command(const std::string& raw) {
   static const char* const kCmds[] = {
       "ingroup", "defgroup",  "addtogroup", "class", "struct", "union",
@@ -303,6 +313,12 @@ model::CommentModel parse_raw(const std::string& raw) {
     if (cmd.empty()) {
       if (!text.empty()) lead.push_back(text);
       have_lead_para = false;
+    } else if (takes_single_name(cmd)) {
+      // Only the name is the argument; the rest is the entity's own prose and
+      // has to rejoin the lead text or it disappears into the command.
+      auto [name, prose] = split_first_token(text);
+      route_command(m, cmd, name);
+      if (!prose.empty()) lead.push_back(prose);
     } else {
       if (cmd == "brief" || cmd == "short") explicit_brief = true;
       route_command(m, cmd, text);
@@ -319,8 +335,10 @@ model::CommentModel parse_raw(const std::string& raw) {
       cmd = lower(line.substr(s + 1, (e == std::string::npos ? line.size() : e) - s - 1));
       if (e != std::string::npos) buf = line.substr(e + 1);
     } else if (line.empty()) {
-      // Blank line ends a lead paragraph but continues a command section.
+      // Blank line ends a lead paragraph, and ends a single-name command whose
+      // argument is complete, but continues a prose command like `\brief`.
       if (cmd.empty() && have_lead_para) flush();
+      else if (!cmd.empty() && takes_single_name(cmd)) flush();
       else if (!cmd.empty()) buf += ' ';
     } else {
       if (!buf.empty()) buf += ' ';
