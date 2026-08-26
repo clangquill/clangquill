@@ -527,6 +527,8 @@ class Generator:
         out: list[Symbol] = []
         for key in (symbol.qualified_name, symbol.spelling):
             for candidate in self._related_by_name.get(key, ()):
+                if not self.include_undocumented and not candidate.is_documented:
+                    continue
                 if candidate.usr != symbol.usr and candidate.usr not in seen:
                     seen.add(candidate.usr)
                     out.append(candidate)
