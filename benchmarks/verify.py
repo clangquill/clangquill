@@ -52,6 +52,7 @@ it, since half the verification would otherwise be silently skipped.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import re
 import shlex
@@ -89,6 +90,16 @@ DEFAULT_RESULTS_DIR = HERE / "verify-results"
 # severity. Counting lines instead would inflate the number, since doxygen wraps
 # a single message over its "Possible candidates:" list.
 DOXYGEN_MESSAGE_RE = re.compile(r"^.+:\d+: (?:warning|error):", re.MULTILINE)
+
+# What a Doxygen group identifier can look like. Deliberately permissive — the
+# point is to catch prose that leaked into an `\ingroup` value, not to police
+# naming.
+GROUP_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:+-]*$")
+
+# Commands whose argument is a verbatim block that clangquill parks in `custom`
+# and no bundled template renders yet. Multi-word by nature, so they are not
+# evidence of prose that went astray.
+VERBATIM_COMMANDS = frozenset({"code", "verbatim", "dot", "msc"})
 
 # Compound kinds whose *own* description is about a file rather than an API
 # symbol. ClangQuill models no symbol for a file, so a `\file` comment must not
@@ -446,6 +457,84 @@ def check_isolation(ctx: RepoContext, clangquill_cmd: list[str], logs: Path) -> 
     )
 
 
+def check_comments(ctx: RepoContext) -> Check:
+    r"""Assert that what ClangQuill marked documented actually says something.
+
+    The extraction check counts *whether* a symbol is documented, never whether
+    anything came out of its comment, so a parser bug that swallows a whole
+    description into one command's argument leaves every check green. That is
+    not hypothetical: it is how ``Eigen::operator<<`` came to carry a 400
+    character ``relates`` field and no brief and no detail at all.
+
+    Two invariants, both already held by abseil, clangquill and dune-gdt:
+
+    * every documented symbol yields at least one renderable field. "Renderable"
+      is read off :class:`CommentModel` rather than hardcoded, and excludes
+      ``custom`` precisely because that is where a swallowed argument lands.
+    * every group id looks like one. This is a tripwire rather than a proof: a
+      swallowed *paragraph* always contains punctuation somewhere, so it fires,
+      but individual swallowed words that happen to be valid identifiers slip
+      through. It is here because ``\ingroup`` values are split on whitespace
+      into ids, so one swallowed paragraph became 400 groups — and a page each.
+    """
+    from clangquill.comments import CommentModel  # noqa: PLC0415 - optional at import time
+    from clangquill.store import Store  # noqa: PLC0415 - optional at import time
+
+    ir_path = ctx.cache_dir / "clangquill.sqlite"
+    if not ir_path.is_file():
+        return Check("comments", passed=False, summary=f"no clangquill IR at {ir_path}")
+
+    renderable = tuple(f.name for f in dataclasses.fields(CommentModel) if f.name != "custom")
+
+    def swallowed(model: CommentModel) -> list[str]:
+        """Return the commands holding prose when nothing renders, else ``[]``."""
+        if any(getattr(model, name) for name in renderable):
+            return []
+        # `/** \ingroup Geometry_Module */` is a real thing to write: the symbol
+        # is documented (it carries a comment) and has nothing to render, and
+        # that is not a defect. A command argument holding a *sentence* is —
+        # one token is a name or an id, several are prose that went astray.
+        return sorted(
+            name
+            for name, values in model.custom.items()
+            if name not in VERBATIM_COMMANDS and any(len(v.split()) > 1 for v in values)
+        )
+
+    gaps: list[str] = []
+    documented = 0
+    with Store.open(ir_path) as store:
+        for symbol in store.symbols():
+            if not symbol.is_documented:
+                continue
+            documented += 1
+            model = store.comment(symbol.usr)
+            if model is None:
+                continue
+            lost = swallowed(model)
+            if lost:
+                gaps.append(f"{symbol.qualified_name} — prose sits in {lost}")
+        groups = store.groups()
+        malformed = [g.id for g in groups if not GROUP_ID_RE.match(g.id)]
+
+    if not gaps and not malformed:
+        return Check(
+            "comments",
+            passed=True,
+            summary=(f"no prose lost by {documented} documented symbol(s), {len(groups)} group id(s) well formed"),
+        )
+    detail = [f"renders nothing: {gap}" for gap in sorted(gaps)]
+    detail += [f"group id from prose: {gid!r}" for gid in sorted(malformed)]
+    return Check(
+        "comments",
+        passed=False,
+        summary=(
+            f"{len(gaps)} of {documented} documented symbol(s) hold prose nothing renders; "
+            f"{len(malformed)} of {len(groups)} group id(s) malformed"
+        ),
+        detail=detail[:MAX_REPORTED_LINES],
+    )
+
+
 def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
     """Compare what each tool documented, per source file.
 
@@ -561,8 +650,10 @@ def verify_repo(cfg: RepoConfig, args: argparse.Namespace, tools: Tools) -> dict
     print(f"  extraction: {'ok' if extraction_check.passed else 'FAILED'} — {extraction_check.summary}")
     isolation_check = check_isolation(ctx, tools.clangquill, logs)
     print(f"  isolation: {'ok' if isolation_check.passed else 'FAILED'} — {isolation_check.summary}")
+    comments_check = check_comments(ctx)
+    print(f"  comments: {'ok' if comments_check.passed else 'FAILED'} — {comments_check.summary}")
 
-    checks = [parse_check, doxygen_check, extraction_check, isolation_check]
+    checks = [parse_check, doxygen_check, extraction_check, isolation_check, comments_check]
     return {
         "resolved_ref": ctx.resolved_ref,
         "commit": ctx.commit,
@@ -619,8 +710,8 @@ def render_markdown(payload: dict) -> str:
         "",
     ]
     lines += [
-        "| project | parse | doxygen | extraction | isolation | documented (clangquill / doxygen) |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| project | parse | doxygen | extraction | isolation | comments | documented (clangquill / doxygen) |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for name, result in results.items():
         marks = {check["name"]: "✅" if check["passed"] else "❌" for check in result["checks"]}
@@ -632,7 +723,8 @@ def render_markdown(payload: dict) -> str:
         )
         lines.append(
             f"| {name} | {marks.get('parse', '—')} | {marks.get('doxygen', '—')} "
-            f"| {marks.get('extraction', '—')} | {marks.get('isolation', '—')} | {counts} |",
+            f"| {marks.get('extraction', '—')} | {marks.get('isolation', '—')} "
+            f"| {marks.get('comments', '—')} | {counts} |",
         )
     lines.append("")
 

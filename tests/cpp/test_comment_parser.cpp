@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <set>
 #include <string>
 
 #include "model/module.hpp"
@@ -155,6 +156,84 @@ TEST_CASE("a single-name command does not swallow the prose after it",
   CHECK(brief->value.find("Streams a widget") != std::string::npos);
   // The entity the command named must not leak into the prose.
   CHECK(brief->value.find("Widget") == std::string::npos);
+}
+
+TEST_CASE("a group command takes its line, not the paragraph below it",
+          "[comments]") {
+  // `\ingroup a b` names two groups. Treating it as a paragraph command swept
+  // the prose in too, and since group ids are split on whitespace every word
+  // became a group — 408 of them on Eigen, and a page each.
+  auto m = parse_fixture("structural.hpp");
+  const auto* fn = find(m, "grouped_helper");
+  REQUIRE(fn != nullptr);
+
+  std::set<std::string> ids;
+  for (const auto& gm : m.group_members) {
+    if (gm.member_usr == fn->usr) ids.insert(gm.group_id);
+  }
+  CHECK(ids == std::set<std::string>{"shapes", "widgets"});
+
+  // Nothing from the prose may have become a group anywhere in the module.
+  for (const auto& g : m.groups) {
+    CHECK(g.id.find(' ') == std::string::npos);
+    CHECK(g.id != "sentence");
+    CHECK(g.id != "documents");
+  }
+
+  const Field* brief = field(fields_of(m, fn->usr), "brief");
+  REQUIRE(brief != nullptr);
+  CHECK(brief->value.find("documents the") != std::string::npos);
+}
+
+TEST_CASE("a no-argument command leaves the prose to the entity", "[comments]") {
+  auto m = parse_fixture("structural.hpp");
+  // The prose has to survive as renderable text. Whether it lands in brief or
+  // in detail is a presentation nuance; being eaten by the marker is the bug.
+  for (const auto* qn : {"internal_helper", "marker_helper"}) {
+    const auto* fn = find(m, qn);
+    REQUIRE(fn != nullptr);
+    auto fs = fields_of(m, fn->usr);
+    const Field* brief = field(fs, "brief");
+    const Field* detail = field(fs, "detail");
+    const bool renders = (brief != nullptr && !brief->value.empty()) ||
+                         (detail != nullptr && !detail->value.empty());
+    CHECK(renders);
+    // ... and the marker itself must not have taken it.
+    const Field* marker = field(fs, qn == std::string("marker_helper") ? "li" : "internal");
+    if (marker != nullptr) CHECK(marker->value.empty());
+  }
+  // Both paragraphs survive, not just the first.
+  const auto* marker = find(m, "marker_helper");
+  REQUIRE(marker != nullptr);
+  CHECK(field(fields_of(m, marker->usr), "detail") != nullptr);
+}
+
+TEST_CASE("a marker does not own the rest of its line", "[comments]") {
+  // Eigen writes `\internal \ingroup enums` and `\internal \class Foo`. If the
+  // marker swallows its line, the brief becomes a literal "\ingroup enums" and
+  // the group membership is silently dropped.
+  auto m = parse_fixture("structural.hpp");
+
+  const auto* fn = find(m, "internal_grouped");
+  REQUIRE(fn != nullptr);
+  auto fs = fields_of(m, fn->usr);
+  const Field* group = field(fs, "ingroup");
+  REQUIRE(group != nullptr);
+  CHECK(group->value == "shapes");
+  bool joined = false;
+  for (const auto& gm : m.group_members) {
+    if (gm.member_usr == fn->usr && gm.group_id == "shapes") joined = true;
+  }
+  CHECK(joined);
+  const Field* brief = field(fs, "brief");
+  REQUIRE(brief != nullptr);
+  CHECK(brief->value.find("still the entity") != std::string::npos);
+  CHECK(brief->value.find('\\') == std::string::npos);
+
+  // ... and the rescan chains into a single-name command.
+  const auto* chained = find(m, "Chained");
+  REQUIRE(chained != nullptr);
+  CHECK(chained->is_documented);
 }
 
 TEST_CASE("doxygen parser covers the common commands", "[comments]") {

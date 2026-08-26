@@ -81,3 +81,35 @@ int scale(int factor);
 int over(int a);
 int over(double a);
 }  // namespace deep
+
+/** \ingroup shapes widgets
+  * A group command takes the ids on its own line; this sentence documents the
+  * function and must not become a group of its own.
+  */
+int grouped_helper(int a);
+
+/** \internal
+  * An internal marker takes no argument, so this sentence is the entity's own
+  * documentation rather than the marker's.
+  */
+int internal_helper(int a);
+
+/** \li A list marker likewise takes no argument.
+  *
+  * And this second paragraph still belongs to the entity.
+  */
+int marker_helper(int a);
+
+/** \internal \ingroup shapes
+  * A marker does not own the rest of its line: the group command after it has
+  * to be seen, and this sentence is still the entity's own documentation.
+  */
+int internal_grouped(int a);
+
+/** \internal \class Chained
+  * The rescan has to chain into a single-name command too.
+  */
+class Chained {
+ public:
+  int c = 0;
+};

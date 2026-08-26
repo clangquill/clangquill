@@ -104,22 +104,59 @@ std::string text_of(CXComment c) {
 // it drops the command and leaves its argument as stray prose. Group commands
 // are one family; the structural commands are the other, which libclang models
 // as verbatim-line commands and spills into the detail text — so `\class Select`
-// would put a bare "Select" in the description. Such comments are parsed from
-// the raw text instead, where both families route cleanly into `custom`.
+// would put a bare "Select" in the description. The no-argument markers join
+// them because this parser is the only one that knows their arity: whatever
+// takes_line/takes_nothing/takes_single_name classify has to reach parse_raw
+// to be treated that way. Such comments are parsed from the raw text instead,
+// where every family routes into `custom` and the prose stays with the entity.
 // Commands whose argument is a single entity name, with anything after it
 // belonging to the enclosing documentation rather than to the command. Doxygen
 // writes `\relates DenseBase` and then several paragraphs about the function;
 // without this the whole description becomes the command's argument.
+// Commands whose argument is the rest of their line. Doxygen's `\ingroup a b c`
+// legitimately names several groups on one line, so the argument ends at the
+// newline — treating it as a paragraph command turns the following prose into
+// group names, one per word.
+// True for the commands whose argument runs on across following lines until a
+// blank line or the next command — `\brief`, `\param`, `\note` and the rest.
+// Everything else has its argument complete on its own line.
+bool takes_paragraph(const std::string& cmd);
+
+bool takes_line(const std::string& cmd) {
+  return cmd == "ingroup" || cmd == "defgroup" || cmd == "addtogroup";
+}
+
+// Commands that take no argument at all. `\internal` marks the text after it as
+// internal documentation and `\code`/`\endcode`/`\li` are markers, so
+// everything following them is the entity's own prose. (This only stops them
+// swallowing it; rendering `\code` as a real code block is a separate matter.)
+bool takes_nothing(const std::string& cmd) {
+  // `\code` is NOT here: it genuinely takes a block, and treating it as a
+  // marker spills the code body into the prose. What was broken is that
+  // `\endcode` never ended it, so the text after the block was swallowed too.
+  return cmd == "internal" || cmd == "endinternal" || cmd == "endcode" ||
+         cmd == "endverbatim" || cmd == "li" || cmd == "arg";
+}
+
 bool takes_single_name(const std::string& cmd) {
   return cmd == "class" || cmd == "struct" || cmd == "union" ||
          cmd == "enum" || cmd == "namespace" || cmd == "fn" || cmd == "var" ||
          cmd == "typedef" || cmd == "relates";
 }
 
+bool takes_paragraph(const std::string& cmd) {
+  return !takes_line(cmd) && !takes_nothing(cmd) && !takes_single_name(cmd);
+}
+
 bool raw_has_unroutable_command(const std::string& raw) {
   static const char* const kCmds[] = {
-      "ingroup", "defgroup",  "addtogroup", "class", "struct", "union",
-      "enum",    "namespace", "fn",         "var",   "typedef", "relates"};
+      "ingroup",  "defgroup", "addtogroup", "class", "struct",  "union",
+      "enum",     "namespace", "fn",        "var",   "typedef", "relates",
+      "internal", "li"};
+  // Deliberately not `code`/`endcode`: libclang's parsed tree preserves a
+  // verbatim block's line structure, which parse_raw's normalize_ws destroys.
+  // A comment that also carries one of the above still takes the raw path, and
+  // `endcode` is classified there so the prose after the block is not lost.
   for (std::size_t i = 0; i + 1 < raw.size(); ++i) {
     if (raw[i] != '\\' && raw[i] != '@') continue;
     for (const char* cmd : kCmds) {
@@ -319,6 +356,9 @@ model::CommentModel parse_raw(const std::string& raw) {
       auto [name, prose] = split_first_token(text);
       route_command(m, cmd, name);
       if (!prose.empty()) lead.push_back(prose);
+    } else if (takes_nothing(cmd)) {
+      route_command(m, cmd, "");
+      if (!text.empty()) lead.push_back(text);
     } else {
       if (cmd == "brief" || cmd == "short") explicit_brief = true;
       route_command(m, cmd, text);
@@ -326,21 +366,45 @@ model::CommentModel parse_raw(const std::string& raw) {
     cmd.clear();
   };
 
-  for (const std::string& line : strip_markers(raw)) {
-    std::size_t s = line.find_first_not_of(" \t");
-    bool is_command = s != std::string::npos && (line[s] == '@' || line[s] == '\\');
-    if (is_command) {
-      flush();
-      std::size_t e = line.find_first_of(" \t", s + 1);
-      cmd = lower(line.substr(s + 1, (e == std::string::npos ? line.size() : e) - s - 1));
-      if (e != std::string::npos) buf = line.substr(e + 1);
-    } else if (line.empty()) {
-      // Blank line ends a lead paragraph, and ends a single-name command whose
-      // argument is complete, but continues a prose command like `\brief`.
-      if (cmd.empty() && have_lead_para) flush();
-      else if (!cmd.empty() && takes_single_name(cmd)) flush();
-      else if (!cmd.empty()) buf += ' ';
-    } else {
+  for (const std::string& source_line : strip_markers(raw)) {
+    std::string line = source_line;
+    // A no-argument command does not even own the rest of its own line: Eigen
+    // writes `\internal \ingroup enums` and `\internal \class Foo`, so the
+    // command after the marker has to be seen rather than swept into the prose.
+    // Hence the rescan rather than a single pass per line.
+    for (bool again = true; again;) {
+      again = false;
+      std::size_t s = line.find_first_not_of(" \t");
+      bool is_command = s != std::string::npos && (line[s] == '@' || line[s] == '\\');
+      if (is_command) {
+        flush();
+        std::size_t e = line.find_first_of(" \t", s + 1);
+        cmd = lower(line.substr(s + 1, (e == std::string::npos ? line.size() : e) - s - 1));
+        std::string rest = e == std::string::npos ? std::string{} : line.substr(e + 1);
+        if (takes_nothing(cmd)) {
+          route_command(m, cmd, "");
+          cmd.clear();
+          line = rest;
+          // Guarded on a non-blank remainder so a marker alone on its line
+          // cannot loop, nor be mistaken for a paragraph break.
+          again = rest.find_first_not_of(" \t") != std::string::npos;
+          continue;
+        }
+        buf = rest;
+        if (takes_line(cmd)) flush();  // the argument ended with the line
+        continue;
+      }
+      if (line.empty()) {
+        // Blank line ends a lead paragraph and ends a single-name command whose
+        // argument is complete, but continues a prose command like `\brief`.
+        if (cmd.empty() && have_lead_para) flush();
+        else if (!cmd.empty() && !takes_paragraph(cmd)) flush();
+        else if (!cmd.empty()) buf += ' ';
+        continue;
+      }
+      // A command that does not take a paragraph already has its argument, so
+      // this line starts the entity's prose rather than extending the command.
+      if (!cmd.empty() && !takes_paragraph(cmd)) flush();
       if (!buf.empty()) buf += ' ';
       buf += line;
       if (cmd.empty()) have_lead_para = true;
