@@ -3,8 +3,10 @@ on:
   push:
     branches: [main]
   merge_group:
+  # No `branches:` filter: a stacked PR based on another feature branch
+  # must still be tested, and GitHub's auto-retarget to main fires only
+  # `edited`, which would never re-trigger a filtered workflow.
   pull_request:
-    branches: [main]
 name: pytest
 # Cancel a stale PR run when new commits land; let push/merge_group runs finish.
 concurrency:
