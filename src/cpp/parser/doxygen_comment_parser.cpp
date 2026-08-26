@@ -100,12 +100,16 @@ std::string text_of(CXComment c) {
   return normalize_ws(s);
 }
 
-// True when the raw comment uses a group command. libclang's parsed tree
-// mishandles these (it drops the command but leaves its argument as stray
-// prose), so such comments are parsed from the raw text instead, where group
-// commands route cleanly into `custom`.
-bool raw_has_group_command(const std::string& raw) {
-  static const char* const kCmds[] = {"ingroup", "defgroup", "addtogroup"};
+// True when the raw comment uses a command libclang's parsed tree mishandles:
+// it drops the command and leaves its argument as stray prose. Group commands
+// are one family; the structural commands are the other, which libclang models
+// as verbatim-line commands and spills into the detail text — so `\class Select`
+// would put a bare "Select" in the description. Such comments are parsed from
+// the raw text instead, where both families route cleanly into `custom`.
+bool raw_has_unroutable_command(const std::string& raw) {
+  static const char* const kCmds[] = {
+      "ingroup", "defgroup",  "addtogroup", "class", "struct", "union",
+      "enum",    "namespace", "fn",         "var",   "typedef", "relates"};
   for (std::size_t i = 0; i + 1 < raw.size(); ++i) {
     if (raw[i] != '\\' && raw[i] != '@') continue;
     for (const char* cmd : kCmds) {
@@ -334,8 +338,10 @@ model::CommentModel parse_raw(const std::string& raw) {
 
 model::CommentModel DoxygenCommentParser::parse(CXCursor cursor,
                                                 const std::string& raw) const {
-  // Group commands confuse libclang's parsed tree; scan the raw text instead.
-  if (raw_has_group_command(raw)) return parse_raw(raw);
+  // Group and structural commands confuse libclang's parsed tree; scan the raw
+  // text instead. A null cursor has no parsed comment either, so a block that
+  // belongs to no cursor at all takes the same path.
+  if (raw_has_unroutable_command(raw)) return parse_raw(raw);
   CXComment full = clang_Cursor_getParsedComment(cursor);
   if (clang_Comment_getKind(full) == CXComment_FullComment &&
       clang_Comment_getNumChildren(full) > 0) {

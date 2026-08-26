@@ -359,6 +359,45 @@ def test_inputs_reached_through_a_forced_include_are_attributed(tmp_path: Path) 
     assert count("batched.sqlite", 2) == 1
 
 
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_structural_block_resolves_the_same_under_any_batching(tmp_path: Path) -> None:
+    # A structural block is resolved against the file it was written in, not the
+    # translation unit, precisely so batching cannot change the answer: umbrella
+    # batches are 64 inputs wide, so a module-wide lookup would find a target in
+    # a sibling file or not depending on which batch it landed in, and never
+    # under tu_batch=1.
+    one = tmp_path / "one.hpp"
+    one.write_text(
+        "#pragma once\n"
+        "/** \\class Local\n  * \\brief Documented from a block above it.\n  */\n"
+        "\nnamespace filler { int x = 0; }\n"
+        "\nclass Local { public: int v = 0; };\n",
+    )
+    # Names an entity in the *other* file: must stay unresolved either way.
+    two = tmp_path / "two.hpp"
+    two.write_text(
+        "#pragma once\n"
+        "/** \\class Elsewhere\n  * \\brief Should not reach across files.\n  */\n"
+        "\nnamespace other { int y = 0; }\n",
+    )
+    three = tmp_path / "three.hpp"
+    three.write_text("#pragma once\nclass Elsewhere { public: int v = 0; };\n")
+
+    def documented(db_name: str, tu_batch: int) -> set[tuple]:
+        opts = _core.ParseOptions()
+        opts.tu_batch = tu_batch
+        db = tmp_path / db_name
+        _core.parse_to_sqlite([str(one), str(two), str(three)], str(db), opts)
+        with Store.open(db) as store:
+            return {(s.qualified_name, s.is_documented) for s in store.symbols()}
+
+    batched = documented("batched.sqlite", 0)
+    isolated = documented("isolated.sqlite", 1)
+    assert batched == isolated
+    assert ("Local", True) in batched
+    assert ("Elsewhere", False) in batched
+
+
 def test_schema_version_exposed() -> None:
     assert isinstance(_core.SCHEMA_VERSION, int)
     assert _core.SCHEMA_VERSION >= 1
