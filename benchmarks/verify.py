@@ -59,6 +59,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass, field
@@ -120,6 +121,9 @@ class Check:
     passed: bool
     summary: str
     detail: list[str] = field(default_factory=list)
+    # Wall clock, filled in by `verify_repo` rather than by the check itself so
+    # every check is timed the same way and none of them has to remember to.
+    seconds: float = 0.0
 
     def as_dict(self) -> dict:
         """Serialise the check to a JSON-friendly dict."""
@@ -128,6 +132,7 @@ class Check:
             "passed": self.passed,
             "summary": self.summary,
             "detail": self.detail,
+            "seconds": round(self.seconds, 2),
         }
 
 
@@ -632,8 +637,20 @@ def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
 
 
 def verify_repo(cfg: RepoConfig, args: argparse.Namespace, tools: Tools) -> dict:
-    """Run every check for one project and return its result record."""
+    """Run every check for one project and return its result record.
+
+    Every phase is timed. Nothing here is a benchmark — the machine is whatever
+    CI gave us and the numbers move with it — but the *shape* is what decides
+    whether a project can run on every push rather than weekly, and that is a
+    question about setup versus checks, and about which check dominates. Reading
+    it off run history beats re-measuring by hand on one laptop.
+    """
+    started = time.perf_counter()
     ctx = prepare_repo(cfg, args.work_dir, fresh_clone=args.fresh_clone)
+    # Timed apart from the checks: for a project whose config names a CMake
+    # preset this is the entire cost, and it is the number that decides where
+    # the project can run at all.
+    prepare_seconds = time.perf_counter() - started
     # A verification run always starts from nothing: strict mode re-parses the
     # whole input set anyway, and a stale IR or a half-written XML tree from a
     # previous run would silently change what the cross-check compares.
@@ -642,18 +659,34 @@ def verify_repo(cfg: RepoConfig, args: argparse.Namespace, tools: Tools) -> dict
     logs = ctx.logs
     logs.mkdir(parents=True, exist_ok=True)
 
+    def timed(check: Check, seconds: float) -> Check:
+        check.seconds = seconds
+        state = "ok" if check.passed else "FAILED"
+        print(f"  {check.name}: {state} [{seconds:.1f}s] — {check.summary}")
+        return check
+
+    mark = time.perf_counter()
     parse_check, _ = check_clangquill(ctx, tools.clangquill, logs)
-    print(f"  parse: {'ok' if parse_check.passed else 'FAILED'} — {parse_check.summary}")
+    parse_check = timed(parse_check, time.perf_counter() - mark)
+
+    mark = time.perf_counter()
     doxygen_check, xml_dir = check_doxygen(ctx, tools.doxygen, logs)
-    print(f"  doxygen: {'ok' if doxygen_check.passed else 'FAILED'} — {doxygen_check.summary}")
+    doxygen_check = timed(doxygen_check, time.perf_counter() - mark)
+
+    mark = time.perf_counter()
     extraction_check, stats = check_extraction(ctx, xml_dir)
-    print(f"  extraction: {'ok' if extraction_check.passed else 'FAILED'} — {extraction_check.summary}")
+    extraction_check = timed(extraction_check, time.perf_counter() - mark)
+
+    mark = time.perf_counter()
     isolation_check = check_isolation(ctx, tools.clangquill, logs)
-    print(f"  isolation: {'ok' if isolation_check.passed else 'FAILED'} — {isolation_check.summary}")
+    isolation_check = timed(isolation_check, time.perf_counter() - mark)
+
+    mark = time.perf_counter()
     comments_check = check_comments(ctx)
-    print(f"  comments: {'ok' if comments_check.passed else 'FAILED'} — {comments_check.summary}")
+    comments_check = timed(comments_check, time.perf_counter() - mark)
 
     checks = [parse_check, doxygen_check, extraction_check, isolation_check, comments_check]
+    print(f"  prepare: [{prepare_seconds:.1f}s] clone/checkout" + (", cmake configure" if cfg.cmake_preset else ""))
     return {
         "resolved_ref": ctx.resolved_ref,
         "commit": ctx.commit,
@@ -662,6 +695,11 @@ def verify_repo(cfg: RepoConfig, args: argparse.Namespace, tools: Tools) -> dict
         "checks": [check.as_dict() for check in checks],
         "extraction": stats,
         "logs": str(logs),
+        "seconds": {
+            "prepare": round(prepare_seconds, 2),
+            "checks": round(sum(check.seconds for check in checks), 2),
+            "total": round(time.perf_counter() - started, 2),
+        },
     }
 
 
@@ -692,6 +730,43 @@ def environment_info(tools: Tools) -> dict:
 # --------------------------------------------------------------------------- #
 # Reporting
 # --------------------------------------------------------------------------- #
+def _timing_table(results: dict) -> list[str]:
+    """Render the per-project wall clock, or nothing for an older result file.
+
+    Not a benchmark: `benchmark.py` is the driver that controls for the machine
+    and takes medians, and these numbers move with whatever runner they landed
+    on. What they answer is the cheaper question of where the time goes — setup
+    versus checks, and which check dominates — which is what decides whether a
+    project can run on every push rather than weekly.
+    """
+    timed = {name: r["seconds"] for name, r in results.items() if r.get("seconds")}
+    if not timed:
+        return []
+    names = [check["name"] for check in next(iter(results.values()))["checks"]]
+    lines = [
+        "## Wall clock",
+        "",
+        "Indicative only — this is not the benchmark driver, and the numbers move",
+        "with the machine. Useful for the shape: setup versus checks, and which",
+        "check dominates.",
+        "",
+        "| project | prepare | " + " | ".join(names) + " | total |",
+        "| --- | --- | " + " | ".join("---" for _ in names) + " | --- |",
+    ]
+    for name, result in results.items():
+        seconds = result.get("seconds")
+        if not seconds:
+            continue
+        per_check = {check["name"]: check.get("seconds", 0.0) for check in result["checks"]}
+        cells = " | ".join(f"{per_check.get(check, 0.0):.1f}s" for check in names)
+        lines.append(
+            f"| {name} | {seconds['prepare']:.1f}s | {cells} | **{seconds['total']:.1f}s** |",
+        )
+    total = sum(seconds["total"] for seconds in timed.values())
+    lines += ["", f"Total across {len(timed)} project(s): **{total:.1f}s**.", ""]
+    return lines
+
+
 def render_markdown(payload: dict) -> str:
     """Render the run as a Markdown report (also used as the CI job summary)."""
     env = payload["environment"]
@@ -727,6 +802,7 @@ def render_markdown(payload: dict) -> str:
             f"| {marks.get('comments', '—')} | {counts} |",
         )
     lines.append("")
+    lines += _timing_table(results)
 
     for name, result in results.items():
         failures = [check for check in result["checks"] if not check["passed"]]
