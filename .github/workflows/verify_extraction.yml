@@ -10,20 +10,18 @@
 # not about the tool under test. Nothing is timed and nothing is published; the
 # job is red exactly when one of those four claims is false.
 #
-# Full weekly matrix plus a narrow per-push slice. The weekly run (Mondays) and
-# manual dispatch cover every configured project, because most of them clone
-# and fully re-parse large upstream sources — the per-push correctness signal
-# for those is the test suite, and this catches the slower drift: an upstream
-# project moving, a libclang upgrade changing what parses, or a regression in
-# comment extraction that a green parse would hide.
-#
-# `clangquill` itself is the exception: `local = true` means no clone and no
-# upstream-flakiness surface, and it exercises the whole pipeline against this
-# repo's own headers in ~8s of check time (see issue #173). So push/PR/merge
-# queue runs verify only that project, giving every PR the same real-parser
-# signal that first caught the input-order, forward-declaration and comment
-# swallowing bugs this workflow exists for — without paying per-push for
-# abseil/eigen's clone cost or dune-gdt's vcpkg build.
+# Two scopes (see issue #173). Push/PR/merge queue verify clangquill, abseil
+# and eigen — every config cheap enough to clone (or, for clangquill, skip
+# cloning entirely) and re-parse in well under a minute — giving every PR the
+# same real-parser signal that first caught the input-order,
+# forward-declaration and comment-swallowing bugs this workflow exists for.
+# The weekly run (Mondays) and manual dispatch cover every configured
+# project, dune-gdt included: its config drives a `cmake --preset` that
+# bootstraps the whole DUNE stack through vcpkg, on the order of an hour, which
+# is fine unattended overnight and not fine blocking a PR. Weekly also catches
+# the slower drift a per-push run can't: an upstream project moving, a
+# libclang upgrade changing what parses, or a regression a green parse would
+# hide.
 name: verify-extraction
 on:
   push:
@@ -122,23 +120,18 @@ jobs:
         # silent. Dispatch inputs are passed via env (not interpolated into the
         # script) so they can never expand into executable shell.
         env:
-          # A dispatch decides its own scope; empty means every config under
-          # benchmarks/configs/. The weekly run cannot afford that: dune-gdt's
-          # config names a CMake preset, and configuring it builds the whole
-          # DUNE stack from source through vcpkg — about an hour on this
-          # machine's 16 cores *with* a warm binary cache, on a 4-core hosted
-          # runner with no cache at all and ~14 GB of disk. So the schedule
-          # names its projects explicitly; add new configs here when they are
-          # cheap enough to run unattended, and verify dune-gdt by dispatch.
-          # Push/PR/merge_group get neither: they run only clangquill, the one
-          # project with no clone and no upstream flakiness surface. Order
-          # matters here: an empty `inputs.repos` is falsy, so the dispatch
-          # case (meaning "every config") must be the last term, or a later
-          # `|| 'clangquill'` fallback would silently override it.
+          # Push/PR/merge_group get every config except dune-gdt: cheap enough
+          # to run on every change, and none of them clone-and-build the DUNE
+          # stack through vcpkg. Schedule and dispatch get everything —
+          # dune-gdt's ~1h `cmake --preset` build is fine unattended overnight
+          # but not fine blocking a PR — unless a dispatch narrows the scope
+          # itself via its `repos` input. Order matters here: an empty
+          # `inputs.repos` is falsy, so it must sit before the final `''`
+          # (meaning "every config"), or a later fallback would silently
+          # override a deliberately empty dispatch input.
           VERIFY_REPOS: >-
             ${{ (github.event_name == 'push' || github.event_name == 'pull_request'
-                 || github.event_name == 'merge_group') && 'clangquill' ||
-                (github.event_name == 'schedule' && 'clangquill,abseil,eigen') ||
+                 || github.event_name == 'merge_group') && 'clangquill,abseil,eigen' ||
                 inputs.repos ||
                 '' }}
           VERIFY_FRESH_CLONE: ${{ inputs.fresh_clone }}
