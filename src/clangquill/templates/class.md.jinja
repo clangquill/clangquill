@@ -12,6 +12,11 @@
 **Friends** {% for friend in friends %}{{ xref(friend) }}{{ ", " if not loop.last }}{% endfor %}.
 
 {% endif %}
+{% set related = gen.related(symbol) %}
+{% if related %}
+**Related functions** {% for fn in related %}{{ xref(fn) }}{{ ", " if not loop.last }}{% endfor %}.
+
+{% endif %}
 ```{{ "{" ~ gen.directive(symbol) ~ "}" }} {{ sig.directive_argument(symbol) }}
 
 {{ render_comment(comment) }}

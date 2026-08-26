@@ -13,6 +13,8 @@ Abstract base for shapes.
 
 **Inherits from** {cpp:any}`geo::Shape`.
 
+**Related functions** {cpp:any}`geo::scale`.
+
 ```{cpp:class} geo::Circle : public Shape
 
 A circle.
