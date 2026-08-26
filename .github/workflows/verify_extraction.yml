@@ -10,7 +10,7 @@
 # not about the tool under test. Nothing is timed and nothing is published; the
 # job is red exactly when one of those four claims is false.
 #
-# Two scopes (see issue #173). Push/PR/merge queue verify clangquill, abseil
+# Two scopes (see issue 173). Push/PR/merge queue verify clangquill, abseil
 # and eigen — every config cheap enough to clone (or, for clangquill, skip
 # cloning entirely) and re-parse in well under a minute — giving every PR the
 # same real-parser signal that first caught the input-order,
@@ -131,7 +131,8 @@ jobs:
           # override a deliberately empty dispatch input.
           VERIFY_REPOS: >-
             ${{ (github.event_name == 'push' || github.event_name == 'pull_request'
-                 || github.event_name == 'merge_group') && 'clangquill,abseil,eigen' ||
+                 || github.event_name == 'merge_group') && 'clangquill,abseil,eigen'
+            ||
                 inputs.repos ||
                 '' }}
           VERIFY_FRESH_CLONE: ${{ inputs.fresh_clone }}
