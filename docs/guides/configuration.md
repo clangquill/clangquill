@@ -86,7 +86,7 @@ Things worth knowing:
   build re-parses nothing and leaves the previous log in place rather than
   truncating it to silence. Leave `cache_dir` unset for a complete log on
   every build.
-- **The set of warnings depends on `tu_batch`.** Batched inputs share one
+- **The set of diagnostics depends on `tu_batch`.** Batched inputs share one
   translation unit, so a header that is not self-contained sees the preprocessor
   state of the others in its batch. Which files share a batch is a function of
   the input set — inputs are parsed in a canonical order, so listing them
