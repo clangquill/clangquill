@@ -56,6 +56,86 @@ const Field* field(const std::vector<Field>& fs, const std::string& name,
 
 }  // namespace
 
+TEST_CASE("a structural block documents the entity it names", "[comments]") {
+  auto m = parse_fixture("structural.hpp");
+
+  // The Eigen shape: the block sits 40+ lines above `class Widget`, separated by
+  // a blank line and an unrelated namespace, so nothing attaches it by adjacency.
+  const auto* widget = find(m, "Widget");
+  REQUIRE(widget != nullptr);
+  CHECK(widget->is_documented);
+  auto fs = fields_of(m, widget->usr);
+  const Field* brief = field(fs, "brief");
+  REQUIRE(brief != nullptr);
+  CHECK(brief->value.find("nowhere near it") != std::string::npos);
+  // The command's argument must not leak into the prose.
+  CHECK(brief->value.find("Widget") == std::string::npos);
+
+  // `\ingroup` inside the block still makes the target a member, which is what
+  // Eigen's blocks rely on.
+  bool in_group = false;
+  for (const auto& gm : m.group_members) {
+    if (gm.group_id == "shapes" && gm.member_usr == widget->usr) in_group = true;
+  }
+  CHECK(in_group);
+}
+
+TEST_CASE("structural blocks cover the other entity kinds", "[comments]") {
+  auto m = parse_fixture("structural.hpp");
+  for (const auto* qn : {"Gadget", "Colour", "deep", "Distance"}) {
+    const auto* sym = find(m, qn);
+    REQUIRE(sym != nullptr);
+    CHECK(sym->is_documented);
+  }
+  // A signature after `\fn` has to be reduced to a qualified name.
+  const auto* scale = find(m, "deep::scale");
+  REQUIRE(scale != nullptr);
+  CHECK(scale->is_documented);
+}
+
+TEST_CASE("an ambiguous or unresolvable structural block attaches nothing",
+          "[comments]") {
+  auto m = parse_fixture("structural.hpp");
+
+  // Two overloads answer to `deep::over`; documenting either would be a guess.
+  for (const auto& sym : m.symbols) {
+    if (sym.qualified_name == "deep::over") CHECK_FALSE(sym.is_documented);
+  }
+
+  // A name that resolves to nothing must not leave a comment row behind:
+  // comments.symbol_usr is a foreign key onto symbols.usr.
+  for (const auto& c : m.comments) {
+    bool has_symbol = false;
+    for (const auto& sym : m.symbols) {
+      if (sym.usr == c.symbol_usr) has_symbol = true;
+    }
+    CHECK(has_symbol);
+  }
+}
+
+TEST_CASE("an entity's own comment beats a structural block naming it",
+          "[comments]") {
+  auto m = parse_fixture("structural.hpp");
+  const auto* owned = find(m, "Owned");
+  REQUIRE(owned != nullptr);
+  REQUIRE(owned->is_documented);
+
+  int rows = 0;
+  for (const auto& c : m.comments) {
+    if (c.symbol_usr == owned->usr) {
+      ++rows;
+      CHECK(c.text.find("Its own comment") != std::string::npos);
+    }
+  }
+  CHECK(rows == 1);  // and no duplicate comment_fields either
+  auto fs = fields_of(m, owned->usr);
+  int briefs = 0;
+  for (const auto& f : fs) {
+    if (f.name == "brief") ++briefs;
+  }
+  CHECK(briefs <= 1);
+}
+
 TEST_CASE("doxygen parser covers the common commands", "[comments]") {
   auto m = parse_fixture("doxygen.hpp");
   const auto* divide = find(m, "doc::divide");

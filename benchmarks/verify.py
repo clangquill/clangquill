@@ -3,37 +3,46 @@
 
 The sibling :mod:`benchmark` driver asks how *fast* the two tools are, and
 treats a non-zero exit as a data point. This one asks whether the extraction is
-*correct*, and treats anything short of silence as a failure. It runs over the
-same projects — the TOML files under ``configs/``, shared through
+*correct*, and treats anything short of silence from ClangQuill as a failure. It
+runs over the same projects — the TOML files under ``configs/``, shared through
 :mod:`harness` — so "the fast path and the correct path see the same code" is a
 fact rather than a claim.
 
-Three checks per project, all of which must pass:
+Four checks per project, all of which must pass:
 
     parse       ``clangquill build --warnings-as-errors`` exits 0, i.e. libclang
                 produced no diagnostic of warning severity or worse over the
                 whole input set. The full diagnostic list is written to a log
                 next to the report whatever the outcome.
-    doxygen     ``doxygen`` with ``WARNINGS = YES`` and
-                ``WARN_AS_ERROR = FAIL_ON_WARNINGS`` exits 0 over the identical
-                file set. Doxygen finishes the run before failing, so its XML is
-                still there to compare against.
+    doxygen     ``doxygen`` ran over the identical file set and wrote XML. This
+                is a precondition, not a verdict on Doxygen: its warnings are
+                logged and counted in the report, and do not fail the run.
     extraction  every input file Doxygen extracted a documented entity from
                 yielded a documented symbol in ClangQuill's IR too.
+    isolation   re-parsing at ``--tu-batch 1`` yields the same symbols as the
+                default umbrella batching, i.e. batching really is only an
+                optimisation on this project's headers.
 
-The third check is the reason both tools are run. A parse can be clean and the
-output still be wrong: a regression that silently stops attaching doc comments
-to symbols shows up here as files Doxygen documented and ClangQuill did not,
-and nowhere else. Comparing *per file* rather than by raw symbol count is
-deliberate — the two tools model symbols differently enough that an exact count
-comparison would be noise. The overall documented-entity ratio is reported
-alongside it, and gates the run only for configs that set
-``min_documented_ratio``.
+The extraction check is the reason both tools are run, and it is what this
+driver is for: a parse can be clean and the output still be wrong, and a regression that
+silently stops attaching doc comments to symbols shows up here as files Doxygen
+documented and ClangQuill did not, and nowhere else. Comparing *per file*
+rather than by raw symbol count is deliberate — the two tools model symbols
+differently enough that an exact count comparison would be noise. The overall
+documented-entity ratio is reported alongside it, and gates the run only for
+configs that set ``min_documented_ratio``.
 
-Why the checks are hard failures with no baseline: a project that cannot be
-parsed cleanly is telling you its config lacks include directories or defines,
-which is fixable in ``configs/<name>.toml``. Recording the noise as "expected"
-instead would make the whole run decorative.
+Doxygen's own warnings are not gated because they are not evidence about
+ClangQuill. Real projects make Doxygen warn for reasons no generated Doxyfile
+can fix — abseil's ``friend Type;`` and ``extern template`` declarations are
+valid C++11 that Doxygen mis-parses as members to match, and Eigen's comments
+reference an ``EXAMPLE_PATH`` and ``ALIASES`` that live in the project's own
+Doxyfile. Gating on that would make the run red for facts about Doxygen.
+
+Why the two remaining checks are hard failures with no baseline: a project that
+cannot be parsed cleanly is telling you its config lacks include directories or
+defines, which is fixable in ``configs/<name>.toml``. Recording the noise as
+"expected" instead would make the whole run decorative.
 
 The driver depends only on the standard library plus ``clangquill`` itself
 (whose SQLite IR it reads); ``doxygen`` is required and the run fails without
@@ -50,6 +59,7 @@ import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -75,11 +85,10 @@ from harness import (
 
 DEFAULT_RESULTS_DIR = HERE / "verify-results"
 
-# Doxygen understands WARN_AS_ERROR = FAIL_ON_WARNINGS from 1.9.2 on; older
-# releases only accept YES/NO and quietly treat the unknown value as NO, which
-# would make the doxygen half of the run pass unconditionally. The check below
-# turns that into a visible note in the report instead of a silent free pass.
-MIN_DOXYGEN_FOR_FAIL_ON_WARNINGS = (1, 9, 2)
+# One doxygen diagnostic, as written to WARN_LOGFILE: a location, then the
+# severity. Counting lines instead would inflate the number, since doxygen wraps
+# a single message over its "Possible candidates:" list.
+DOXYGEN_MESSAGE_RE = re.compile(r"^.+:\d+: (?:warning|error):", re.MULTILINE)
 
 # Compound kinds whose *own* description is about a file rather than an API
 # symbol. ClangQuill models no symbol for a file, so a `\file` comment must not
@@ -190,14 +199,29 @@ def _location(element: ET.Element, root: Path) -> str | None:
         return None
 
 
-def doxygen_extraction(xml_dir: Path, source_root: Path) -> tuple[dict[str, int], int]:
+def _qualified_name(element: ET.Element) -> str:
+    """Doxygen's fully qualified name for a compound or member, or ``""``."""
+    # `<qualifiedname>` when Doxygen emits one, which is already exactly the
+    # form ClangQuill stores. Not `<definition>`: that is the whole declaration
+    # and Doxygen spaces out template brackets inside it, so the last token of
+    # "... Eigen::MatrixBase< Derived >::diagonal" is ">::diagonal".
+    qualified = element.findtext("qualifiedname")
+    if qualified:
+        return qualified.strip()
+    return (element.findtext("compoundname") or "").strip()
+
+
+def doxygen_extraction(xml_dir: Path, source_root: Path) -> tuple[dict[str, int], int, dict[str, set[str]]]:
     """Count Doxygen's documented entities per source file.
 
-    Returns ``({relative path: documented entity count}, total)``. Files with
-    no documented entity are omitted, because the cross-check only asks about
-    files Doxygen *did* find documentation in.
+    Returns ``({relative path: documented entity count}, total, {path: names})``.
+    Files with no documented entity are omitted, because the cross-check only
+    asks about files Doxygen *did* find documentation in. The names ride along
+    so a file can be cleared when what it documents lives, in ClangQuill's IR,
+    under the header that *declares* it — see :func:`check_extraction`.
     """
     per_file: dict[str, int] = {}
+    names: dict[str, set[str]] = {}
     total = 0
     for path in sorted(xml_dir.glob("*.xml")):
         if path.name in {"index.xml", "Doxyfile.xml"}:
@@ -214,31 +238,38 @@ def doxygen_extraction(xml_dir: Path, source_root: Path) -> tuple[dict[str, int]
                 rel = _location(compound, source_root)
                 if rel is not None:
                     per_file[rel] = per_file.get(rel, 0) + 1
+                    names.setdefault(rel, set()).add(_qualified_name(compound))
                     total += 1
         for member in root.iter("memberdef"):
             if _documented(member):
                 rel = _location(member, source_root)
                 if rel is not None:
                     per_file[rel] = per_file.get(rel, 0) + 1
+                    names.setdefault(rel, set()).add(_qualified_name(member))
                     total += 1
-    return per_file, total
+    return per_file, total, names
 
 
-def clangquill_extraction(ir_path: Path, source_root: Path) -> tuple[dict[str, int], int]:
+def clangquill_extraction(ir_path: Path, source_root: Path) -> tuple[dict[str, int], int, set[str]]:
     """Count ClangQuill's documented symbols per source file, from the IR.
 
     Reads the SQLite IR the build left in its ``--cache-dir``, which already
     records ``is_documented`` and the owning file per symbol — no re-parse and
-    no scraping of rendered Markdown.
+    no scraping of rendered Markdown. The third value is every documented
+    symbol's qualified name regardless of which file it was attributed to.
     """
     from clangquill.store import Store  # noqa: PLC0415 - optional at import time, required here
 
     per_file: dict[str, int] = {}
+    documented_names: set[str] = set()
     total = 0
     with Store.open(ir_path) as store:
         paths = {f.id: f.path for f in store.files()}
         for symbol in store.symbols():
-            if not symbol.is_documented or symbol.file_id is None:
+            if not symbol.is_documented:
+                continue
+            documented_names.add(symbol.qualified_name)
+            if symbol.file_id is None:
                 continue
             raw = paths.get(symbol.file_id)
             if raw is None:
@@ -249,7 +280,20 @@ def clangquill_extraction(ir_path: Path, source_root: Path) -> tuple[dict[str, i
                 continue
             per_file[rel] = per_file.get(rel, 0) + 1
             total += 1
-    return per_file, total
+    return per_file, total, documented_names
+
+
+def symbol_rows(ir_path: Path) -> set[tuple]:
+    """Return the identity of every symbol in an IR, order-insensitively.
+
+    ``is_documented`` rides along in the tuple, so a symbol whose doc comment
+    stops being attached shows up as a pair — once on each side of the
+    comparison — rather than silently matching.
+    """
+    from clangquill.store import Store  # noqa: PLC0415 - optional at import time, required here
+
+    with Store.open(ir_path) as store:
+        return {(s.usr, s.qualified_name, s.kind, s.is_documented) for s in store.symbols()}
 
 
 # --------------------------------------------------------------------------- #
@@ -287,10 +331,14 @@ def check_clangquill(ctx: RepoContext, clangquill_cmd: list[str], logs: Path) ->
 
 
 def check_doxygen(ctx: RepoContext, doxygen_cmd: list[str], logs: Path) -> tuple[Check, Path]:
-    """Run Doxygen strictly over the same file set; return the check and XML dir.
+    """Run Doxygen over the same file set to produce the reference XML.
 
-    The XML directory is returned whatever the verdict, so the extraction check
-    can still compare against whatever Doxygen managed to write.
+    Doxygen is the yardstick the extraction check measures ClangQuill against,
+    so what this asserts is that the yardstick exists: that Doxygen ran and
+    wrote XML. Its warnings are counted into the summary and written to
+    ``doxygen-warnings.log``, but they do not fail the run — see the module
+    docstring for why. The XML directory is returned whatever the verdict, so
+    the extraction check can still compare against whatever was written.
     """
     warn_log = logs / "doxygen-warnings.log"
     doxyfile = write_doxyfile(ctx, "xml", strict=True, warn_log=warn_log)
@@ -298,7 +346,9 @@ def check_doxygen(ctx: RepoContext, doxygen_cmd: list[str], logs: Path) -> tuple
     xml_dir = ctx.doxygen_out("xml") / "xml"
     # The warn log holds the diagnostics; the run log holds whatever doxygen
     # printed around them. Prefer the former and fall back to the latter.
-    detail = _tail(warn_log.read_text(encoding="utf-8", errors="replace")) if warn_log.is_file() else []
+    warnings = warn_log.read_text(encoding="utf-8", errors="replace") if warn_log.is_file() else ""
+    detail = _tail(warnings) if warnings else []
+    version = tool_version([*doxygen_cmd, "--version"])
     if run.exit_code != 0:
         return (
             Check(
@@ -309,31 +359,91 @@ def check_doxygen(ctx: RepoContext, doxygen_cmd: list[str], logs: Path) -> tuple
             ),
             xml_dir,
         )
-    # A clean exit only means something if this doxygen can enforce the setting
-    # that was asked of it. Releases before 1.9.2 do not understand
-    # WARN_AS_ERROR = FAIL_ON_WARNINGS, treat the unknown value as NO, and exit
-    # 0 no matter how much they warned — so trusting the exit code there would
-    # report a green check for a run that never enforced anything. A version
-    # that cannot be parsed at all gets the same treatment: an unidentifiable
-    # doxygen is not evidence of a clean extraction. Recording the version in
-    # the report is not enough, because CI gates on the exit status rather than
-    # on the prose.
-    version = tool_version([*doxygen_cmd, "--version"])
-    if doxygen_release(version) < MIN_DOXYGEN_FOR_FAIL_ON_WARNINGS:
-        wanted = ".".join(str(part) for part in MIN_DOXYGEN_FOR_FAIL_ON_WARNINGS)
-        return (
-            Check(
-                "doxygen",
-                passed=False,
-                summary=(
-                    f"doxygen {version or 'of unknown version'} cannot fail on its own warnings "
-                    f"(WARN_AS_ERROR = FAIL_ON_WARNINGS needs {wanted}), so its exit code proves nothing"
-                ),
-                detail=detail,
-            ),
-            xml_dir,
+    count = len(DOXYGEN_MESSAGE_RE.findall(warnings))
+    noted = "no warnings" if not count else f"{count} warning(s), not gating ({warn_log})"
+    return Check("doxygen", passed=True, summary=f"{noted} (doxygen {version})"), xml_dir
+
+
+def check_isolation(ctx: RepoContext, clangquill_cmd: list[str], logs: Path) -> Check:
+    """Re-parse with ``--tu-batch 1`` and demand the same symbols.
+
+    Umbrella batching is meant to be an optimisation: a batch shares one
+    translation unit so the common ``#include`` closure is parsed once instead
+    of once per input, and the extracted IR is supposed to be what fully
+    isolated per-file parsing would have produced. That holds for self-contained
+    headers and quietly fails for the rest, which see whatever preprocessor state
+    their batch-mates left behind. Canonical input ordering makes the outcome
+    reproducible; only this check says whether it is also *right*.
+
+    Compared against the IR the parse check already built, so a project costs one
+    extra parse rather than two. Diagnostics are counted into the summary but do
+    not decide it: libclang reports a batched diagnostic through the synthetic
+    umbrella main file, and the parser dedups per run, so the two logs are not
+    comparable line for line even when the IR agrees.
+    """
+    batched_ir = ctx.cache_dir / "clangquill.sqlite"
+    isolated_cache = ctx.bench_dir / "cache-isolated"
+    wipe(isolated_cache)
+    wipe(ctx.bench_dir / "myst-isolated")
+    diagnostics_log = logs / "clangquill-isolated-diagnostics.log"
+    argv = clangquill_build_argv(
+        ctx,
+        clangquill_cmd,
+        output_dir=ctx.bench_dir / "myst-isolated",
+        cache_dir=isolated_cache,
+        extra=["--tu-batch", "1", "--diagnostics-log", str(diagnostics_log)],
+    )
+    run = run_logged(argv, ctx.source_dir, logs / "clangquill-isolated.log")
+    isolated_ir = isolated_cache / "clangquill.sqlite"
+    if not batched_ir.is_file() or not isolated_ir.is_file():
+        missing = batched_ir if not batched_ir.is_file() else isolated_ir
+        return Check(
+            "isolation",
+            passed=False,
+            summary=f"no IR to compare at {missing} (isolated build exited {run.exit_code})",
+            detail=_tail(run.output),
         )
-    return Check("doxygen", passed=True, summary=f"no warnings (doxygen {version})"), xml_dir
+
+    batched = symbol_rows(batched_ir)
+    isolated = symbol_rows(isolated_ir)
+    # A symbol that agrees on name, kind and documented but not on USR is not a
+    # difference this project can act on: libclang renders a dependent template
+    # argument differently depending on how much of the translation unit it has
+    # seen, so abseil's FormatConvertImpl overloads come out with
+    # ArgConvertResult<absl::FormatConversionCharSet::v> one way and
+    # ArgConvertResult<524288> the other, and `<! X` versus `<!X`. Counted into
+    # the summary, never gated on — the same treatment doxygen's warnings get.
+    # The multiset intersection is what pairs those up; whatever is left over is
+    # a symbol that really is present on one side only.
+    batched_only = Counter(row[1:] for row in batched - isolated)
+    isolated_only = Counter(row[1:] for row in isolated - batched)
+    drift = sum((batched_only & isolated_only).values())
+    missing_when_batched = isolated_only - batched_only
+    missing_when_isolated = batched_only - isolated_only
+
+    drift_note = "" if not drift else f"; {drift} symbol(s) differ only in libclang's USR spelling"
+    if not missing_when_batched and not missing_when_isolated:
+        return Check(
+            "isolation",
+            passed=True,
+            summary=f"{len(batched)} symbol(s) identical under --tu-batch 1{drift_note}",
+        )
+    detail = [
+        f"only when batched: {name} ({kind}, documented={doc})" for name, kind, doc in sorted(missing_when_isolated)
+    ]
+    detail += [
+        f"only when isolated: {name} ({kind}, documented={doc})" for name, kind, doc in sorted(missing_when_batched)
+    ]
+    return Check(
+        "isolation",
+        passed=False,
+        summary=(
+            f"batching changes the IR: {sum(missing_when_isolated.values())} symbol(s) only when batched, "
+            f"{sum(missing_when_batched.values())} only when isolated, "
+            f"of {len(batched)} vs {len(isolated)}{drift_note}"
+        ),
+        detail=detail[:MAX_REPORTED_LINES],
+    )
 
 
 def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
@@ -355,9 +465,20 @@ def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
     if not ir_path.is_file():
         return Check("extraction", passed=False, summary=f"no clangquill IR at {ir_path}"), stats
 
-    doxygen_files, doxygen_total = doxygen_extraction(xml_dir, source_root)
-    quill_files, quill_total = clangquill_extraction(ir_path, source_root)
-    missed = sorted(path for path in doxygen_files if path not in quill_files)
+    doxygen_files, doxygen_total, doxygen_names = doxygen_extraction(xml_dir, source_root)
+    quill_files, quill_total, quill_names = clangquill_extraction(ir_path, source_root)
+    # A file Doxygen documented and ClangQuill did not is only a gap when the
+    # documentation went missing, not when it was filed elsewhere. C++ puts an
+    # out-of-line definition in a different header from its declaration, and
+    # Doxygen's `\fn` blocks document an entity from a third file again;
+    # ClangQuill attributes both to the declaration. Eigen's Dot.h is the case
+    # in point — it carries the prose for MatrixBase::dot, which ClangQuill
+    # records, documented, against MatrixBase.h.
+    missed = sorted(
+        path
+        for path in doxygen_files
+        if path not in quill_files and not (doxygen_names.get(path, set()) <= quill_names)
+    )
     ratio = (quill_total / doxygen_total) if doxygen_total else None
     stats = {
         "doxygen_documented": doxygen_total,
@@ -367,6 +488,31 @@ def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
         "missed_files": missed,
         "ratio": ratio,
     }
+
+    # Two different ways to end up with nothing to compare, and they are not the
+    # same verdict. Doxygen dying before it writes any XML leaves its output
+    # directory in place, so every test below is vacuously satisfied: no missed
+    # files, no ratio, "ok over 0 file(s)" on top of a broken run. That is a
+    # failure. A project whose sources carry no Doxygen-style comment at all —
+    # abseil documents its 60 headers in plain ``//``, which Doxygen does not
+    # read as documentation — produces a full set of XML with nothing documented
+    # in it. There is no reference to measure against, but nothing went wrong,
+    # and this driver's own gate is the parse check.
+    if not doxygen_files:
+        wrote_xml = any(path.name not in {"index.xml", "Doxyfile.xml"} for path in xml_dir.glob("*.xml"))
+        return (
+            Check(
+                "extraction",
+                passed=wrote_xml,
+                summary=(
+                    f"no doxygen-documented entity in this project, nothing to cross-check "
+                    f"(clangquill documented {quill_total})"
+                    if wrote_xml
+                    else f"doxygen wrote no XML under {xml_dir} — nothing to compare against"
+                ),
+            ),
+            stats,
+        )
 
     floor = ctx.config.min_documented_ratio
     summary = (
@@ -413,8 +559,10 @@ def verify_repo(cfg: RepoConfig, args: argparse.Namespace, tools: Tools) -> dict
     print(f"  doxygen: {'ok' if doxygen_check.passed else 'FAILED'} — {doxygen_check.summary}")
     extraction_check, stats = check_extraction(ctx, xml_dir)
     print(f"  extraction: {'ok' if extraction_check.passed else 'FAILED'} — {extraction_check.summary}")
+    isolation_check = check_isolation(ctx, tools.clangquill, logs)
+    print(f"  isolation: {'ok' if isolation_check.passed else 'FAILED'} — {isolation_check.summary}")
 
-    checks = [parse_check, doxygen_check, extraction_check]
+    checks = [parse_check, doxygen_check, extraction_check, isolation_check]
     return {
         "resolved_ref": ctx.resolved_ref,
         "commit": ctx.commit,
@@ -437,17 +585,6 @@ class Tools:
     doxygen: list[str]
 
 
-def doxygen_release(version: str) -> tuple[int, ...]:
-    """Extract the ``(major, minor, patch)`` tuple from a doxygen version string.
-
-    An empty tuple for anything unrecognisable, which compares below every real
-    release — so an unidentifiable doxygen fails the version gate rather than
-    slipping past it.
-    """
-    match = re.search(r"(\d+)\.(\d+)\.(\d+)", version)
-    return tuple(int(part) for part in match.groups()) if match else ()
-
-
 def environment_info(tools: Tools) -> dict:
     """Collect machine, Python and tool versions for the report."""
     doxygen = tool_version([*tools.doxygen, "--version"])
@@ -458,10 +595,6 @@ def environment_info(tools: Tools) -> dict:
             "doxygen": doxygen,
             "libclang": libclang_version(),
         },
-        # Surfaced in the report header so a red doxygen check on an old
-        # toolchain reads as "this doxygen cannot enforce the setting" rather
-        # than "this project warns". The verdict itself is `check_doxygen`'s.
-        "doxygen_fails_on_warnings": doxygen_release(doxygen) >= MIN_DOXYGEN_FOR_FAIL_ON_WARNINGS,
     }
 
 
@@ -485,15 +618,9 @@ def render_markdown(payload: dict) -> str:
         f"- doxygen: `{tools.get('doxygen') or 'n/a'}`",
         "",
     ]
-    if not env.get("doxygen_fails_on_warnings", True):
-        lines += [
-            "> **Warning:** this doxygen predates `WARN_AS_ERROR = FAIL_ON_WARNINGS`"
-            " (1.9.2), so the doxygen check cannot fail on warnings here.",
-            "",
-        ]
     lines += [
-        "| project | parse | doxygen | extraction | documented (clangquill / doxygen) |",
-        "| --- | --- | --- | --- | --- |",
+        "| project | parse | doxygen | extraction | isolation | documented (clangquill / doxygen) |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for name, result in results.items():
         marks = {check["name"]: "✅" if check["passed"] else "❌" for check in result["checks"]}
@@ -505,7 +632,7 @@ def render_markdown(payload: dict) -> str:
         )
         lines.append(
             f"| {name} | {marks.get('parse', '—')} | {marks.get('doxygen', '—')} "
-            f"| {marks.get('extraction', '—')} | {counts} |",
+            f"| {marks.get('extraction', '—')} | {marks.get('isolation', '—')} | {counts} |",
         )
     lines.append("")
 

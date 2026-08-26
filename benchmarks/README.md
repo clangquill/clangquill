@@ -6,7 +6,7 @@ and answer different questions about them:
 | Driver | Question | Failure policy |
 |--------|----------|----------------|
 | `benchmark.py` | How *fast* is each tool? | A non-zero exit is recorded as data. |
-| `verify.py` | Is the extraction *correct*? | Any warning fails the run. |
+| `verify.py` | Is the extraction *correct*? | Any ClangQuill diagnostic fails the run. |
 
 Both read the same project list — the TOML files in `configs/` — and share
 their configuration schema, cloning, and Doxyfile generation through
@@ -122,19 +122,36 @@ the workflow inputs.
 ## Verifying extraction
 
 `verify.py` runs the same projects to ask whether the extraction is *correct*.
-Nothing is timed. Three checks per project, all of which must pass:
+Nothing is timed. Four checks per project, all of which must pass:
 
 - **parse** — `clangquill build --warnings-as-errors` exits 0: libclang
   produced no diagnostic of warning severity or worse over the whole input set.
   The complete diagnostic list is written to a log whatever the outcome.
-- **doxygen** — `doxygen` with `WARNINGS = YES` and
-  `WARN_AS_ERROR = FAIL_ON_WARNINGS` exits 0 over the identical file set.
-  Doxygen finishes the run before failing, so its XML is still there to compare
-  against. Needs Doxygen **1.9.2+**: older releases ignore `FAIL_ON_WARNINGS`
-  and exit 0 however much they warned, so the check fails on them outright
-  rather than reporting a green it cannot back up.
+- **doxygen** — `doxygen` ran over the identical file set and wrote XML. This
+  is a precondition for the next check, not a verdict on Doxygen: its warnings
+  are logged and counted into the report, and do not fail the run.
 - **extraction** — every input file Doxygen extracted a documented entity from
-  yielded a documented symbol in ClangQuill's IR too.
+  yielded a documented symbol in ClangQuill's IR too. A project Doxygen finds
+  no documentation in at all — abseil comments its headers in plain `//`, which
+  Doxygen does not read as documentation — has no reference to measure against;
+  the check says so and passes, leaving **parse** as the project's real gate.
+- **isolation** — re-parsing at `--tu-batch 1` yields the same symbols as the
+  default umbrella batching. Batching is supposed to be an optimisation: a batch
+  shares one translation unit so the common `#include` closure is parsed once
+  rather than once per input, and the IR is supposed to be what per-file parsing
+  would have produced. That holds for self-contained headers and fails for the
+  rest, which see whatever preprocessor state their batch-mates left behind.
+  Inputs are parsed in a canonical order, so the outcome is reproducible
+  whatever order a config lists them in; this check is what says whether it is
+  also *right*. It costs one extra parse per project.
+
+Doxygen's own warnings are not gated because they are not evidence about
+ClangQuill. Real projects make Doxygen warn for reasons no generated Doxyfile
+can fix: abseil's `friend Type;` and `extern template` declarations are valid
+C++11 that Doxygen mis-parses as members to match, and Eigen's comments
+reference an `EXAMPLE_PATH` and `ALIASES` that live in the project's own
+Doxyfile, which this harness replaces. Gating on that would paint the run red
+for facts about Doxygen.
 
 The third check is why both tools are run at all. A parse can be perfectly clean
 and the output still be wrong: a regression that stops attaching doc comments to
@@ -162,10 +179,13 @@ every selected project passed every check. Results land in
 with the per-project diagnostics and Doxygen warning logs under
 `.work/_bench/<repo>/logs/`.
 
-Unlike the benchmark, **there are no baselines and nothing is tolerated**. The
-dependency-heavy projects are expected to fail until their configs grow the
-`include_dirs`/`defines` their headers need, or narrow `inputs` to a subset that
-parses — a recorded "expected noise" list would make the whole run decorative.
+Unlike the benchmark, **there are no baselines and no ClangQuill diagnostic is
+tolerated**. A dependency-heavy project fails until its config grows the
+`include_dirs`, `defines` or `cmake_preset` its headers need, or narrows
+`inputs` to a subset that parses — a recorded "expected noise" list would make
+the whole run decorative. `dune-gdt` is the worked example: it only parses against a
+configured build tree, so its config names a CMake preset and the harness runs
+it, which on a cold vcpkg cache takes about an hour.
 Strict mode also re-parses everything every run: a verdict on the whole input
 set can only come from a parse of the whole input set, so the harness starts
 each project from a wiped cache.
@@ -196,11 +216,19 @@ local = false
 std = "c++17"
 include_dirs = ["."]            # -I dirs for clangquill, relative to repo root
 defines = []                    # -D defines
-compile_args = []               # extra clang args
+compile_args = []               # extra clang args; "{llvm_includedir}" expands to the
+                                # dir holding clang-c/Index.h (see clangquill.toml),
+                                # "{source_dir}" to the checkout root (see eigen.toml)
+cmake_preset = ""               # when set, `cmake --preset <it>` runs before either driver
+cmake_args = []                 # extra -D flags for that configure (see dune-gdt.toml)
 inputs = ["Eigen/src/Core/**/*.h"]  # clangquill globs (relative to repo root)
+exclude = []                        # repo-relative fnmatch patterns dropped from *both*
+                                    # tools' input sets (see abseil.toml)
 doxygen_input = ["Eigen/src/Core"]  # Doxygen INPUT dirs, same tree as the globs
 doxygen_recursive = true            # Doxygen RECURSIVE; false when the glob is single-level
 doxygen_file_patterns = ["*.h"]     # Doxygen FILE_PATTERNS; pin to the glob's extension
+doxygen_extra = []                  # verbatim Doxyfile lines appended last, for a project
+                                    # Doxygen cannot read on the shared settings
 group_by = "namespace"              # clangquill --group-by (empty = tool default "symbol";
                                     # set "namespace" for namespace-rooted libraries so one
                                     # root namespace doesn't collapse onto a single huge page)
@@ -254,12 +282,18 @@ the file exists, making the edit deterministic without shipping brittle diffs.
 
 ### Caveats
 
-- **abseil / eigen / dune-gdt** are template- and dependency-heavy. Without their
-  full include trees, libclang emits diagnostics and may extract fewer symbols
-  than Doxygen's tolerant, non-compiling lexer. The *benchmark* records this
-  (exit codes, symbol counts) and does **not** treat it as a failure; `verify.py`
-  does, deliberately. Extend each config's `include_dirs` if you have the
-  dependencies available.
+- **abseil / eigen** are template- and dependency-heavy. Without their full
+  include trees, libclang emits diagnostics and may extract fewer symbols than
+  Doxygen's tolerant, non-compiling lexer. The *benchmark* records this (exit
+  codes, symbol counts) and does **not** treat it as a failure; `verify.py`
+  does, deliberately. Both are red today: abseil's glob pulls in gtest-dependent
+  test helpers, and eigen's `Eigen/src/Core/*.h` are not standalone translation
+  units — they expect to be reached through the `Eigen/Core` umbrella. Extend
+  each config's `include_dirs` if you have the dependencies available.
+- **dune-gdt** used to be in that list and no longer is: its config names a
+  CMake preset, so the harness configures the project first and parses against
+  the real build tree. That is the pattern to copy for a project whose headers
+  cannot resolve from a bare checkout.
 - Things this headless harness cannot control are left to the operator: pin the
   CPU governor to `performance`, run on an otherwise-idle, thermally-stable
   machine, and prefer more `--repeat` passes for stable medians.

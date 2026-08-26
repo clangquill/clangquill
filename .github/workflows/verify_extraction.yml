@@ -2,13 +2,16 @@
 # Verify — rather than time — ClangQuill and Doxygen across the same real C++
 # codebases the benchmark measures. For every repo configured under
 # benchmarks/configs/ the harness asserts that ClangQuill parses it with no
-# diagnostic of warning severity or worse, that Doxygen extracts from the
-# identical file set without a single warning, and that ClangQuill did not
-# document fewer source files than Doxygen did. Nothing is timed and nothing is
-# published; the job is red exactly when one of those three claims is false.
+# diagnostic of warning severity or worse, that Doxygen produced the reference
+# XML from the identical file set, that ClangQuill did not document fewer source
+# files than Doxygen did, and that re-parsing one translation unit per input
+# yields the same symbols as the default umbrella batching. Doxygen's own
+# warnings are logged and counted but do not gate: they are facts about Doxygen,
+# not about the tool under test. Nothing is timed and nothing is published; the
+# job is red exactly when one of those four claims is false.
 #
 # Runs weekly (Mondays) and on manual dispatch. Weekly rather than per-push
-# because it clones and fully re-parses four large upstream projects — the
+# because it clones and fully re-parses large upstream projects — the
 # per-push correctness signal is the test suite, and this catches the slower
 # drift: an upstream project moving, a libclang upgrade changing what parses,
 # or a regression in comment extraction that a green parse would hide.
@@ -102,9 +105,15 @@ jobs:
         # silent. Dispatch inputs are passed via env (not interpolated into the
         # script) so they can never expand into executable shell.
         env:
-          # Empty by default so every config under benchmarks/configs/ is
-          # verified; a dispatch can pass a subset to narrow scope.
-          VERIFY_REPOS: ${{ inputs.repos }}
+          # A dispatch decides its own scope; empty means every config under
+          # benchmarks/configs/. The weekly run cannot afford that: dune-gdt's
+          # config names a CMake preset, and configuring it builds the whole
+          # DUNE stack from source through vcpkg — about an hour on this
+          # machine's 16 cores *with* a warm binary cache, on a 4-core hosted
+          # runner with no cache at all and ~14 GB of disk. So the schedule
+          # names its projects explicitly; add new configs here when they are
+          # cheap enough to run unattended, and verify dune-gdt by dispatch.
+          VERIFY_REPOS: ${{ inputs.repos || (github.event_name == 'schedule' && 'clangquill,abseil,eigen' || '') }}
           VERIFY_FRESH_CLONE: ${{ inputs.fresh_clone }}
         run: |
           actual=$(benchmarks/.venv/bin/python -c "import importlib.metadata as m; print(m.version('clangquill'))")

@@ -23,7 +23,7 @@ The field-name-to-front-end mapping is mechanical:
 | `defines` | `clangquill_defines` | `[]` | `-D` preprocessor definitions (`NAME` or `NAME=value`). |
 | `clang_resource_dir` | `clangquill_clang_resource_dir` | `None` | Clang resource directory (`-resource-dir`); `None` lets clang decide. |
 | `jobs` | `clangquill_jobs` | `0` | Number of threads used to parse translation units concurrently. `0` auto-detects the CPU count; `1` forces a serial parse. Has no effect on the generated output. |
-| `tu_batch` | `clangquill_tu_batch` | `0` | Number of input files grouped into one libclang translation unit. Grouping amortises the dominant parse cost — re-parsing the shared `#include` closure — across the batch, which makes cold builds several times faster. `0` picks a sensible batch size; `1` parses every input as its own fully isolated translation unit. Forced to `1` when `compile_commands` is set (per-file flags cannot share a unit). For self-contained headers the extracted IR is identical either way; headers that are *not* self-contained (e.g. designed to be included only through an umbrella header) see the preprocessor state of earlier files in their batch, which usually parses them *more* faithfully — set `1` if you need exact per-file isolation. |
+| `tu_batch` | `clangquill_tu_batch` | `0` | Number of input files grouped into one libclang translation unit. Grouping amortises the dominant parse cost — re-parsing the shared `#include` closure — across the batch, which makes cold builds several times faster. `0` picks a sensible batch size; `1` parses every input as its own fully isolated translation unit. Forced to `1` when `compile_commands` is set (per-file flags cannot share a unit). For self-contained headers the extracted IR is identical either way. Headers that are *not* self-contained (e.g. designed to be included only through an umbrella header) see the preprocessor state of the other files in their batch, which usually parses them *more* faithfully; which files those are is fixed by the input set — never by the order you list them in — but it does depend on this value, so set `1` if you need exact per-file isolation. |
 
 ## Output
 
@@ -86,10 +86,12 @@ Things worth knowing:
   build re-parses nothing and leaves the previous log in place rather than
   truncating it to silence. Leave `cache_dir` unset for a complete log on
   every build.
-- **The set of warnings depends on `tu_batch` and input order.** Batched inputs
-  share one translation unit, so a header sees the preprocessor state of the
-  files ahead of it in its batch. Errors are stable; warnings can shift between
-  configurations or machines.
+- **The set of warnings depends on `tu_batch`.** Batched inputs share one
+  translation unit, so a header that is not self-contained sees the preprocessor
+  state of the others in its batch. Which files share a batch is a function of
+  the input set — inputs are parsed in a canonical order, so listing them
+  differently cannot change the result — but changing `tu_batch` regroups them.
+  Errors are stable; warnings can shift between configurations or machines.
 - Put the log outside `output_dir` — `_build/` is a good spot, since it is
   usually already ignored by version control.
 
@@ -191,9 +193,9 @@ Things worth knowing:
   units it re-parsed, so a warning in an untouched header would go unseen.
   `warnings_as_errors` therefore ignores `cache_dir` for the parse — leave it
   off for the edit-rebuild loop and turn it on in CI.
-- **The set of warnings depends on `tu_batch` and input order**, for the reason
-  given [above](#the-diagnostics-log). Pin `tu_batch = 1` if you need a verdict
-  that cannot shift with batch composition.
+- **The set of warnings depends on `tu_batch`**, for the reason given
+  [above](#the-diagnostics-log). Pin `tu_batch = 1` if you need a verdict that
+  cannot shift with batch composition.
 
 ## Compile databases
 

@@ -1,5 +1,7 @@
 #include "parser/cursor_utils.hpp"
 
+#include <filesystem>
+#include <system_error>
 #include <vector>
 
 namespace clangquill::parser {
@@ -256,23 +258,43 @@ model::StorageKind map_storage(CXCursor c) {
 bool in_file(CXCursor c, const std::string& main_file) {
   std::unordered_set<std::string> mains;
   if (!main_file.empty()) mains.insert(main_file);
-  return in_file(c, mains, /*trust_main_file=*/true);
+  return in_file(c, mains, FileIdSet{}, /*trust_main_file=*/true);
+}
+
+std::string normalized_path(const std::string& path) {
+  if (path.empty()) return path;
+  std::filesystem::path p(path);
+  if (p.is_absolute()) return p.lexically_normal().string();
+  std::error_code ec;
+  std::filesystem::path abs = std::filesystem::absolute(p, ec);
+  if (ec) return path;
+  return abs.lexically_normal().string();
+}
+
+std::optional<std::array<unsigned long long, 3>> file_identity(CXFile file) {
+  if (file == nullptr) return std::nullopt;
+  CXFileUniqueID id{};
+  if (clang_getFileUniqueID(file, &id) != 0) return std::nullopt;
+  return std::array<unsigned long long, 3>{id.data[0], id.data[1], id.data[2]};
 }
 
 bool in_file(CXCursor c, const std::unordered_set<std::string>& main_files,
-             bool trust_main_file) {
+             const FileIdSet& main_ids, bool trust_main_file) {
   CXSourceLocation loc = clang_getCursorLocation(c);
   if (clang_Location_isInSystemHeader(loc)) return false;
   // Primary check: entities declared in the TU's main file. Robust against path
   // spelling differences (relative vs absolute). Skipped for umbrella TUs,
   // whose synthetic main file contains nothing user-visible.
   if (trust_main_file && clang_Location_isFromMainFile(loc)) return true;
-  // Explicit path match for entities in one of the accepted files.
-  if (main_files.empty()) return false;
+  if (main_files.empty() && main_ids.empty()) return false;
   CXFile file;
   unsigned line = 0, column = 0, offset = 0;
   clang_getFileLocation(loc, &file, &line, &column, &offset);
   if (file == nullptr) return false;
+  // Identity first: the same file reached under two spellings is one file, and
+  // only this notices. The name match stays as a fallback for a spelling
+  // libclang never resolved to a file of its own.
+  if (auto id = file_identity(file); id && main_ids.count(*id) > 0) return true;
   return main_files.count(to_string(clang_getFileName(file))) > 0;
 }
 

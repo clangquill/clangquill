@@ -32,6 +32,10 @@ class ICommentParser {
 
   /// @brief Parses a symbol's documentation comment into a structured model.
   /// @param cursor The documented cursor (source of the parsed CXComment tree).
+  ///        May be a null cursor: a free-floating block opened with a structural
+  ///        command (`\class Name`) documents an entity it is not attached to,
+  ///        so there is no cursor to hand over. Implementations must fall back
+  ///        to @p raw rather than dereference it.
   /// @param raw The verbatim comment text, markers included.
   /// @return The structured comment model.
   virtual model::CommentModel parse(CXCursor cursor,

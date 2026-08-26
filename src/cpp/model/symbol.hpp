@@ -81,7 +81,11 @@ struct Symbol {
   std::string type_repr;       ///< Spelling of the cursor's type.
   AccessKind access = AccessKind::None;    ///< Access specifier within its parent.
   StorageKind storage = StorageKind::None; ///< Storage class.
-  bool is_definition = false;  ///< True when this row is the definition, not just a declaration.
+  /// True when this row is the definition, not just a declaration. A tag type
+  /// whose only declaration is an undocumented forward declaration gets no row
+  /// at all, so a `false` here means either a documented forward declaration or
+  /// a function/variable a header declares without defining.
+  bool is_definition = false;
   bool is_documented = false;  ///< True when the symbol carries a non-empty raw comment.
   std::string content_hash;    ///< Stable hash of semantic fields (feeds M6 caching).
   SourceLocation location;     ///< Declaration/definition location.

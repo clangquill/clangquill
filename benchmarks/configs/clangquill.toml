@@ -11,6 +11,11 @@ include_dirs = ["src/cpp"]
 inputs = ["src/cpp/**/*.hpp"]
 doxygen_input = ["src/cpp"]
 doxygen_file_patterns = ["*.hpp"]
+# The parser headers include <clang-c/Index.h>, which is not on the default
+# search path and lives at a machine-dependent prefix; the harness expands
+# {llvm_includedir} via llvm-config. docs/conf.py does the same for the
+# self-documentation build.
+compile_args = ["-I{llvm_includedir}"]
 
 [patch]
 files = ["src/cpp/model/symbol.hpp"]

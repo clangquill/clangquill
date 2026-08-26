@@ -20,6 +20,18 @@ namespace {
 // unit extracts from several files whose line numbers collide.
 using DocAboveLine = std::map<std::pair<std::string, unsigned>, std::string>;
 
+// A free-floating comment block that opened with a Doxygen structural command
+// (`\class Select`, `\fn ns::f`, ...): documentation for an entity declared
+// somewhere else rather than for whatever follows the block. Collected during
+// the token pre-scan and resolved once the whole translation unit has been
+// visited, since the entity it names has usually not been seen yet.
+struct StructuralBlock {
+  std::string file;     ///< Normalized path of the file the block was written in.
+  std::string command;  ///< The command word, without its `\` or `@`.
+  std::string target;   ///< The entity it names, normalized by structural_name().
+  std::string raw;      ///< The whole block, verbatim.
+};
+
 struct VisitCtx {
   model::ParsedModule* mod;
   std::string parent_usr;
@@ -33,7 +45,9 @@ struct VisitCtx {
       params_by_func;
   std::unordered_set<std::string>* seen_groups;
   DocAboveLine* doc_above_line;
+  std::vector<StructuralBlock>* structural;
   const ICommentParser* comment_parser;
+  const FileIdSet* main_ids;
 };
 
 std::pair<std::string, unsigned> cursor_file_line(CXCursor c) {
@@ -67,7 +81,10 @@ void fill_location(CXCursor c, model::Symbol& sym) {
   unsigned line = 0, column = 0, offset = 0;
   clang_getFileLocation(loc, &file, &line, &column, &offset);
   if (file != nullptr) {
-    sym.location.file_path = to_string(clang_getFileName(file));
+    // Normalized: libclang spells a file by the path it was reached with, and a
+    // location that says "./Eigen/src/Core/Matrix.h" means something different
+    // to whoever reopens the IR from another directory.
+    sym.location.file_path = normalized_path(to_string(clang_getFileName(file)));
   }
   sym.location.line = line;
   sym.location.column = column;
@@ -126,6 +143,64 @@ std::string first_token(const std::string& s) {
   return s.substr(a, b == std::string::npos ? std::string::npos : b - a);
 }
 
+// True for the kinds whose non-defining declaration is a forward declaration
+// rather than the API a header publishes. A function or variable declared and
+// not defined is exactly what a header is for; a tag declared and not defined
+// carries nothing.
+bool is_forward_declarable(model::SymbolKind kind) {
+  return is_record(kind) || kind == model::SymbolKind::Enum;
+}
+
+// True when @p c carries a doc comment of its *own*.
+//
+// clang_Cursor_getRawCommentText answers for one declaration with a comment
+// written on another declaration of the same entity elsewhere in the
+// translation unit. That inheritance is what keeps `is_documented` true across
+// an umbrella batch, and it also means the raw text cannot say which
+// declaration was documented — a forward declaration reports its definition's
+// comment whenever both are in the same unit. So ask where the comment sits: it
+// belongs to this cursor when it ends in the same file, on or just above the
+// line the cursor starts on. Trailing `///<` comments end on that line too.
+bool documented_here(CXCursor c) {
+  CXSourceRange range = clang_Cursor_getCommentRange(c);
+  if (clang_Range_isNull(range) != 0) return false;
+  CXFile comment_file = nullptr;
+  CXFile cursor_file = nullptr;
+  unsigned comment_end = 0, cursor_line = 0, col = 0, off = 0;
+  clang_getSpellingLocation(clang_getRangeEnd(range), &comment_file, &comment_end, &col, &off);
+  clang_getSpellingLocation(clang_getCursorLocation(c), &cursor_file, &cursor_line, &col, &off);
+  if (comment_file == nullptr || clang_File_isEqual(comment_file, cursor_file) == 0) return false;
+  return comment_end + 1 >= cursor_line;
+}
+
+// Records @p raw as @p usr's documentation, once per USR per translation unit.
+//
+// First writer wins, which is what makes an entity's own comment beat a
+// free-floating structural block naming it: the whole cursor visit finishes
+// before those blocks are resolved. @p c may be a null cursor, for a block that
+// belongs to no cursor at all — the comment parser falls back to parsing the
+// raw text in that case.
+void record_comment(VisitCtx& ctx, const std::string& usr,
+                    const std::string& raw, CXCursor c) {
+  if (!ctx.documented->insert(usr).second) return;
+
+  model::CommentModel parsed = ctx.comment_parser->parse(c, raw);
+
+  model::RawComment comment;
+  comment.symbol_usr = usr;
+  comment.text = raw;
+  comment.format = ctx.comment_parser->format();
+  comment.fields_json = to_fields_json(parsed);
+  ctx.mod->comments.push_back(std::move(comment));
+
+  auto fields = to_comment_fields(usr, parsed);
+  ctx.mod->comment_fields.insert(ctx.mod->comment_fields.end(), fields.begin(),
+                                 fields.end());
+
+  // `\ingroup` on the comment makes the symbol a member of that group.
+  register_symbol_groups(ctx, usr, raw);
+}
+
 // Records a symbol row (and its details) for a cursor, then recurses into
 // scopes. Returns the symbol's USR (empty if skipped).
 std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx) {
@@ -133,6 +208,27 @@ std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx) {
   if (usr.empty()) return {};  // anonymous/local entity: no stable identity
 
   bool is_def = clang_isCursorDefinition(c);
+
+  // An undocumented forward declaration of a tag type carries nothing and must
+  // not produce a row. `symbols.usr` is a primary key written with INSERT OR
+  // REPLACE, and modules from separate translation units are concatenated
+  // without a USR merge, so two rows for one tag are settled by whichever file
+  // is written last — which would hand the definition's identity, location and
+  // parent to something like the `class CompileDb` inside
+  // `std::unique_ptr<class CompileDb>`. Skipping leaves the definition as the
+  // only row, wherever it lives.
+  //
+  // Tag types only: for a function or a variable a non-defining declaration is
+  // exactly what a header publishes, and skipping those would empty the IR.
+  // A forward declaration that *is* documented still emits — documenting an
+  // opaque type where it is declared is a deliberate thing to write.
+  //
+  // Before the comment block below, not after: `comments.symbol_usr` is a
+  // foreign key onto `symbols.usr`, and a forward declaration inherits its
+  // definition's comment (see `documented_here`). Recording that comment and
+  // then dropping the row leaves it dangling whenever the definition itself is
+  // outside the input set — which is every tag an upstream header defines.
+  if (!is_def && is_forward_declarable(kind) && !documented_here(c)) return {};
 
   // Raw comment (verbatim). Track documented USRs so the symbol flag is set
   // even if the comment is seen on a different (re)declaration.
@@ -144,23 +240,7 @@ std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx) {
     auto it = ctx.doc_above_line->find(cursor_file_line(c));
     if (it != ctx.doc_above_line->end()) raw = it->second;
   }
-  if (!raw.empty() && ctx.documented->insert(usr).second) {
-    model::CommentModel parsed = ctx.comment_parser->parse(c, raw);
-
-    model::RawComment comment;
-    comment.symbol_usr = usr;
-    comment.text = raw;
-    comment.format = ctx.comment_parser->format();
-    comment.fields_json = to_fields_json(parsed);
-    ctx.mod->comments.push_back(std::move(comment));
-
-    auto fields = to_comment_fields(usr, parsed);
-    ctx.mod->comment_fields.insert(ctx.mod->comment_fields.end(),
-                                   fields.begin(), fields.end());
-
-    // `\ingroup` on the symbol's comment makes it a member of that group.
-    register_symbol_groups(ctx, usr, raw);
-  }
+  if (!raw.empty()) record_comment(ctx, usr, raw, c);
 
   // De-dup symbols: keep the first row, but let a definition supersede a prior
   // forward declaration.
@@ -453,7 +533,60 @@ void register_symbol_groups(VisitCtx& ctx, const std::string& usr,
 // group blocks attach to no cursor, so they are recovered by tokenizing the
 // translation unit and feeding each comment token here. Ordinary doc comments
 // (no group-definition command) produce nothing.
-void scan_group_definitions(const std::string& raw, VisitCtx& ctx) {
+// The Doxygen commands that retarget a block onto an entity declared elsewhere.
+// `relates` is deliberately absent: it appears inside a comment already attached
+// to a free function and only *associates* it with a class, so retargeting it
+// would take that function's own documentation away.
+bool is_structural(const std::string& cmd) {
+  return cmd == "class" || cmd == "struct" || cmd == "union" ||
+         cmd == "enum" || cmd == "namespace" || cmd == "fn" || cmd == "var" ||
+         cmd == "typedef";
+}
+
+// Reduces a structural command's argument to a qualified name.
+//
+// Doxygen accepts a whole declaration after `\fn`, so the argument can carry a
+// parameter list and template arguments — `DenseBase<Derived>::minCoeff(IndexType*
+// rowId) const` has to come out as `DenseBase::minCoeff` to stand a chance of
+// matching a symbol's qualified_name, which is built from cursor spellings and
+// so carries neither.
+std::string structural_name(const std::string& rest) {
+  std::string s = rest.substr(0, rest.find('('));
+  std::string out;
+  int depth = 0;
+  for (char ch : s) {
+    if (ch == '<') {
+      ++depth;
+    } else if (ch == '>') {
+      if (depth > 0) --depth;
+    } else if (depth == 0) {
+      out += ch;
+    }
+  }
+  out = first_token(out);
+  if (out.rfind("::", 0) == 0) out.erase(0, 2);
+  return out;
+}
+
+// Whether a symbol of kind @p k is the sort of entity @p cmd documents.
+// Record kinds are pooled on purpose: Eigen writes `\class` for a `struct`
+// (util/ForwardDeclarations.h) and Doxygen accepts it.
+bool structural_kind_matches(const std::string& cmd, model::SymbolKind k) {
+  if (cmd == "class" || cmd == "struct" || cmd == "union") return is_record(k);
+  if (cmd == "fn") return is_function_like(k);
+  if (cmd == "namespace") return k == model::SymbolKind::Namespace;
+  if (cmd == "enum") return k == model::SymbolKind::Enum;
+  if (cmd == "var") {
+    return k == model::SymbolKind::Variable || k == model::SymbolKind::Field;
+  }
+  if (cmd == "typedef") {
+    return k == model::SymbolKind::Typedef || k == model::SymbolKind::TypeAlias;
+  }
+  return false;
+}
+
+void scan_group_definitions(const std::string& raw, const std::string& file,
+                            VisitCtx& ctx) {
   std::string line;
   model::Group* current = nullptr;
   std::size_t i = 0;
@@ -510,6 +643,15 @@ void scan_group_definitions(const std::string& raw, VisitCtx& ctx) {
         }
       } else if (cmd == "ingroup" && current != nullptr) {
         current->parent_group_id = first_token(rest);
+      } else if (is_structural(cmd) && ctx.structural != nullptr) {
+        // The prose below belongs to the entity this block names, not to a
+        // group defined earlier in the same block — clearing `current` also
+        // stops it leaking into that group's description.
+        current = nullptr;
+        std::string target = structural_name(rest);
+        if (!target.empty()) {
+          ctx.structural->push_back({file, cmd, std::move(target), raw});
+        }
       }
       return;
     }
@@ -554,6 +696,10 @@ void scan_free_comments(CXTranslationUnit tu, CXFile file, VisitCtx& ctx) {
       clang_getLocationForOffset(tu, file, static_cast<unsigned>(size));
   CXSourceRange range = clang_getRange(begin, end);
   std::string file_name = to_string(clang_getFileName(file));
+  // Symbol locations are recorded normalized, so a structural block's file has
+  // to be too or it can never match its target. doc_above_line keeps the raw
+  // spelling: it is looked up with the same raw spelling from cursor_file_line.
+  const std::string normalized_file = normalized_path(file_name);
 
   CXToken* tokens = nullptr;
   unsigned count = 0;
@@ -563,7 +709,7 @@ void scan_free_comments(CXTranslationUnit tu, CXFile file, VisitCtx& ctx) {
   unsigned last_line = 0;
   auto flush = [&]() {
     if (block.empty()) return;
-    scan_group_definitions(block, ctx);
+    scan_group_definitions(block, normalized_file, ctx);
     // Record the block against the line it precedes, for macro doc lookup.
     if (ctx.doc_above_line != nullptr) {
       (*ctx.doc_above_line)[{file_name, last_line + 1}] = block;
@@ -586,7 +732,7 @@ void scan_free_comments(CXTranslationUnit tu, CXFile file, VisitCtx& ctx) {
 CXChildVisitResult visit(CXCursor c, CXCursor /*parent*/, CXClientData data) {
   auto& ctx = *static_cast<VisitCtx*>(data);
 
-  if (!in_file(c, *ctx.main_files, ctx.trust_main_file)) {
+  if (!in_file(c, *ctx.main_files, *ctx.main_ids, ctx.trust_main_file)) {
     return CXChildVisit_Continue;
   }
 
@@ -612,6 +758,60 @@ CXChildVisitResult visit(CXCursor c, CXCursor /*parent*/, CXClientData data) {
   return CXChildVisit_Continue;
 }
 
+// Attaches each structural block to the entity it names.
+//
+// Scoped to the file the block was written in, not the translation unit. That is
+// deliberate: umbrella batches are 64 inputs wide, so a module-wide lookup would
+// resolve or not depending on which batch a target landed in, and never under
+// `tu_batch = 1` — exactly the divergence verify.py's isolation check gates on.
+// Within one file the symbol set is the same however the inputs were grouped.
+// It also keeps a block and its target in one batch, which matters because
+// comment_fields rows are appended rather than replaced.
+//
+// Must run before the finalize loop builds comment_by_usr: that map holds
+// pointers into out.comments, and appending here would reallocate it.
+void attach_structural_blocks(VisitCtx& ctx,
+                              const std::vector<StructuralBlock>& blocks) {
+  if (blocks.empty()) return;  // the common case; costs nothing
+
+  // Spelling -> the symbols carrying it. Thrown away with the translation unit,
+  // so no index and no schema change.
+  std::unordered_map<std::string, std::vector<model::Symbol*>> by_spelling;
+  for (auto& sym : ctx.mod->symbols) by_spelling[sym.spelling].push_back(&sym);
+
+  for (const auto& block : blocks) {
+    const std::size_t cut = block.target.rfind("::");
+    const std::string leaf =
+        cut == std::string::npos ? block.target : block.target.substr(cut + 2);
+    auto it = by_spelling.find(leaf);
+    if (it == by_spelling.end()) continue;
+
+    model::Symbol* found = nullptr;
+    bool ambiguous = false;
+    for (model::Symbol* sym : it->second) {
+      if (sym->location.file_path != block.file) continue;
+      if (!structural_kind_matches(block.command, sym->kind)) continue;
+      const bool matches =
+          sym->qualified_name == block.target ||
+          (sym->qualified_name.size() > block.target.size() + 2 &&
+           sym->qualified_name.compare(
+               sym->qualified_name.size() - block.target.size() - 2,
+               block.target.size() + 2, "::" + block.target) == 0);
+      if (!matches) continue;
+      if (found != nullptr) {
+        ambiguous = true;
+        break;
+      }
+      found = sym;
+    }
+    // Nothing, or more than one candidate: leave it alone. Overloads named by a
+    // bare `\fn` are the common case, and guessing between them would put the
+    // documentation on the wrong one.
+    if (ambiguous || found == nullptr) continue;
+    record_comment(ctx, found->usr, block.raw, clang_getNullCursor());
+  }
+}
+
 }  // namespace
 
 void visit_translation_unit(CXCursor tu_cursor, const std::string& main_file,
@@ -629,12 +829,14 @@ void visit_translation_unit(CXCursor tu_cursor,
   std::unordered_set<std::string> documented;
   std::unordered_set<std::string> seen_groups;
   DocAboveLine doc_above_line;
+  std::vector<StructuralBlock> structural;
   std::unordered_map<std::string, std::vector<model::FunctionParameter>>
       params_by_func;
   DoxygenCommentParser comment_parser;
 
   std::unordered_set<std::string> main_set(main_files.begin(),
                                            main_files.end());
+  FileIdSet main_ids;
 
   VisitCtx ctx;
   ctx.mod = &out;
@@ -646,7 +848,9 @@ void visit_translation_unit(CXCursor tu_cursor,
   ctx.params_by_func = &params_by_func;
   ctx.seen_groups = &seen_groups;
   ctx.doc_above_line = &doc_above_line;
+  ctx.structural = &structural;
   ctx.comment_parser = &comment_parser;
+  ctx.main_ids = &main_ids;
 
   // Capture free-floating `\defgroup` blocks first so groups carry their title
   // and description before any `\ingroup` membership creates a stub for them.
@@ -657,6 +861,11 @@ void visit_translation_unit(CXCursor tu_cursor,
   for (const auto& mf : main_files) {
     CXFile file = clang_getFile(tu, mf.c_str());
     if (file == nullptr) continue;
+    // Identity, not the name, is what decides whether a cursor is in one of
+    // these files: libclang answers clang_getFileName with the path a file was
+    // *requested* by, so an umbrella including it absolutely and an `-include`
+    // prologue reaching it relatively produce two names for one file.
+    if (auto id = file_identity(file)) main_ids.insert(*id);
     std::string name = to_string(clang_getFileName(file));
     if (!scanned.insert(name).second) continue;
     main_set.insert(name);
@@ -664,6 +873,10 @@ void visit_translation_unit(CXCursor tu_cursor,
   }
 
   clang_visitChildren(tu_cursor, visit, &ctx);
+
+  // After the visit, so every entity a block could name exists, and before the
+  // finalize loop below, whose comment_by_usr holds pointers into out.comments.
+  attach_structural_blocks(ctx, structural);
 
   // Finalize: set is_documented and content_hash now that all comments and
   // parameters have been collected. Index comments by USR first so the per

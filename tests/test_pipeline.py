@@ -408,7 +408,8 @@ def test_incremental_shared_header_change_reparses_every_dependent(
 
     assert result.parsed
     assert full_calls == 0  # still no whole-module rebuild
-    # Both dependents re-parsed via one per-TU batch; the order follows the inputs.
+    # Both dependents re-parsed via one per-TU batch, in the resolved input order
+    # (which the parser then canonicalises for itself).
     assert tu_calls == [["alpha.hpp", "beta.hpp"]]
     # The IR is consistent: no symbol was lost across the partial re-parse.
     assert {"a", "b"}.issubset({s.qualified_name for s in _store_symbols(result.db_path)})

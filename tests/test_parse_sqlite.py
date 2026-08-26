@@ -255,6 +255,149 @@ def test_batched_parse_matches_per_file_parse(tmp_path: Path) -> None:
     assert rows("batched.sqlite", 0) == rows("isolated.sqlite", 1)
 
 
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_parse_is_order_independent(tmp_path: Path) -> None:
+    # The IR is a function of the input *set*. `b.hpp` spells its own type with
+    # a macro `a.hpp` defines and does not include it, so before inputs were
+    # canonicalised this pair stored a differently named symbol depending only
+    # on which path came first in the argument list.
+    a = tmp_path / "a.hpp"
+    a.write_text("#pragma once\n#define ORDER_NAME Tagged\nusing OrderIndex = int;\n")
+    b = tmp_path / "b.hpp"
+    b.write_text("#pragma once\n/// tagged\nstruct ORDER_NAME { OrderIndex value; };\n")
+
+    def rows(db_name: str, inputs: list[Path]) -> list[tuple]:
+        opts = _core.ParseOptions()
+        db = tmp_path / db_name
+        _core.parse_to_sqlite([str(p) for p in inputs], str(db), opts)
+        with Store.open(db) as store:
+            return sorted((s.usr, s.qualified_name, s.kind, s.is_documented) for s in store.symbols())
+
+    assert rows("forward.sqlite", [a, b]) == rows("reversed.sqlite", [b, a])
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_forward_declaration_does_not_displace_the_definition(tmp_path: Path) -> None:
+    # `symbols.usr` is a primary key written with INSERT OR REPLACE, so if a bare
+    # forward declaration produced a row it would settle the definition's
+    # identity by whichever file the store happened to write last.
+    decl = tmp_path / "a_decl.hpp"
+    decl.write_text("#pragma once\n#include <memory>\nstruct Owner { std::unique_ptr<class Opaque> held; };\n")
+    defn = tmp_path / "b_def.hpp"
+    defn.write_text(
+        "#pragma once\n/// The definition, and the only documentation.\nclass Opaque { public: int v = 0; };\n",
+    )
+
+    def opaque(db_name: str, tu_batch: int) -> list[tuple]:
+        opts = _core.ParseOptions()
+        opts.tu_batch = tu_batch
+        db = tmp_path / db_name
+        _core.parse_to_sqlite([str(decl), str(defn)], str(db), opts)
+        with Store.open(db) as store:
+            paths = {f.id: f.path for f in store.files()}
+            return [
+                (s.qualified_name, s.is_documented, paths[s.file_id].rsplit("/", 1)[-1])
+                for s in store.symbols()
+                if s.qualified_name == "Opaque"
+            ]
+
+    assert opaque("batched.sqlite", 0) == [("Opaque", True, "b_def.hpp")]
+    assert opaque("isolated.sqlite", 1) == [("Opaque", True, "b_def.hpp")]
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_forward_declaration_of_an_external_type_is_dropped_cleanly(tmp_path: Path) -> None:
+    # The shape every dependency-heavy project has: the input header names a tag
+    # that an upstream header, not itself an input, defines and documents.
+    # libclang hands the forward declaration that upstream comment, so dropping
+    # the declaration's row must drop the comment with it -- comments.symbol_usr
+    # is a foreign key onto symbols.usr, and the definition never gets a row
+    # because it is outside the input set.
+    upstream = tmp_path / "upstream.hpp"
+    upstream.write_text("#pragma once\n/// Defined and documented elsewhere.\nclass Hidden { public: int v = 0; };\n")
+    header = tmp_path / "input.hpp"
+    header.write_text(
+        '#pragma once\n#include <memory>\n#include "upstream.hpp"\n'
+        "/// Owns one.\nstruct Owner { std::unique_ptr<class Hidden> held; };\n",
+    )
+
+    db = tmp_path / "out.sqlite"
+    _core.parse_to_sqlite([str(header)], str(db), _core.ParseOptions())
+
+    with Store.open(db) as store:
+        names = {s.qualified_name for s in store.symbols()}
+    assert "Owner" in names
+    assert "Hidden" not in names
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_inputs_reached_through_a_forced_include_are_attributed(tmp_path: Path) -> None:
+    # The Eigen shape: the inputs are not translation units, so a prologue is
+    # force-included and pulls them in itself, by a different spelling than the
+    # umbrella uses. libclang names a file by the path it was requested with, so
+    # matching those names drops every symbol -- the file has to be identified,
+    # not spelled.
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "part.hpp").write_text("#pragma once\n/// Documented.\nstruct Part { int v = 0; };\n")
+    prologue = tmp_path / "prologue.hpp"
+    prologue.write_text('#pragma once\n#include "sub/part.hpp"\n')
+
+    def count(db_name: str, tu_batch: int) -> int:
+        opts = _core.ParseOptions()
+        opts.tu_batch = tu_batch
+        opts.include_dirs = [str(tmp_path)]
+        opts.extra_args = ["-include", "prologue.hpp"]
+        db = tmp_path / db_name
+        # Two inputs so tu_batch>1 really builds an umbrella rather than
+        # delegating to the single-file path.
+        inputs = [str(tmp_path / "sub" / "part.hpp"), str(prologue)]
+        _core.parse_to_sqlite(inputs, str(db), opts)
+        with Store.open(db) as store:
+            return sum(1 for s in store.symbols() if s.qualified_name == "Part")
+
+    assert count("isolated.sqlite", 1) == 1
+    assert count("batched.sqlite", 2) == 1
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_structural_block_resolves_the_same_under_any_batching(tmp_path: Path) -> None:
+    # A structural block is resolved against the file it was written in, not the
+    # translation unit, precisely so batching cannot change the answer: umbrella
+    # batches are 64 inputs wide, so a module-wide lookup would find a target in
+    # a sibling file or not depending on which batch it landed in, and never
+    # under tu_batch=1.
+    one = tmp_path / "one.hpp"
+    one.write_text(
+        "#pragma once\n"
+        "/** \\class Local\n  * \\brief Documented from a block above it.\n  */\n"
+        "\nnamespace filler { int x = 0; }\n"
+        "\nclass Local { public: int v = 0; };\n",
+    )
+    # Names an entity in the *other* file: must stay unresolved either way.
+    two = tmp_path / "two.hpp"
+    two.write_text(
+        "#pragma once\n"
+        "/** \\class Elsewhere\n  * \\brief Should not reach across files.\n  */\n"
+        "\nnamespace other { int y = 0; }\n",
+    )
+    three = tmp_path / "three.hpp"
+    three.write_text("#pragma once\nclass Elsewhere { public: int v = 0; };\n")
+
+    def documented(db_name: str, tu_batch: int) -> set[tuple]:
+        opts = _core.ParseOptions()
+        opts.tu_batch = tu_batch
+        db = tmp_path / db_name
+        _core.parse_to_sqlite([str(one), str(two), str(three)], str(db), opts)
+        with Store.open(db) as store:
+            return {(s.qualified_name, s.is_documented) for s in store.symbols()}
+
+    batched = documented("batched.sqlite", 0)
+    isolated = documented("isolated.sqlite", 1)
+    assert batched == isolated
+    assert ("Local", True) in batched
+    assert ("Elsewhere", False) in batched
+
+
 def test_schema_version_exposed() -> None:
     assert isinstance(_core.SCHEMA_VERSION, int)
     assert _core.SCHEMA_VERSION >= 1

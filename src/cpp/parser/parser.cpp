@@ -48,8 +48,10 @@ const char* language_flag_for(const std::string& path) {
 }
 
 // Inputs grouped per umbrella translation unit when ParseOptions::tu_batch is
-// 0 (auto). Fixed — independent of the job count — so the batch composition,
-// and with it the extracted IR, is identical no matter how many threads run.
+// 0 (auto). Fixed — independent of the job count, and applied to a canonically
+// ordered input list — so the batch composition, and with it the extracted IR,
+// is identical no matter how many threads run or how the caller ordered its
+// arguments.
 // 64 measured 2-3x faster cold than 16 on abseil/eigen and beat a shared
 // common-header PCH at every parallelism level (#90); going wider kept paying
 // on abseil but regressed eigen and starves small projects of parallel
@@ -86,8 +88,12 @@ struct CachedFileHash {
 // validation mirrors the fast-path the Python-side build cache already trusts
 // for exactly these files, so an edited file (changed stat) is re-hashed while
 // a long-lived process (the Sphinx extension) reuses digests across builds.
-void record_file(const std::string& path, model::ParsedModule& out,
+void record_file(const std::string& raw_path, model::ParsedModule& out,
                  std::unordered_set<std::string>& seen) {
+  // One row per file, keyed on the normalized path: the same header reached
+  // through an `-include` prologue and through the umbrella arrives under two
+  // spellings, and both name the same bytes.
+  const std::string path = normalized_path(raw_path);
   if (!seen.insert(path).second) return;
 
   static std::mutex cache_mutex;
@@ -213,8 +219,12 @@ std::unordered_map<std::string, std::vector<std::string>> include_edges(
         if (from == nullptr) return CXChildVisit_Continue;
         auto& e = *static_cast<
             std::unordered_map<std::string, std::vector<std::string>>*>(data);
-        e[to_string(clang_getFileName(from))].push_back(
-            to_string(clang_getFileName(included)));
+        // Normalized on both ends: these names reach the IR's per-TU
+        // dependency map, which the incremental cache joins against the file
+        // rows. A raw spelling on one side of that join silently costs a full
+        // rebuild.
+        e[normalized_path(to_string(clang_getFileName(from)))].push_back(
+            normalized_path(to_string(clang_getFileName(included))));
         return CXChildVisit_Continue;
       },
       &edges);
@@ -723,8 +733,16 @@ bool Parser::parse_batch(const std::vector<std::string>& paths,
       (std::filesystem::path(abs.front()).parent_path() /
        ".clangquill-umbrella.cpp")
           .string();
+  // Each distinct member is included once. Callers may repeat a path, and
+  // canonical ordering puts those repeats next to each other, so without this
+  // a header without an include guard would be textually redefined.
+  // Per-member bookkeeping below is keyed by path rather than by position, so
+  // both indices of a repeat still resolve to the one inclusion.
   std::string contents;
-  for (const auto& p : abs) contents += "#include \"" + p + "\"\n";
+  std::unordered_set<std::string> emitted;
+  for (const auto& p : abs) {
+    if (emitted.insert(p).second) contents += "#include \"" + p + "\"\n";
+  }
 
   std::vector<std::string> args =
       build_args(abs.front(), /*from_compile_db=*/nullptr, &umbrella);
@@ -794,8 +812,8 @@ bool Parser::parse_batch(const std::vector<std::string>& paths,
       continue;
     }
     if (member_files != nullptr) {
-      (*member_files)[i] =
-          include_closure(edges, to_string(clang_getFileName(file)));
+      (*member_files)[i] = include_closure(
+          edges, normalized_path(to_string(clang_getFileName(file))));
     }
   }
   return all_ok;
@@ -899,6 +917,29 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
   const std::size_t num_batches =
       inputs.empty() ? 0 : (inputs.size() + batch_size - 1) / batch_size;
 
+  // Inputs are parsed in canonical order rather than the order the caller
+  // listed them in, so which members share an umbrella -- and with it the IR
+  // and the diagnostics -- is a function of the input *set*. Without this a
+  // header that is not self-contained extracts different symbols depending on
+  // whether a sibling that defines what it needs happened to be named earlier.
+  //
+  // The key is the same absolute, lexically-normalised path the umbrella body
+  // includes (`parse_batch`), so ordering and include text cannot disagree.
+  // Computed once up front, not inside the comparator: absolute() re-reads the
+  // working directory on every call. Lexical rather than canonical: no symlink
+  // resolution and no stat, so two symlinks to one file stay two members, as
+  // they already do today. The sort is stable, so repeated spellings keep
+  // first-occurrence order and the result is total even for an input list that
+  // names the same file twice.
+  std::vector<std::string> keys;
+  keys.reserve(inputs.size());
+  for (const auto& p : inputs) keys.push_back(absolute_path(p));
+  std::vector<std::size_t> order(inputs.size());
+  for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+  std::stable_sort(order.begin(), order.end(), [&keys](std::size_t a, std::size_t b) {
+    return keys[a] < keys[b];
+  });
+
   // One result slot per batch keeps the merge deterministic (input order)
   // regardless of which thread parses which batch or in what order it finishes.
   std::vector<model::ParsedModule> parts(num_batches);
@@ -923,8 +964,12 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
     while ((b = next.fetch_add(1)) < num_batches) {
       const std::size_t begin = b * batch_size;
       const std::size_t end = std::min(begin + batch_size, inputs.size());
-      std::vector<std::string> members(inputs.begin() + begin,
-                                       inputs.begin() + end);
+      // The caller's spellings, not the canonical keys: parse_batch absolutises
+      // for itself, accepts either spelling when attributing symbols, and names
+      // the path the caller gave when it has to report a member.
+      std::vector<std::string> members;
+      members.reserve(end - begin);
+      for (std::size_t i = begin; i < end; ++i) members.push_back(inputs[order[i]]);
       // Parse into a local module so a mid-parse exception cannot leave
       // half-built rows in the slot: only a clean parse is published, and an
       // exception escaping a worker thread (which would otherwise call
@@ -942,19 +987,21 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
         // success flags stay per-batch (ok_parts) until the join, because
         // bit-packed vector<bool> elements are not distinct objects.
         for (std::size_t i = 0; i < members.size(); ++i) {
-          if (tu_files != nullptr) (*tu_files)[begin + i] = std::move(member_files[i]);
+          // Sinks are indexed by the caller's position, not the parse order:
+          // the bindings pair them up with the input list they passed in.
+          if (tu_files != nullptr) (*tu_files)[order[begin + i]] = std::move(member_files[i]);
         }
         ok_parts[b] = std::move(member_ok);
         parts[b] = std::move(part);
       } catch (const std::exception& e) {
         parts[b] = model::ParsedModule{};
         parts[b].diagnostics.push_back(model::Diagnostic{
-            .text = "exception parsing batch of " + inputs[begin] + ": " +
+            .text = "exception parsing batch of " + inputs[order[begin]] + ": " +
                     e.what()});
       } catch (...) {
         parts[b] = model::ParsedModule{};
         parts[b].diagnostics.push_back(model::Diagnostic{
-            .text = "unknown exception parsing batch of " + inputs[begin]});
+            .text = "unknown exception parsing batch of " + inputs[order[begin]]});
       }
     }
   };
@@ -984,7 +1031,7 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
     for (std::size_t b = 0; b < num_batches; ++b) {
       const std::size_t begin = b * batch_size;
       for (std::size_t i = 0; i < ok_parts[b].size(); ++i) {
-        (*tu_parsed)[begin + i] = ok_parts[b][i];
+        (*tu_parsed)[order[begin + i]] = ok_parts[b][i];
       }
     }
   }
