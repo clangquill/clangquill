@@ -25,6 +25,30 @@ The `custom` bucket is the graceful-degradation seam: a command the parser does
 not recognize is never dropped — it lands in `custom["<name>"]` so a template can
 still render it.
 
+### Structural commands
+
+A few Doxygen commands name an entity rather than describe the one they are
+attached to, and clangquill treats them specially.
+
+`\class`, `\struct`, `\union`, `\enum`, `\namespace`, `\fn`, `\var` and
+`\typedef` **retarget** a free-floating block onto the entity they name, which
+is how a library documents a class from a block sitting some distance above it.
+The entity is looked up **within the file the block was written in**, by
+qualified name and then by unique suffix, filtered to the kind the command
+implies. A name that matches nothing, or more than one thing — a bare `\fn`
+naming an overload set — attaches nothing rather than guessing, and an entity
+that carries its own comment always keeps it.
+
+`\relates` is different: it stays on the free function it is written on and
+lists that function under the named class. Because the class is usually in
+another header, the pairing is made when pages are rendered rather than when the
+file is parsed, so `\relates` reaches across files where the retargeting
+commands do not. The bundled `class` template renders it as a
+**Related functions** line.
+
+All of these take a single name as their argument; anything after it is prose
+belonging to the entity, not part of the command.
+
 ## A parser is just a callable
 
 ```python

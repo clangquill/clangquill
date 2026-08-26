@@ -377,6 +377,8 @@ class Generator:
         # :meth:`group_stem`): dedup can suffix the natural slug, and the
         # subgroup links templates render must point at the planned page.
         self._group_stems: dict[str, str] = {}
+        # Lazily built by `related`; None until a record page first asks.
+        self._related_by_name: dict[str, list[Symbol]] | None = None
         # Template objects (and the two partial macros below) are immutable for
         # the lifetime of the environment, but Environment.get_template — and
         # Template.module, which re-evaluates the module body on every access —
@@ -509,6 +511,26 @@ class Generator:
     def friends(self, symbol: Symbol) -> list[Reference]:
         """Return the friend references of a record ``symbol``."""
         return self.store.friends(symbol.usr)
+
+    def related(self, symbol: Symbol) -> list[Symbol]:
+        r"""Return the free functions Doxygen's ``\relates`` ties to ``symbol``.
+
+        ``\relates X`` names its class in prose rather than by USR, so the two
+        are paired here by name — matched against the record's qualified name
+        and, since the command is usually written unqualified, its spelling.
+        The map is built once per generator: every record page consults it, and
+        ``comment_fields`` is indexed by symbol rather than by field name.
+        """
+        if self._related_by_name is None:
+            self._related_by_name = self.store.related_by_name()
+        seen: set[str] = set()
+        out: list[Symbol] = []
+        for key in (symbol.qualified_name, symbol.spelling):
+            for candidate in self._related_by_name.get(key, ()):
+                if candidate.usr != symbol.usr and candidate.usr not in seen:
+                    seen.add(candidate.usr)
+                    out.append(candidate)
+        return out
 
     def group_symbols(self, group: Group) -> list[Symbol]:
         """Return the member symbols of ``group`` (skipping any now absent)."""
@@ -1335,6 +1357,21 @@ class Generator:
                 self._file_scope = previous
         return hashlib.sha256(_DEP_RECORD_SEP.join(tokens).encode("utf-8")).hexdigest()
 
+    def _related_tokens(self, symbol: Symbol) -> list[str]:
+        r"""Return the dependency tokens for the functions ``\relates`` ties to ``symbol``.
+
+        A record page lists them, so it depends on *their* comments and not only
+        on its own. Nothing else in the dependency walk follows an incoming
+        edge, and without these a `\relates` added or removed would leave the
+        record's page cached and stale.
+        """
+        if symbol.kind not in _RECORD_KINDS:
+            return []
+        return [
+            _DEP_FIELD_SEP.join(("L", symbol.usr, fn.usr, fn.qualified_name, fn.content_hash))
+            for fn in self.related(symbol)
+        ]
+
     def _collect_symbol_tokens(
         self,
         symbol: Symbol,
@@ -1343,12 +1380,12 @@ class Generator:
         *,
         recurse: bool,
     ) -> None:
-        """Append the dependency tokens for ``symbol`` (and, if ``recurse``, its subtree).
+        r"""Append the dependency tokens for ``symbol`` (and, if ``recurse``, its subtree).
 
         Mirrors what ``render_symbol`` reads: the symbol's own content hash, its
         outgoing references (and the content hash of every resolved target, whose
-        qualified name a cross-reference prints), and — for an enum — its
-        enumerators. Children are walked only for the container kinds whose
+        qualified name a cross-reference prints), the functions ``\relates``
+        points *at* a record, and — for an enum — its enumerators. Children are walked only for the container kinds whose
         templates recurse (namespaces and records), matching the render exactly.
         """
         if symbol.usr in visited:
@@ -1373,6 +1410,7 @@ class Generator:
                 target = self.store.symbol(ref.to_usr)
                 if target is not None:
                     tokens.append(f"T{_DEP_FIELD_SEP}{ref.to_usr}{_DEP_FIELD_SEP}{target.content_hash}")
+        tokens.extend(self._related_tokens(symbol))
         if symbol.kind == SymbolKind.ENUM:
             for en in self.enumerators(symbol):
                 tokens.append(

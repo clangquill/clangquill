@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -561,6 +562,40 @@ def test_friends_block_links_documented_and_inlines_unknown(m7_gen: Generator, m
     # A documented friend links via the domain; an out-of-TU friend degrades to code.
     assert "{cpp:any}`nn::helper`" in rendered
     assert "`Outsider`" in rendered
+
+
+def test_related_block_lists_functions_relates_points_at(gen: Generator, store: Store) -> None:
+    # `\relates Circle` sits on geo::scale, and Doxygen lists such a function
+    # under the class rather than only on its own page.
+    rendered = gen.render_symbol(_symbol(store, "geo::Circle"))
+    assert "**Related functions**" in rendered
+    assert "{cpp:any}`geo::scale`" in rendered
+    # The function keeps its own documentation; `\relates` only adds a listing.
+    assert "Return a scaled copy of a circle." in gen.render_symbol(_symbol(store, "geo::scale"))
+
+
+def test_related_block_absent_without_relates(gen: Generator, store: Store) -> None:
+    # Shape has no related functions, so the section must not appear at all.
+    assert "**Related functions**" not in gen.render_symbol(_symbol(store, "geo::Shape"))
+
+
+def test_related_functions_bust_the_class_page_fingerprint(fixture_db: Path) -> None:
+    # The class page reads another symbol's comment, which is the one incoming
+    # edge in the dependency walk; editing the related function has to change
+    # the record's fingerprint or its page stays cached and stale.
+    def fingerprint() -> str:
+        with Store.open(fixture_db) as opened:
+            generator = Generator(opened)
+            # group_by="class" is the mode where a record gets its own page.
+            plan = next(p for p in generator.plan_pages(group_by="class") if p.stem == "geo_Circle")
+            return generator.page_fingerprint(plan)
+
+    before = fingerprint()
+    con = sqlite3.connect(fixture_db)
+    con.execute("UPDATE symbols SET content_hash = 'changed' WHERE qualified_name = 'geo::scale'")
+    con.commit()
+    con.close()
+    assert fingerprint() != before
 
 
 def test_group_pages_appended_and_render_members(m7_gen: Generator, tmp_path: Path) -> None:

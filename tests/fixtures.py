@@ -175,6 +175,9 @@ def _build_fixture_db(path: Path) -> None:
                 ("param", "factor", "the scale factor"),
                 ("returns", "", "a new, scaled circle."),
                 ("see", "", "geo::Circle"),
+                # Doxygen's `\relates`, written unqualified as it usually is:
+                # scale is a free function listed under Circle's documentation.
+                ("relates", "", "Circle"),
             ],
         )
         comment(color, [("brief", "", "A named drawing color.")])

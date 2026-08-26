@@ -293,6 +293,31 @@ class Store:
         )
         return [self._to_symbol(row) for row in self._con.execute(sql, (parent_usr,))]
 
+    def related_by_name(self) -> dict[str, list[Symbol]]:
+        r"""Return the symbols carrying a ``\relates`` field, keyed by the name it gives.
+
+        Doxygen's ``\relates X`` sits on a free function and lists it under
+        ``X``'s documentation. The command records the class by *name*, not by
+        USR, and typically from a different header — Eigen's ``operator<<``
+        lives in ``IO.h`` and relates to ``DenseBase`` — so the pairing can only
+        be made once the whole IR is in hand, which is here rather than in the
+        parser.
+
+        Built in one pass because the caller needs it per record page and
+        ``comment_fields`` is indexed by symbol, not by field name.
+        """
+        sql = (
+            f"SELECT cf.value AS relates_name, {self._SYMBOL_COLUMNS} "  # noqa: S608
+            "FROM comment_fields cf JOIN symbols s ON s.usr = cf.symbol_usr "
+            "WHERE cf.name = 'relates' ORDER BY s.qualified_name"
+        )
+        out: dict[str, list[Symbol]] = {}
+        for row in self._con.execute(sql):
+            name = str(row["relates_name"]).strip()
+            if name:
+                out.setdefault(name, []).append(self._to_symbol(row))
+        return out
+
     def symbol_count(self) -> int:
         """Return the number of rows in the ``symbols`` table."""
         return int(self._con.execute("SELECT count(*) FROM symbols").fetchone()[0])
