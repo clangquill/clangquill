@@ -201,19 +201,20 @@ class Config:
     def _validate_output_paths(self) -> None:
         """Reject an :attr:`output_dir` / :attr:`root_document` that could write outside ``output_dir``.
 
-        ``output_dir`` is resolved against the Sphinx srcdir / CWD (see
-        ``pipeline.build``), so an absolute value or one containing ``..``
-        segments could escape that base directory. ``root_document`` names a
-        page written as ``output_dir / f"{root_document}.md"`` (see
+        ``output_dir`` may legitimately be absolute (the CLI's ``-o`` accepts
+        one directly), but is otherwise resolved against a base directory
+        (the Sphinx srcdir / CWD, see ``pipeline.build``), so a ``..``
+        segment could unintentionally escape that base. ``root_document``
+        names a page written as ``output_dir / f"{root_document}.md"`` (see
         ``Generator.generate``), so a value containing a path separator could
         likewise escape ``output_dir`` (e.g. ``root_document="../foo"``).
         """
         if not self.output_dir:
             msg = f"{CONFIG_PREFIX}output_dir must be a non-empty directory name"
             raise ConfigError(msg)
-        if Path(self.output_dir).is_absolute() or ".." in Path(self.output_dir).parts:
+        if ".." in Path(self.output_dir).parts:
             msg = (
-                f"{CONFIG_PREFIX}output_dir must be a relative path without '..' segments "
+                f"{CONFIG_PREFIX}output_dir must not contain '..' segments "
                 f"(it is resolved against the Sphinx srcdir / CWD), got {self.output_dir!r}"
             )
             raise ConfigError(msg)

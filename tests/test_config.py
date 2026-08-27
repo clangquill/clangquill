@@ -238,13 +238,16 @@ def test_validate_accepts_bare_root_document():
     assert cfg.root_document == "my-index"
 
 
-@pytest.mark.parametrize("value", ["../api", "sub/../../escape", "/etc/passwd"])
-def test_validate_rejects_output_dir_that_escapes_base(value: str):
+@pytest.mark.parametrize("value", ["../api", "sub/../../escape", "docs/../../escape"])
+def test_validate_rejects_output_dir_with_dotdot_segments(value: str):
     with pytest.raises(ConfigError, match="output_dir"):
         Config(input=["a.hpp"], output_dir=value).validate()
 
 
-@pytest.mark.parametrize("value", ["api", "docs/api", "./api"])
-def test_validate_accepts_relative_output_dir(value: str):
+@pytest.mark.parametrize("value", ["api", "docs/api", "./api", "/etc/clangquill-api"])
+def test_validate_accepts_relative_and_absolute_output_dir(value: str):
+    # An absolute output_dir is a legitimate, explicit choice (the CLI's
+    # ``-o`` accepts one directly); only unintentional ``..`` traversal is
+    # rejected.
     cfg = Config(input=["a.hpp"], output_dir=value).validate()
     assert cfg.output_dir == value
