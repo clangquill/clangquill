@@ -24,6 +24,7 @@ jobs:
     env:
       OS: ${{ matrix.config.os }}
       PYTHON: ${{ matrix.config.py }}
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
           # sqlite.org 403s vcpkg's default downloader, so distfiles go through
           # a browser-User-Agent script (SHA512 is still checked by vcpkg).
       X_VCPKG_ASSET_SOURCES: >-
@@ -52,16 +53,19 @@ jobs:
       - name: run pytest
         run: uv run pytest
       - name: Upload coverage
-      # A fork PR cannot read CODECOV_TOKEN, and a tokenless upload is rejected
-      # outright; skip the step there instead of failing the run on it.
-        if: ${{ !github.event.pull_request.head.repo.fork }}
+      # codecov rejects a tokenless upload outright, so an absent
+      # CODECOV_TOKEN — on a fork PR, or wherever the secret is simply not
+      # configured — has to skip the step rather than fail the run. Where the
+      # token *is* set the upload is a real gate (fail_ci_if_error below).
+        if: ${{ env.CODECOV_TOKEN != '' }}
         uses: codecov/codecov-action@v7.0.0
         with:
           env_vars: OS,PYTHON
-          # pytest writes coverage.xml (see pyproject addopts); name it
-          # explicitly so a missing report is an error rather than an
-          # upload of whatever else the action happens to discover.
+          # pytest writes coverage.xml (see pyproject addopts). Name it and
+          # turn the search off: left to itself the uploader also finds
+          # coverage-shaped files inside .vcpkg-checkout.
           files: coverage.xml
+          disable_search: true
           flags: python
           # The report now exists, so a failed upload means a real problem.
           fail_ci_if_error: true

@@ -22,6 +22,7 @@ jobs:
       X_VCPKG_ASSET_SOURCES: >-
         clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
         {url} {sha512} {dst}
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v7.0.1
             # Only the build tools and libclang come from apt: sqlite3,
@@ -60,18 +61,24 @@ jobs:
             # Catch2 and the vcpkg-installed headers. src/cpp/bindings is
             # included and will read as uncovered — the nanobind layer is
             # exercised by pytest, not by ctest, and the two reports land under
-            # separate codecov flags.
+            # separate codecov flags. gcov (GCC 13) emits an occasional
+            # `branch 1 taken -1` for a real line — a known gcov bug
+            # (gcc.gnu.org/PR68080) that gcovr treats as fatal by default;
+            # downgrade just that one to a per-file warning.
       - name: Collect coverage
         run: >-
           gcovr --root . build --filter 'src/cpp/'
+          --gcov-ignore-parse-errors=negative_hits.warn_once_per_file
           --xml cpp-coverage.xml --txt --print-summary
       - name: Upload coverage
-            # Same fork guard as the pytest workflow: no token there, and a
-            # tokenless upload is rejected.
-        if: ${{ !github.event.pull_request.head.repo.fork }}
+            # Same token guard as the pytest workflow: no CODECOV_TOKEN on a
+            # fork PR (or where the secret is unset), and codecov rejects a
+            # tokenless upload.
+        if: ${{ env.CODECOV_TOKEN != '' }}
         uses: codecov/codecov-action@v7.0.0
         with:
           files: cpp-coverage.xml
+          disable_search: true
           flags: cpp
           fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
