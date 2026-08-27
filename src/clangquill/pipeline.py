@@ -41,6 +41,7 @@ import glob
 import json
 import shutil
 import tempfile
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -703,6 +704,10 @@ def _incremental_build(
         # those units' diagnostics exist this run, so the log has to say so.
         reparsed: int | None = None
         partial_deps: dict[str, list[str]] | None = None
+        # Read before libclang touches anything: the hashes recorded below come
+        # from the parser's read of each file, so any file written at or after
+        # this instant must not have its stat trusted as describing them.
+        parse_started_ns = time.time_ns()
         if not status.current and status.stale_inputs is None:
             # Configuration changed or no per-TU map: rebuild the whole IR.
             counts = _parse_into(inputs, ir_path, options)
@@ -734,9 +739,9 @@ def _incremental_build(
             # record_render below can never let the next run noop-skip rendering
             # against this new IR; a clean render re-establishes it at the end.
             if partial_deps is not None:
-                cache.record_partial_parse(partial_deps, snapshot)
+                cache.record_partial_parse(partial_deps, snapshot, parse_started_ns=parse_started_ns)
             elif parsed:
-                cache.record_parse(parse_fp, snapshot, _tu_deps(counts))
+                cache.record_parse(parse_fp, snapshot, _tu_deps(counts), parse_started_ns=parse_started_ns)
             generator = _make_generator(config, base, store)
             rendered = _rendered_files(generator, config, cache=cache, render_fingerprint=render_fp)
             symbol_count = store.symbol_count()

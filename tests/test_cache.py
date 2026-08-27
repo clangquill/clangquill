@@ -113,6 +113,42 @@ def test_parse_is_current_falls_back_to_hash_when_only_mtime_changes(
         assert not cache.parse_is_current("fp-1")
 
 
+def test_edit_during_the_parse_is_not_hidden_by_the_stat_fast_path(tmp_path: Path) -> None:
+    header = tmp_path / "h.hpp"
+    header.write_text("aaaa", encoding="utf-8")
+    parsed = _entry(header)  # what the parser saw
+
+    # The file is rewritten while the parse is still running: same size, so the
+    # size check cannot catch it either. Recording the post-parse stat next to
+    # the pre-edit hash would make every later build trust metadata that
+    # describes content the hash never saw.
+    started = header.stat().st_mtime_ns
+    header.write_text("bbbb", encoding="utf-8")
+    os.utime(header, ns=(started + 1000, started + 1000))
+
+    with BuildCache.open(tmp_path / "cache") as cache:
+        cache.record_parse("fp", {str(header): parsed}, parse_started_ns=started)
+
+        row = cache._con.execute("SELECT mtime_ns FROM inputs").fetchone()  # noqa: SLF001
+        assert row["mtime_ns"] is None  # no fast path: the next build must hash
+        assert not cache.parse_is_current("fp")
+
+
+def test_untouched_file_keeps_its_fast_path_across_a_parse(tmp_path: Path) -> None:
+    header = tmp_path / "h.hpp"
+    header.write_text("aaaa", encoding="utf-8")
+    # Nothing writes the file during the parse, so its stat is trustworthy and
+    # the fast path is kept: the guard must not cost every build a re-hash.
+    started = header.stat().st_mtime_ns + 1000
+
+    with BuildCache.open(tmp_path / "cache") as cache:
+        cache.record_parse("fp", {str(header): _entry(header)}, parse_started_ns=started)
+
+        row = cache._con.execute("SELECT mtime_ns FROM inputs").fetchone()  # noqa: SLF001
+        assert row["mtime_ns"] == header.stat().st_mtime_ns
+        assert cache.parse_is_current("fp")
+
+
 def test_parse_is_current_false_without_tracked_files(tmp_path: Path) -> None:
     with BuildCache.open(tmp_path / "cache") as cache:
         cache.record_parse("fp", {})

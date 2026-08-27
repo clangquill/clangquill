@@ -188,6 +188,40 @@ def test_incremental_noop_skips_rendering(project: Path, monkeypatch: pytest.Mon
 
 
 @requires_libclang
+def test_incremental_detects_an_edit_made_during_the_parse(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    header = project / "demo.hpp"
+    # Same length as the original, so the size half of the stat fast-path cannot
+    # catch the edit either — the common case for a C++ header tweak.
+    edited = FIXTURE.replace("A documented widget.", "A documented gadget.")
+    assert len(edited) == len(FIXTURE)
+
+    real_full = _core.parse_to_sqlite
+
+    def racing_parse(inputs: list[str], db: str, opt: object) -> object:
+        result = real_full(inputs, db, opt)
+        # The editor saves while libclang is still working: the hash just
+        # recorded describes the old text, the file on disk the new one.
+        header.write_text(edited)
+        return result
+
+    monkeypatch.setattr(_core, "parse_to_sqlite", racing_parse)
+    build(config, base_dir=project)
+    monkeypatch.setattr(_core, "parse_to_sqlite", real_full)
+
+    # Without the restat guard the cache would trust the post-edit stat against
+    # the pre-edit hash and noop here, hiding the edit until the file moves
+    # again. It has to re-parse and re-render instead.
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    assert "gadget" in (project / "api" / "demo.md").read_text()
+
+
+@requires_libclang
 def test_incremental_restores_deleted_output(project: Path) -> None:
     config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
     first = build(config, base_dir=project)
