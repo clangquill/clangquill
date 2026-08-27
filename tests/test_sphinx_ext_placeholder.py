@@ -12,15 +12,22 @@ import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+import pytest
+
 from clangquill.config import Config
 from clangquill.pipeline import MANIFEST_NAME
-from clangquill.sphinx_ext import _warn_unknown_config, _write_placeholder
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 def test_write_placeholder_prunes_pages_from_a_prior_real_build(tmp_path: Path) -> None:
+    # sphinx_ext imports `sphinx` at module level; skip (not import) at
+    # collection time when it is not installed (e.g. the `ci` extra), matching
+    # every other sphinx_ext-touching test in this suite.
+    pytest.importorskip("sphinx")
+    from clangquill.sphinx_ext import _write_placeholder  # noqa: PLC0415
+
     # A libclang-enabled run writes real pages and a manifest; a later run that
     # falls back to the placeholder (libclang unavailable) must not leave those
     # pages behind with no toctree entry pointing at them.
@@ -41,6 +48,9 @@ def test_write_placeholder_prunes_pages_from_a_prior_real_build(tmp_path: Path) 
 
 
 def test_write_placeholder_leaves_unmanaged_files_alone(tmp_path: Path) -> None:
+    pytest.importorskip("sphinx")
+    from clangquill.sphinx_ext import _write_placeholder  # noqa: PLC0415
+
     # Only files a previous clangquill run tracked in its manifest are pruned;
     # a hand-written file sharing the output directory must survive.
     config = Config(input=["geo.hpp"], output_dir="api")
@@ -55,6 +65,9 @@ def test_write_placeholder_leaves_unmanaged_files_alone(tmp_path: Path) -> None:
 
 
 def test_warn_unknown_config_survives_missing_raw_config() -> None:
+    pytest.importorskip("sphinx")
+    from clangquill.sphinx_ext import _warn_unknown_config  # noqa: PLC0415
+
     # If a future Sphinx version renames or drops the private `_raw_config`
     # attribute this check reaches into, it must degrade to a no-op instead of
     # raising and crashing `config-inited` (and therefore the whole build).
