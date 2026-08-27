@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: [v*]
   pull_request:
+  merge_group:
   workflow_dispatch:
 # Cancel a stale PR run when new commits land; let push (main/tags) and
 # manual dispatch runs finish so tagged wheel builds are never cut short.
