@@ -42,10 +42,14 @@ def test_import():
 
     ``clangquill/__init__.py`` imports none of them, so ``test_version`` alone
     would miss a circular import or other module-load-time error anywhere in
-    the package.
+    the package. ``sphinx_ext`` needs the optional ``docs`` extra (it imports
+    ``sphinx`` at module level) and gets its own import-or-skip, same as
+    test_sphinx_ext.py.
     """
-    for name in ("cache", "cli", "comments", "config", "generator", "pipeline", "sphinx_ext", "store"):
+    for name in ("cache", "cli", "comments", "config", "generator", "pipeline", "store"):
         importlib.import_module(f"clangquill.{name}")
+    pytest.importorskip("sphinx")
+    importlib.import_module("clangquill.sphinx_ext")
 
 
 def test_command_line_interface():
