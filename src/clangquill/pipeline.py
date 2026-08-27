@@ -943,7 +943,12 @@ def _apply_outputs(
         target = output_dir / name
         prev = previous.get(name)
         if prev is None or prev.content_hash != content_hash or not _output_intact(target, prev):
-            target.write_text(text, encoding="utf-8")
+            # newline="\n" is load-bearing, not cosmetic: content_hash is the
+            # SHA-256 of `text`, while _output_intact re-checks a page by
+            # hashing its *bytes*. Left to translate, Windows would write CRLF
+            # and no page would ever hash back to its own record, so every
+            # touched page would read as damaged and be rewritten.
+            target.write_text(text, encoding="utf-8", newline="\n")
             written.append(name)
         new_index[name] = OutputRecord(content_hash, *_stat_pair(target))
 
