@@ -289,6 +289,8 @@ Generating a database that lists the headers themselves — as `docs/conf.py` in
 this repository does — is how to replace that guess with exact flags. It is an
 accuracy improvement, not a prerequisite.
 
+(batching-under-a-compile-database)=
+
 ### Batching under a compile database
 
 Umbrella batching (`tu_batch`) parses several inputs as one translation unit so
@@ -315,6 +317,8 @@ Two consequences worth knowing:
 - Headers that are not self-contained now see their batch-mates' preprocessor
   state under a compile database too, the same way they already did without one.
   `tu_batch = 1` remains the way to ask for exact per-file isolation.
+
+(how-an-entrys-command-line-is-replayed)=
 
 ### How an entry's command line is replayed
 
