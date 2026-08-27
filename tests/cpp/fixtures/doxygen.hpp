@@ -36,8 +36,31 @@ int old_divide(int a, int b);
  * Squares a value.
  * @code
  *   int y = square(3); // y == 9
+ *   if (y > 0) {
+ *     return y;
+ *   }
  * @endcode
+ * Prose written after the block stays after it.
  */
 int square(int x);
+
+/**
+ * @brief Fills a buffer.
+ * @param[out] result where the answer is written
+ * @param[in] value the input value
+ * @param[in,out] scratch reused working storage
+ * @param plain a parameter with no direction attribute
+ */
+void fill(int* result, int value, int* scratch, int plain);
+
+/**
+ * @brief Emphasis and HTML reach the reader.
+ *
+ * Inline markup: @b bold, @e italic, @c code and @p value. A cross-reference
+ * to @ref divide "the divide function" too.
+ *
+ * HTML such as <b>tags</b> and <ul><li>list items</li></ul> is preserved.
+ */
+int emphasize(int value);
 
 }  // namespace doc

@@ -113,3 +113,50 @@ class Chained {
  public:
   int c = 0;
 };
+
+/** \ingroup shapes
+  * \brief A blank line ends the brief.
+  *
+  * This paragraph is the detailed description; a paragraph command runs to the
+  * next blank line, so it must not be folded into the one-line summary.
+  *
+  * \param a the input value
+  *
+  * A closing paragraph documents the function, not the parameter above it.
+  */
+int paragraph_helper(int a);
+
+/** \ingroup shapes
+  * \brief Directions survive the raw path.
+  *
+  * \param[out] result where the answer is written
+  * \param[in] value the input value
+  * \param[in,out] scratch reused working storage
+  * \param plain a parameter with no direction attribute
+  */
+int directed_helper(int* result, int value, int* scratch, int plain);
+
+/** \ingroup shapes
+  * \brief Keeps a code block intact.
+  *
+  * \code{.py}
+  *   y = square(3)
+  *   if y:
+  *       print(y)
+  * \endcode
+  *
+  * Prose written after the block stays after it.
+  */
+int coded_helper(int x);
+
+/** \ingroup shapes
+  * \brief A wrapped sentence about
+  * \ref Widget stays one sentence.
+  *
+  * Emphasis reaches the reader: \b bold, \e italic, \c code and \p x. HTML
+  * such as <b>tags</b> and <ul><li>list items</li></ul> survives too.
+  *
+  * Closing punctuation stays outside the markup (see \ref Widget), as does the
+  * colon after \p x: and a target like \ref some-page that names no C++ entity.
+  */
+int inline_helper(int x);

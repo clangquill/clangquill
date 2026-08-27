@@ -13,13 +13,43 @@ A `CommentModel` is a plain dataclass of structured fields the templates render:
 | Field | Type | From (Doxygen) |
 |-------|------|----------------|
 | `brief` | `str` | `@brief` / first paragraph |
-| `detail` | `list[str]` | remaining paragraphs |
+| `detail` | `list[str]` | remaining paragraphs, and `@code` / `@verbatim` blocks |
 | `params`, `tparams` | `list[CommentParam]` | `@param`, `@tparam` |
 | `returns` | `str` | `@return` |
 | `retvals` | `list[CommentRetval]` | `@retval` |
 | `throws` | `list[CommentThrow]` | `@throws` / `@exception` |
 | `see`, `since`, `deprecated`, `note`, `warning`, `pre`, `post` | `list[str]` | the matching commands |
 | `custom` | `dict[str, list[str]]` | **any unrecognized command**, keyed by its name |
+
+A `CommentParam` carries `name`, `description` and `direction`. `direction` is
+Doxygen's parameter-passing attribute with the brackets removed — `"in"`,
+`"out"`, `"in,out"`, or `""` when the comment did not spell one out. In the
+persisted `comment_fields` projection it is prefixed onto the field's `arg` in
+the form Doxygen itself writes (`[out] result`), since that table has a single
+slot for a field argument; {py:func}`~clangquill.comments.model_from_fields`
+splits it back off.
+
+A `@code` or `@verbatim` block keeps its place among the prose paragraphs in
+`detail`, rendered as a MyST fenced code block with its lines and relative
+indentation intact — collapsing it to one line would mangle every example,
+since the output target is Markdown. A `@code{.py}` attribute becomes the
+fence's info string; a plain `@code` is `cpp` (the only language a
+libclang-driven parser sees) and `@verbatim` gets none, being preformatted text
+rather than code. Such a block is never promoted to the `brief`.
+
+### Inline markup
+
+Doxygen's inline commands are rewritten into the MyST that says the same thing,
+in both the text of a command and in the prose: `@c x` / `@p x` become code
+spans, `@b x` bold, `@e` / `@em` / `@a x` italic, and `@ref X` (optionally
+`@ref X "a title"`) a `{cpp:any}` cross-reference role. A command has to start a
+word, so an address like `user@b.example` is left alone, and trailing sentence
+punctuation stays outside the markup. Because inline markup never opens a block,
+a wrapped prose line beginning with one — `@ref Foo is the …` — stays prose
+rather than becoming a command.
+
+HTML in a comment (`<b>`, `<br>`, `<ul><li>…`) is passed through verbatim;
+Markdown keeps raw inline HTML, so the emphasis and list structure survives.
 
 The `custom` bucket is the graceful-degradation seam: a command the parser does
 not recognize is never dropped — it lands in `custom["<name>"]` so a template can

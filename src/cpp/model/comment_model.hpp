@@ -15,6 +15,13 @@ namespace clangquill::model {
 struct CommentParam {
   std::string name;         ///< The (template) parameter name.
   std::string description;  ///< Its documented description.
+  /// @brief Doxygen's parameter-passing direction, without the brackets.
+  ///
+  /// One of `"in"`, `"out"`, `"in,out"`, or empty when the comment did not
+  /// spell one out. Doxygen writes it as an attribute on the command itself
+  /// (`\@param[out] result ...`), so it belongs to the entry rather than to
+  /// its description.
+  std::string direction;
 };
 
 /// @brief A documented named return value (`\@retval <value> <description>`).
