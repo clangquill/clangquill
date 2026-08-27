@@ -589,7 +589,7 @@ def test_related_block_keeps_documented_cross_file_relates_when_hiding_undocumen
     con.execute(
         "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, display_name, "
         "signature, type_repr, access, is_definition, is_documented, content_hash, file_id, line) "
-        "VALUES(?, 'c:@N@app', 5, ?, ?, ?, ?, ?, 0, 1, ?, ?, 2, 0)",
+        "VALUES(?, 'c:@N@app', 5, ?, ?, ?, ?, ?, 0, 1, 1, ?, 2, 0)",
         (
             "c:@N@app@F@link_to_alpha",
             "link_to_alpha",
@@ -597,7 +597,6 @@ def test_related_block_keeps_documented_cross_file_relates_when_hiding_undocumen
             "app::link_to_alpha",
             "void link_to_alpha()",
             "void ()",
-            1,
             "hash-link-to-alpha",
         ),
     )
@@ -615,7 +614,7 @@ def test_related_block_keeps_documented_cross_file_relates_when_hiding_undocumen
     con.execute(
         "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, display_name, "
         "signature, type_repr, access, is_definition, is_documented, content_hash, file_id, line) "
-        "VALUES(?, 'c:@N@app', 5, ?, ?, ?, ?, ?, 0, 1, ?, ?, 2, 0)",
+        "VALUES(?, 'c:@N@app', 5, ?, ?, ?, ?, ?, 0, 1, 0, ?, 2, 0)",
         (
             "c:@N@app@F@hidden_link",
             "hidden_link",
@@ -623,7 +622,6 @@ def test_related_block_keeps_documented_cross_file_relates_when_hiding_undocumen
             "app::hidden_link",
             "void hidden_link()",
             "void ()",
-            0,
             "hash-hidden-link",
         ),
     )
@@ -639,6 +637,8 @@ def test_related_block_keeps_documented_cross_file_relates_when_hiding_undocumen
     con.close()
 
     with Store.open(multifile_db) as store:
+        assert _symbol(store, "app::link_to_alpha").is_documented
+        assert not _symbol(store, "app::hidden_link").is_documented
         pages = Generator(store, include_undocumented=False).generate(tmp_path / "api", group_by="file")
 
     assert pages == ["alpha_hpp", "beta_hpp"]
