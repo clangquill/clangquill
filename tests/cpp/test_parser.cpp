@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -124,6 +125,51 @@ TEST_CASE("parser reads enumerators with values", "[parser]") {
   CHECK(value_of("Red") == 0);
   CHECK(value_of("Green") == 5);
   CHECK(value_of("Blue") == 6);
+}
+
+TEST_CASE("enum signedness looks through typedef sugar", "[parser]") {
+  // `enum class Mask : u64` -- the underlying type arrives as CXType_Typedef,
+  // not as a builtin unsigned kind, so reading the kind without canonicalizing
+  // it took the enum for a signed one and stored All as -1.
+  auto m = parse_fixture("enums.hpp");
+
+  const model::Enumerator* all = nullptr;
+  for (const auto& e : m.enumerators) {
+    if (e.name == "All") all = &e;
+  }
+  REQUIRE(all != nullptr);
+  CHECK_FALSE(all->value_is_signed);
+  CHECK(static_cast<std::uint64_t>(all->value) == 0xFFFFFFFFFFFFFFFFULL);
+}
+
+TEST_CASE("an enum records its fixed underlying type", "[parser]") {
+  auto m = parse_fixture("enums.hpp");
+
+  auto integer_type =
+      [&](const std::string& enum_name) -> const model::Reference* {
+    const auto* sym = find(m, enum_name);
+    if (sym == nullptr) return nullptr;
+    for (const auto& r : m.references) {
+      if (r.from_usr == sym->usr && r.kind == model::RefKind::EnumIntegerType) {
+        return &r;
+      }
+    }
+    return nullptr;
+  };
+
+  // The edge carries the type as written, not its canonical spelling.
+  const auto* mask = integer_type("Mask");
+  REQUIRE(mask != nullptr);
+  CHECK(mask->to_spelling == "u64");
+
+  const auto* level = integer_type("Level");
+  REQUIRE(level != nullptr);
+  CHECK(level->to_spelling == "unsigned char");
+
+  // An enum that fixes no underlying type says nothing about one: the type
+  // libclang reports there is the implementation's choice, not the header's.
+  CHECK(integer_type("Color") == nullptr);
+  CHECK(integer_type("Direction") == nullptr);
 }
 
 TEST_CASE("declarations inside extern \"C\" reach the IR", "[parser]") {
