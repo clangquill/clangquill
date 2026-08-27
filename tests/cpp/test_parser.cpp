@@ -1158,6 +1158,35 @@ TEST_CASE("a header is parsed as a header under the fallback flags too",
   fs::remove_all(dir);
 }
 
+TEST_CASE("an uppercase header extension is parsed as a header", "[parser]") {
+  // `.H` is a real, if old-school, C++ header spelling. Matching the extension
+  // list case-sensitively made such a header miss header mode entirely, so its
+  // own `#pragma once` was reported as being in a main file -- the failure the
+  // whole `-xc++-header` dance exists to avoid.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-header-lang-upper";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.H")
+      << "#pragma once\nnamespace demo { inline int upper_h() { return 6; } }\n";
+  std::ofstream(dir / "gadget.HPP")
+      << "#pragma once\nnamespace demo { inline int upper_hpp() { return 7; } }\n";
+  std::ofstream(dir / "thing.Hxx")
+      << "#pragma once\nnamespace demo { inline int mixed_hxx() { return 8; } }\n";
+
+  parser::ParseOptions opts;
+  opts.capture_all_diagnostics = true;
+  for (const std::string& input : {"widget.H", "gadget.HPP", "thing.Hxx"}) {
+    model::ParsedModule mod;
+    REQUIRE(parser::Parser(opts).parse_file((dir / input).string(), mod));
+    for (const auto& d : mod.diagnostics) {
+      CHECK(d.text.find("pragma-once-outside-header") == std::string::npos);
+    }
+  }
+
+  fs::remove_all(dir);
+}
+
 TEST_CASE("replaying a database entry never writes the files it names",
           "[parser]") {
   // A real entry names an object file, a make-style dependency list and often
