@@ -6,6 +6,7 @@
 #include <fstream>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -376,6 +377,78 @@ TEST_CASE("parse_files is deterministic regardless of job count", "[parser]") {
   for (const auto& f : a.files) pa.push_back(f.path);
   for (const auto& f : b.files) pb.push_back(f.path);
   CHECK(pa == pb);
+}
+
+TEST_CASE("a streamed parse hands over the IR the merge would have held",
+          "[parser]") {
+  // With a sink the batches are handed over one at a time instead of piling up
+  // in one module, so nothing may go missing on the way.
+  auto inputs = all_inputs();
+  parser::ParseOptions opts;
+  opts.jobs = 4;
+  opts.tu_batch = 1;
+
+  std::vector<model::ParsedModule> streamed;
+  const auto rest = parser::parse_files(
+      inputs, opts, nullptr, nullptr,
+      [&](model::ParsedModule&& part) { streamed.push_back(std::move(part)); });
+
+  std::set<std::string> usrs;
+  std::set<std::string> paths;
+  std::size_t references = 0;
+  for (const auto& part : streamed) {
+    for (const auto& s : part.symbols) usrs.insert(s.usr);
+    for (const auto& f : part.files) paths.insert(f.path);
+    references += part.references.size();
+    // Diagnostics are deduplicated across batches, so they stay behind.
+    CHECK(part.diagnostics.empty());
+  }
+
+  const auto merged = parser::parse_files(inputs, opts);
+  CHECK(usrs == symbol_usrs(merged));
+  CHECK(paths == file_paths(merged));
+  CHECK(references == merged.references.size());
+  CHECK(rest.symbols.empty());
+  CHECK(diagnostic_texts(rest) == diagnostic_texts(merged));
+}
+
+TEST_CASE("a streamed parse arrives in the same order at any job count",
+          "[parser]") {
+  // The batches reach the sink in canonical order rather than in the order the
+  // threads happen to finish, so the rows a caller writes land in a sequence
+  // that does not depend on the job count.
+  auto inputs = all_inputs();
+
+  auto stream = [&inputs](int jobs) {
+    parser::ParseOptions opts;
+    opts.jobs = jobs;
+    opts.tu_batch = 1;
+    std::vector<std::vector<std::string>> per_part;
+    parser::parse_files(inputs, opts, nullptr, nullptr,
+                        [&](model::ParsedModule&& part) {
+                          std::vector<std::string> usrs;
+                          for (const auto& s : part.symbols) usrs.push_back(s.usr);
+                          per_part.push_back(std::move(usrs));
+                        });
+    return per_part;
+  };
+
+  CHECK(stream(1) == stream(4));
+}
+
+TEST_CASE("an exception from the sink leaves the parse", "[parser]") {
+  // The workers have to be joined before it does, so a throwing sink must
+  // neither deadlock nor take the process down with a live thread.
+  auto inputs = all_inputs();
+  parser::ParseOptions opts;
+  opts.jobs = 4;
+  opts.tu_batch = 1;
+
+  CHECK_THROWS_AS(parser::parse_files(inputs, opts, nullptr, nullptr,
+                                      [](model::ParsedModule&&) {
+                                        throw std::runtime_error("no room");
+                                      }),
+                  std::runtime_error);
 }
 
 TEST_CASE("umbrella batching extracts the same symbols as per-file parsing",
@@ -1513,6 +1586,14 @@ TEST_CASE("a diagnostic shared by several batches is merged once", "[parser]") {
   // Widening the key to the whole note chain would make this 2 and defeat the
   // dedup entirely.
   CHECK(include_stacks == 1);
+
+  // Streaming the batches out one at a time does not weaken the dedup: the
+  // sink sees no diagnostics and parse_files still returns the single copy.
+  model::ParsedModule streamed = parser::parse_files(
+      {(dir / "a.hpp").string(), (dir / "b.hpp").string()}, opts, nullptr,
+      nullptr,
+      [](model::ParsedModule&& part) { CHECK(part.diagnostics.empty()); });
+  CHECK(diagnostic_texts(streamed) == diagnostic_texts(mod));
 
   fs::remove_all(dir);
 }

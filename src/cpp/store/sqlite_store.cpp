@@ -32,8 +32,29 @@ void SqliteStore::write(const model::ParsedModule& module, const Meta& meta) {
   Transaction tx(db_);
   put_meta(meta);
   clear_all();
-  FileIds file_ids = insert_files(module);
+  // Every upsert is an insert on the table clear_all just emptied; the shared
+  // path is what keeps this and write_part from drifting on how a file is
+  // written.
+  FileIds file_ids = upsert_files(module);
   insert_rows(module, file_ids);
+  tx.commit();
+}
+
+void SqliteStore::write_part(const model::ParsedModule& module,
+                             const Meta& meta) {
+  Transaction tx(db_);
+  put_meta(meta);
+  // Upsert rather than insert: a batch re-parses the shared `#include` closure
+  // its siblings also saw, so a header an earlier batch already wrote has to
+  // keep the id that batch's symbols reference.
+  FileIds file_ids = upsert_files(module);
+  insert_rows(module, file_ids);
+  tx.commit();
+}
+
+void SqliteStore::clear() {
+  Transaction tx(db_);
+  clear_all();
   tx.commit();
 }
 
@@ -114,21 +135,6 @@ void SqliteStore::put_meta(const Meta& meta) {
   put("schema_version", std::to_string(meta.schema_version));
   put("core_version", meta.core_version);
   put("libclang_version", meta.libclang_version);
-}
-
-SqliteStore::FileIds SqliteStore::insert_files(
-    const model::ParsedModule& module) {
-  FileIds file_ids;
-  Stmt f(db_, "INSERT INTO files(path, sha256, size_bytes) VALUES(?, ?, ?);");
-  for (const auto& file : module.files) {
-    f.reset();
-    f.bind(1, file.path);
-    f.bind(2, file.sha256);
-    f.bind(3, file.size_bytes);
-    f.step();
-    file_ids[file.path] = sqlite3_last_insert_rowid(db_.get());
-  }
-  return file_ids;
 }
 
 SqliteStore::FileIds SqliteStore::upsert_files(

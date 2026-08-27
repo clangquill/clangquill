@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <condition_variable>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -1025,7 +1026,8 @@ std::vector<std::vector<std::size_t>> make_batches(
 model::ParsedModule parse_files(const std::vector<std::string>& inputs,
                                 const ParseOptions& options,
                                 std::vector<std::vector<std::string>>* tu_files,
-                                std::vector<bool>* tu_parsed) {
+                                std::vector<bool>* tu_parsed,
+                                const PartSink& part_sink) {
   if (tu_files != nullptr) tu_files->assign(inputs.size(), {});
   if (tu_parsed != nullptr) tu_parsed->assign(inputs.size(), false);
 
@@ -1093,58 +1095,124 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
   effective_jobs =
       std::min<unsigned>(effective_jobs, static_cast<unsigned>(num_batches));
 
+  // Streaming state, used only when the caller passed a sink. `ready` says a
+  // slot holds a finished batch; `pending` counts the ready-but-unconsumed
+  // slots, which is what bounds peak memory.
+  std::mutex stream_mutex;
+  std::condition_variable slot_ready;
+  std::condition_variable slot_consumed;
+  std::vector<bool> ready(part_sink ? num_batches : 0, false);
+  std::size_t pending = 0;
+  std::atomic<bool> stop{false};
+  // Set under the mutex so a worker that is about to wait either sees it or is
+  // already waiting when the notification goes out; the loop condition reads it
+  // unlocked, where a stale `false` only costs one more batch.
+  auto stop_workers = [&]() {
+    {
+      std::lock_guard<std::mutex> lock(stream_mutex);
+      stop.store(true, std::memory_order_relaxed);
+    }
+    slot_consumed.notify_all();
+  };
+  // A worker publishes its batch unconditionally and only then waits for room,
+  // so the batch the consumer is waiting for is never held back by the limit.
+  const std::size_t max_pending = 2 * std::max<std::size_t>(effective_jobs, 1);
+
+  // Parses batch `b` into its slot. Each thread writes only its own batch's
+  // slots — distinct objects in the shared outer vectors — so this needs no
+  // synchronisation. The success flags stay per-batch (ok_parts) until the
+  // join, because bit-packed vector<bool> elements are not distinct objects.
+  auto parse_into_slot = [&](Parser& parser, std::size_t b) {
+    const std::vector<std::size_t>& batch = batches[b];
+    // The caller's spellings, not the canonical keys: parse_batch absolutises
+    // for itself, accepts either spelling when attributing symbols, and names
+    // the path the caller gave when it has to report a member.
+    std::vector<std::string> members;
+    members.reserve(batch.size());
+    for (const std::size_t i : batch) members.push_back(inputs[i]);
+    // Parse into a local module so a mid-parse exception cannot leave
+    // half-built rows in the slot: only a clean parse is published, and an
+    // exception escaping a worker thread (which would otherwise call
+    // std::terminate) is contained as a diagnostic (parse errors are already
+    // reported this way) so the run carries on with the next batch.
+    try {
+      model::ParsedModule part;
+      std::vector<std::vector<std::string>> member_files(members.size());
+      std::vector<bool> member_ok(members.size(), false);
+      parser.parse_batch(members, part,
+                         tu_files != nullptr ? &member_files : nullptr,
+                         tu_parsed != nullptr ? &member_ok : nullptr);
+      for (std::size_t i = 0; i < members.size(); ++i) {
+        // Sinks are indexed by the caller's position, not the parse order:
+        // the bindings pair them up with the input list they passed in.
+        if (tu_files != nullptr) (*tu_files)[batch[i]] = std::move(member_files[i]);
+      }
+      ok_parts[b] = std::move(member_ok);
+      parts[b] = std::move(part);
+    } catch (const std::exception& e) {
+      parts[b] = model::ParsedModule{};
+      parts[b].diagnostics.push_back(model::Diagnostic{
+          .text = "exception parsing batch of " + inputs[batch.front()] +
+                  ": " + e.what()});
+    } catch (...) {
+      parts[b] = model::ParsedModule{};
+      parts[b].diagnostics.push_back(model::Diagnostic{
+          .text = "unknown exception parsing batch of " + inputs[batch.front()]});
+    }
+  };
+
   // Each worker owns its own Parser (hence its own CXIndex) and pulls the next
   // unclaimed batch until the queue drains.
   std::atomic<std::size_t> next{0};
   auto worker = [&]() {
     Parser parser(options);
     std::size_t b;
-    while ((b = next.fetch_add(1)) < num_batches) {
-      const std::vector<std::size_t>& batch = batches[b];
-      // The caller's spellings, not the canonical keys: parse_batch absolutises
-      // for itself, accepts either spelling when attributing symbols, and names
-      // the path the caller gave when it has to report a member.
-      std::vector<std::string> members;
-      members.reserve(batch.size());
-      for (const std::size_t i : batch) members.push_back(inputs[i]);
-      // Parse into a local module so a mid-parse exception cannot leave
-      // half-built rows in the slot: only a clean parse is published, and an
-      // exception escaping a worker thread (which would otherwise call
-      // std::terminate) is contained as a diagnostic (parse errors are already
-      // reported this way) so the run carries on with the next batch.
-      try {
-        model::ParsedModule part;
-        std::vector<std::vector<std::string>> member_files(members.size());
-        std::vector<bool> member_ok(members.size(), false);
-        parser.parse_batch(members, part,
-                           tu_files != nullptr ? &member_files : nullptr,
-                           tu_parsed != nullptr ? &member_ok : nullptr);
-        // Each thread writes only its own batch's slots — distinct objects in
-        // the shared outer vectors — so this needs no synchronisation. The
-        // success flags stay per-batch (ok_parts) until the join, because
-        // bit-packed vector<bool> elements are not distinct objects.
-        for (std::size_t i = 0; i < members.size(); ++i) {
-          // Sinks are indexed by the caller's position, not the parse order:
-          // the bindings pair them up with the input list they passed in.
-          if (tu_files != nullptr) (*tu_files)[batch[i]] = std::move(member_files[i]);
-        }
-        ok_parts[b] = std::move(member_ok);
-        parts[b] = std::move(part);
-      } catch (const std::exception& e) {
-        parts[b] = model::ParsedModule{};
-        parts[b].diagnostics.push_back(model::Diagnostic{
-            .text = "exception parsing batch of " + inputs[batch.front()] +
-                    ": " + e.what()});
-      } catch (...) {
-        parts[b] = model::ParsedModule{};
-        parts[b].diagnostics.push_back(model::Diagnostic{
-            .text = "unknown exception parsing batch of " + inputs[batch.front()]});
-      }
+    while (!stop.load(std::memory_order_relaxed) &&
+           (b = next.fetch_add(1)) < num_batches) {
+      parse_into_slot(parser, b);
+      if (!part_sink) continue;
+      std::unique_lock<std::mutex> lock(stream_mutex);
+      ready[b] = true;
+      ++pending;
+      slot_ready.notify_one();
+      // Back-pressure: hold off claiming more work while the consumer is behind,
+      // so the IR waiting to be written stays bounded instead of growing to the
+      // size of the whole project. Waiting only *after* publishing is what keeps
+      // this deadlock-free: batches are claimed in order, so the batch the
+      // consumer wants next is either published already or held by a worker
+      // that is still parsing it, never by one parked here.
+      slot_consumed.wait(lock, [&] {
+        return pending < max_pending || stop.load(std::memory_order_relaxed);
+      });
     }
   };
 
+  model::ParsedModule merged;
+  std::unordered_set<std::string> seen_files;
+  std::unordered_set<std::string> seen_diagnostics;
+
+  // Hands one finished batch to the streaming sink. The diagnostics stay
+  // behind: they are deduplicated across batches and returned, not written.
+  auto consume = [&](model::ParsedModule&& part) {
+    merge_diagnostics(merged, part, seen_diagnostics);
+    part.diagnostics.clear();
+    part_sink(std::move(part));
+  };
+
   if (effective_jobs <= 1) {
-    worker();  // Avoid spawning a thread for the trivial single-job case.
+    if (part_sink) {
+      // Nothing to overlap with on one thread, but consuming each batch as it
+      // is parsed still keeps only one batch's IR alive at a time.
+      Parser parser(options);
+      for (std::size_t b = 0; b < num_batches; ++b) {
+        parse_into_slot(parser, b);
+        model::ParsedModule part = std::move(parts[b]);
+        parts[b] = model::ParsedModule{};
+        consume(std::move(part));
+      }
+    } else {
+      worker();  // Avoid spawning a thread for the trivial single-job case.
+    }
   } else {
     std::vector<std::thread> threads;
     threads.reserve(effective_jobs);
@@ -1154,12 +1222,40 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
     try {
       for (unsigned t = 0; t < effective_jobs; ++t) threads.emplace_back(worker);
     } catch (...) {
+      stop_workers();
       for (auto& t : threads) {
         if (t.joinable()) t.join();
       }
       throw;
     }
+    // The calling thread drains the finished batches in canonical order while
+    // the workers parse the rest, so writing overlaps with parsing and the
+    // sink still sees a job-count-independent sequence.
+    std::exception_ptr failure;
+    if (part_sink) {
+      for (std::size_t b = 0; b < num_batches; ++b) {
+        model::ParsedModule part;
+        {
+          std::unique_lock<std::mutex> lock(stream_mutex);
+          slot_ready.wait(lock, [&] { return ready[b]; });
+          part = std::move(parts[b]);
+          parts[b] = model::ParsedModule{};
+          --pending;
+        }
+        slot_consumed.notify_one();
+        try {
+          consume(std::move(part));
+        } catch (...) {
+          // Stop the workers rather than parsing on into a sink that is gone,
+          // but join them before the exception leaves this frame.
+          failure = std::current_exception();
+          stop_workers();
+          break;
+        }
+      }
+    }
     for (auto& t : threads) t.join();
+    if (failure) std::rethrow_exception(failure);
   }
 
   if (tu_parsed != nullptr) {
@@ -1172,11 +1268,12 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
     }
   }
 
-  model::ParsedModule merged;
-  std::unordered_set<std::string> seen_files;
-  std::unordered_set<std::string> seen_diagnostics;
-  for (auto& part : parts) {
-    merge_into(merged, part, seen_files, seen_diagnostics);
+  // Streaming already consumed every slot, one at a time, and `merged` holds
+  // just the deduplicated diagnostics.
+  if (!part_sink) {
+    for (auto& part : parts) {
+      merge_into(merged, part, seen_files, seen_diagnostics);
+    }
   }
   return merged;
 }
