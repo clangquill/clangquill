@@ -40,4 +40,13 @@ int old_divide(int a, int b);
  */
 int square(int x);
 
+/**
+ * @brief Fills a buffer.
+ * @param[out] result where the answer is written
+ * @param[in] value the input value
+ * @param[in,out] scratch reused working storage
+ * @param plain a parameter with no direction attribute
+ */
+void fill(int* result, int value, int* scratch, int plain);
+
 }  // namespace doc

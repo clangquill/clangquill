@@ -4,6 +4,7 @@
 
 #include <cctype>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -47,6 +48,38 @@ std::string lower(std::string s) {
   for (char& ch : s)
     ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
   return s;
+}
+
+// Canonical spelling of a `\param` direction attribute, or "" when the text is
+// not a direction Doxygen defines. Doxygen writes the attribute without spaces
+// (`[in]`, `[out]`, `[in,out]`), which is what lets the command word be
+// tokenized on whitespace at all; `inout` is accepted as the spelling libclang
+// uses for the same thing.
+std::string canonical_direction(const std::string& attr) {
+  std::string t = lower(attr);
+  if (t == "in") return "in";
+  if (t == "out") return "out";
+  if (t == "inout" || t == "in,out") return "in,out";
+  return {};
+}
+
+// Splits a raw command word into its name and its direction attribute. Doxygen
+// glues the attribute onto the command (`\param[out] result the answer`), so
+// without this the whole `param[out]` is taken as the command name, matches no
+// route, and the parameter's name/description split never happens -- the entry
+// vanishes from `params`. Only `param`/`tparam` carry a direction, and only a
+// direction Doxygen defines is stripped, so an unknown `\foo[bar]` still
+// reaches `custom` under its full spelling as before.
+std::pair<std::string, std::string> split_direction(const std::string& cmd) {
+  if (cmd.empty() || cmd.back() != ']') return {cmd, {}};
+  std::size_t open = cmd.find('[');
+  if (open == std::string::npos) return {cmd, {}};
+  std::string name = cmd.substr(0, open);
+  if (name != "param" && name != "tparam") return {cmd, {}};
+  std::string dir =
+      canonical_direction(cmd.substr(open + 1, cmd.size() - open - 2));
+  if (dir.empty()) return {cmd, {}};
+  return {name, dir};
 }
 
 // Group commands carry cross-symbol bookkeeping (assembled separately from the
@@ -193,7 +226,8 @@ std::string block_text(CXComment bc) {
 // brief/detail lead paragraphs are handled by the caller; everything else flows
 // through here so the CXComment and raw-scanning passes stay consistent.
 void route_command(model::CommentModel& m, const std::string& name,
-                   const std::string& text) {
+                   const std::string& text,
+                   const std::string& direction = {}) {
   if (name == "brief" || name == "short") {
     if (m.brief.empty()) m.brief = text;
   } else if (name == "return" || name == "returns" || name == "result") {
@@ -201,10 +235,10 @@ void route_command(model::CommentModel& m, const std::string& name,
     m.returns += text;
   } else if (name == "param") {
     auto [n, d] = split_first_token(text);
-    m.params.push_back(model::CommentParam{n, d});
+    m.params.push_back(model::CommentParam{n, d, direction});
   } else if (name == "tparam") {
     auto [n, d] = split_first_token(text);
-    m.tparams.push_back(model::CommentParam{n, d});
+    m.tparams.push_back(model::CommentParam{n, d, direction});
   } else if (name == "retval") {
     auto [n, d] = split_first_token(text);
     m.retvals.push_back(model::CommentRetval{n, d});
@@ -242,6 +276,24 @@ void apply_lead(model::CommentModel& m, const std::vector<std::string>& lead,
   for (std::size_t i = start; i < lead.size(); ++i) m.detail.push_back(lead[i]);
 }
 
+// The direction libclang parsed off a `\param`, or "" when the comment did not
+// write one. libclang reports In for an unannotated parameter, so the explicit
+// flag is what separates a documented direction from that default.
+std::string explicit_direction(CXComment param_command) {
+  if (clang_ParamCommandComment_isDirectionExplicit(param_command) == 0) {
+    return {};
+  }
+  switch (clang_ParamCommandComment_getDirection(param_command)) {
+    case CXCommentParamPassDirection_In:
+      return "in";
+    case CXCommentParamPassDirection_Out:
+      return "out";
+    case CXCommentParamPassDirection_InOut:
+      return "in,out";
+  }
+  return {};
+}
+
 model::CommentModel parse_parsed_comment(CXComment full) {
   model::CommentModel m;
   std::vector<std::string> lead;
@@ -265,12 +317,16 @@ model::CommentModel parse_parsed_comment(CXComment full) {
       }
       case CXComment_ParamCommand: {
         std::string name = to_string(clang_ParamCommandComment_getParamName(child));
-        m.params.push_back(model::CommentParam{name, text_of(clang_BlockCommandComment_getParagraph(child))});
+        m.params.push_back(model::CommentParam{
+            name, text_of(clang_BlockCommandComment_getParagraph(child)),
+            explicit_direction(child)});
         break;
       }
       case CXComment_TParamCommand: {
         std::string name = to_string(clang_TParamCommandComment_getParamName(child));
-        m.tparams.push_back(model::CommentParam{name, text_of(clang_BlockCommandComment_getParagraph(child))});
+        // No direction: Doxygen defines the attribute on `\param` only.
+        m.tparams.push_back(model::CommentParam{
+            name, text_of(clang_BlockCommandComment_getParagraph(child)), {}});
         break;
       }
       case CXComment_VerbatimBlockCommand:
@@ -341,6 +397,7 @@ model::CommentModel parse_raw(const std::string& raw) {
   bool explicit_brief = false;
 
   std::string cmd;          // active command (empty => lead text)
+  std::string dir;          // direction attribute of the active command
   std::string buf;          // accumulated text for the active section
   bool have_lead_para = false;
 
@@ -361,9 +418,10 @@ model::CommentModel parse_raw(const std::string& raw) {
       if (!text.empty()) lead.push_back(text);
     } else {
       if (cmd == "brief" || cmd == "short") explicit_brief = true;
-      route_command(m, cmd, text);
+      route_command(m, cmd, text, dir);
     }
     cmd.clear();
+    dir.clear();
   };
 
   for (const std::string& source_line : strip_markers(raw)) {
@@ -379,11 +437,14 @@ model::CommentModel parse_raw(const std::string& raw) {
       if (is_command) {
         flush();
         std::size_t e = line.find_first_of(" \t", s + 1);
-        cmd = lower(line.substr(s + 1, (e == std::string::npos ? line.size() : e) - s - 1));
+        std::tie(cmd, dir) = split_direction(
+            lower(line.substr(s + 1,
+                              (e == std::string::npos ? line.size() : e) - s - 1)));
         std::string rest = e == std::string::npos ? std::string{} : line.substr(e + 1);
         if (takes_nothing(cmd)) {
           route_command(m, cmd, "");
           cmd.clear();
+          dir.clear();
           line = rest;
           // Guarded on a non-blank remainder so a marker alone on its line
           // cannot loop, nor be mistaken for a paragraph break.

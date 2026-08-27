@@ -21,6 +21,14 @@ A `CommentModel` is a plain dataclass of structured fields the templates render:
 | `see`, `since`, `deprecated`, `note`, `warning`, `pre`, `post` | `list[str]` | the matching commands |
 | `custom` | `dict[str, list[str]]` | **any unrecognized command**, keyed by its name |
 
+A `CommentParam` carries `name`, `description` and `direction`. `direction` is
+Doxygen's parameter-passing attribute with the brackets removed — `"in"`,
+`"out"`, `"in,out"`, or `""` when the comment did not spell one out. In the
+persisted `comment_fields` projection it is prefixed onto the field's `arg` in
+the form Doxygen itself writes (`[out] result`), since that table has a single
+slot for a field argument; {py:func}`~clangquill.comments.model_from_fields`
+splits it back off.
+
 The `custom` bucket is the graceful-degradation seam: a command the parser does
 not recognize is never dropped — it lands in `custom["<name>"]` so a template can
 still render it.

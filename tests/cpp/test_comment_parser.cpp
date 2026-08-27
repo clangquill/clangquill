@@ -264,6 +264,35 @@ TEST_CASE("a blank line ends a paragraph command", "[comments]") {
   CHECK(closing);
 }
 
+TEST_CASE("a param direction survives both parse paths", "[comments]") {
+  // `comment_fields` carries the direction in the arg column, in the bracketed
+  // form Doxygen writes it. The raw path used to take `param[out]` as the whole
+  // command name, so the entry never reached `params` at all; the parsed path
+  // dropped the direction silently.
+  auto check = [](const std::vector<Field>& fs) {
+    REQUIRE(field(fs, "param", "[out] result") != nullptr);
+    CHECK(field(fs, "param", "[out] result")->value ==
+          "where the answer is written");
+    CHECK(field(fs, "param", "[in] value") != nullptr);
+    CHECK(field(fs, "param", "[in,out] scratch") != nullptr);
+    // An undirected parameter is spelled exactly as before.
+    const Field* plain = field(fs, "param", "plain");
+    REQUIRE(plain != nullptr);
+    CHECK(plain->value == "a parameter with no direction attribute");
+  };
+
+  auto parsed = parse_fixture("doxygen.hpp");
+  const auto* fill = find(parsed, "doc::fill");
+  REQUIRE(fill != nullptr);
+  check(fields_of(parsed, fill->usr));
+
+  // `\ingroup` forces the raw path for this one.
+  auto raw = parse_fixture("structural.hpp");
+  const auto* directed = find(raw, "directed_helper");
+  REQUIRE(directed != nullptr);
+  check(fields_of(raw, directed->usr));
+}
+
 TEST_CASE("doxygen parser covers the common commands", "[comments]") {
   auto m = parse_fixture("doxygen.hpp");
   const auto* divide = find(m, "doc::divide");

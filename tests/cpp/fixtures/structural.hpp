@@ -125,3 +125,13 @@ class Chained {
   * A closing paragraph documents the function, not the parameter above it.
   */
 int paragraph_helper(int a);
+
+/** \ingroup shapes
+  * \brief Directions survive the raw path.
+  *
+  * \param[out] result where the answer is written
+  * \param[in] value the input value
+  * \param[in,out] scratch reused working storage
+  * \param plain a parameter with no direction attribute
+  */
+int directed_helper(int* result, int value, int* scratch, int plain);

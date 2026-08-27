@@ -8,6 +8,7 @@ from clangquill import comments
 from clangquill.comments import (
     OVERRIDE_ENV,
     CommentModel,
+    CommentParam,
     available_parsers,
     doxygen_parse,
     get_parser,
@@ -112,6 +113,52 @@ def test_doxygen_parse_blank_line_ends_a_paragraph_command() -> None:
         "This paragraph is the detailed description.",
         "A closing paragraph documents the function.",
     ]
+
+
+DIRECTED = """
+/**
+ * @brief Fills a buffer.
+ * @param[out] result where the answer is written
+ * @param[in] value the input value
+ * @param[in,out] scratch reused working storage
+ * @param plain no direction attribute
+ * @tparam[in] T symmetric with param
+ * @unknown[bracket] keeps its full spelling
+ */
+"""
+
+
+def test_doxygen_parse_reads_param_directions() -> None:
+    model = doxygen_parse(DIRECTED)
+    assert [(p.name, p.direction) for p in model.params] == [
+        ("result", "out"),
+        ("value", "in"),
+        ("scratch", "in,out"),
+        ("plain", ""),
+    ]
+    assert model.params[0].description == "where the answer is written"
+    assert [(p.name, p.direction) for p in model.tparams] == [("T", "in")]
+    # A bracket suffix that is not a direction stays part of the command name.
+    assert model.custom == {"unknown[bracket]": ["keeps its full spelling"]}
+
+
+def test_model_from_fields_splits_the_direction_off_the_arg() -> None:
+    # The C++ projection has one slot for a field argument, so a directed
+    # parameter arrives as "[out] result" and is split back apart here.
+    model = model_from_fields(
+        [
+            ("param", "[out] result", "the answer"),
+            ("param", "[in,out] scratch", "working storage"),
+            ("param", "plain", "no direction"),
+            ("tparam", "[in] T", "a type"),
+        ],
+    )
+    assert [(p.name, p.direction, p.description) for p in model.params] == [
+        ("result", "out", "the answer"),
+        ("scratch", "in,out", "working storage"),
+        ("plain", "", "no direction"),
+    ]
+    assert model.tparams == [CommentParam("T", "a type", "in")]
 
 
 def test_model_from_fields_round_trips() -> None:

@@ -33,10 +33,17 @@ OVERRIDE_ENV = "CLANGQUILL_COMMENT_PARSER"
 
 @dataclass(frozen=True)
 class CommentParam:
-    """A documented parameter or template parameter (``@param`` / ``@tparam``)."""
+    """A documented parameter or template parameter (``@param`` / ``@tparam``).
+
+    ``direction`` is Doxygen's parameter-passing attribute without its brackets
+    -- ``"in"``, ``"out"``, ``"in,out"``, or ``""`` when the comment did not
+    spell one out. Doxygen writes it on the command (``@param[out] result``),
+    so it describes the entry rather than being part of its description.
+    """
 
     name: str
     description: str
+    direction: str = ""
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,20 @@ CommentParser = Callable[[str], CommentModel]
 
 # --- Building a model from the persisted comment_fields projection -----------
 
+# The bracketed direction the C++ ``to_comment_fields`` prefixes onto a directed
+# parameter's ``arg`` (``comment_fields`` has one slot for a field argument).
+_DIRECTION_RE = re.compile(r"^\[\s*(in|out|in,\s*out|inout)\s*\]\s*(.*)$", re.IGNORECASE)
+
+
+def _split_direction(arg: str) -> tuple[str, str]:
+    """Split ``"[out] result"`` into ``("result", "out")``; else ``(arg, "")``."""
+    match = _DIRECTION_RE.match(arg)
+    if match is None:
+        return arg, ""
+    direction = match.group(1).lower().replace(" ", "")
+    return match.group(2), "in,out" if direction == "inout" else direction
+
+
 # Field names whose value is a single string accumulated into a list.
 _LIST_FIELDS = {
     "detail": "detail",
@@ -109,9 +130,11 @@ def model_from_fields(rows: Iterable[tuple[str, str, str]]) -> CommentModel:
         elif name == "returns":
             model.returns = value
         elif name == "param":
-            model.params.append(CommentParam(arg, value))
+            pname, direction = _split_direction(arg)
+            model.params.append(CommentParam(pname, value, direction))
         elif name == "tparam":
-            model.tparams.append(CommentParam(arg, value))
+            pname, direction = _split_direction(arg)
+            model.tparams.append(CommentParam(pname, value, direction))
         elif name == "retval":
             model.retvals.append(CommentRetval(arg, value))
         elif name == "throws":
@@ -126,7 +149,10 @@ def model_from_fields(rows: Iterable[tuple[str, str, str]]) -> CommentModel:
 # --- Default Doxygen parser (pure Python) ------------------------------------
 
 _MARKER_RE = re.compile(r"^\s*(/\*\*<|/\*!<|/\*\*|/\*!|/\*|///<|///|//!<|//!|//)")
-_COMMAND_RE = re.compile(r"^[@\\](\w+)\s*(.*)$")
+# A command word, optionally carrying Doxygen's bracketed direction attribute
+# (``@param[in,out] buf ...``). Without the attribute group the brackets would
+# be read as the parameter's name and the real name as its description.
+_COMMAND_RE = re.compile(r"^[@\\](\w+)(\[[^\]\s]*\])?\s*(.*)$")
 
 # Command aliases collapsed onto a canonical model field/handler.
 _RETURN_CMDS = {"return", "returns", "result"}
@@ -155,6 +181,9 @@ _TUPLE_APPEND: dict[str, tuple[str, type]] = {
     "exception": ("throws", CommentThrow),
 }
 
+# The subset of the above that may carry a direction attribute.
+_PARAM_CMDS = frozenset({"param", "tparam"})
+
 
 def _strip_markers(raw: str) -> list[str]:
     """Strip comment markers, returning the trimmed documentation lines."""
@@ -173,13 +202,17 @@ def _strip_markers(raw: str) -> list[str]:
     return out
 
 
-def _route(model: CommentModel, name: str, text: str) -> None:
+def _route(model: CommentModel, name: str, text: str, direction: str = "") -> None:
     """Route one command into the model (mirrors the C++ ``route_command``)."""
     if name in _BRIEF_CMDS:
         if not model.brief:
             model.brief = text
     elif name in _RETURN_CMDS:
         model.returns = f"{model.returns} {text}".strip()
+    elif name in _PARAM_CMDS:
+        attr, cls = _TUPLE_APPEND[name]
+        pname, description = _split_first(text)
+        getattr(model, attr).append(cls(pname, description, direction))
     elif name in _TUPLE_APPEND:
         attr, cls = _TUPLE_APPEND[name]
         getattr(model, attr).append(cls(*_split_first(text)))
@@ -187,6 +220,24 @@ def _route(model: CommentModel, name: str, text: str) -> None:
         getattr(model, _LIST_APPEND[name]).append(text)
     else:
         model.custom.setdefault(name, []).append(text)
+
+
+def _split_command_direction(name: str, attr: str | None) -> tuple[str, str]:
+    """Split a command word into its name and its direction attribute.
+
+    Only ``@param``/``@tparam`` carry one, and only a direction Doxygen defines
+    is taken; any other bracket suffix stays glued to the command name, so an
+    unknown ``@foo[bar]`` still reaches ``custom`` under its full spelling.
+    """
+    if attr is None:
+        return name, ""
+    text = attr[1:-1].lower()
+    if name in _PARAM_CMDS:
+        if text in {"in", "out"}:
+            return name, text
+        if text in {"inout", "in,out"}:
+            return name, "in,out"
+    return name + attr, ""
 
 
 def _split_first(text: str) -> tuple[str, str]:
@@ -209,11 +260,12 @@ def doxygen_parse(raw: str) -> CommentModel:
     lead: list[str] = []
     explicit_brief = False
     cmd: str | None = None
+    direction = ""
     buf: list[str] = []
     have_lead_para = False
 
     def flush() -> None:
-        nonlocal cmd, explicit_brief, have_lead_para
+        nonlocal cmd, direction, explicit_brief, have_lead_para
         text = " ".join(buf).strip()
         buf.clear()
         if cmd is None:
@@ -223,15 +275,16 @@ def doxygen_parse(raw: str) -> CommentModel:
         else:
             if cmd in _BRIEF_CMDS:
                 explicit_brief = True
-            _route(model, cmd, text)
+            _route(model, cmd, text, direction)
         cmd = None
+        direction = ""
 
     for line in _strip_markers(raw):
         match = _COMMAND_RE.match(line)
         if match:
             flush()
-            cmd = match.group(1).lower()
-            buf.append(match.group(2))
+            cmd, direction = _split_command_direction(match.group(1).lower(), match.group(2))
+            buf.append(match.group(3))
         elif not line:
             # A blank line ends whatever section is open: a Doxygen paragraph
             # command runs only to the next blank line, so the paragraphs below
