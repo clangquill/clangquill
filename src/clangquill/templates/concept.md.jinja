@@ -1,7 +1,7 @@
 {% import "partials/signature.md.jinja" as sig %}
 {% set comment = gen.comment(symbol) %}
 {% set fields = field_list(comment) %}
-{{ "#" * level }} {{ gen.label(symbol) }} `{{ symbol.qualified_name }}`
+{{ level | heading }} {{ gen.label(symbol) }} `{{ symbol.qualified_name }}`
 
 ```{{ "{" ~ gen.directive(symbol) ~ "}" }} {{ sig.directive_argument(symbol) }}
 

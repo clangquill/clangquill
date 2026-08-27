@@ -114,6 +114,32 @@ def test_build_caches_db_when_cache_dir_set(project: Path) -> None:
     assert result.db_path.parent == (project / ".cache").resolve()
 
 
+def test_index_cache_key_includes_top_level(fixture_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # render_index filters entries on `top_level` (a page set identical in
+    # stems/labels but differing only in top_level must produce a different
+    # toctree), so the memoised index key has to fold top_level in too —
+    # otherwise the second render would replay the first's stale index text.
+    from clangquill.generator import Generator, PagePlan  # noqa: PLC0415
+
+    config = Config(input=[], output_dir="api")
+
+    with Store.open(fixture_db) as store, BuildCache.open(tmp_path / ".cache") as cache:
+        generator = Generator(store)
+
+        top_level_plan = PagePlan("geo", "geo", lambda: "geo text", top_level=True)
+        monkeypatch.setattr(generator, "plan_pages", lambda **_kw: [top_level_plan])
+        rendered = pipeline._rendered_files(generator, config, cache=cache, render_fingerprint="rf")  # noqa: SLF001
+        index_top_level = dict(rendered)["index.md"]
+
+        nested_plan = PagePlan("geo", "geo", lambda: "geo text", top_level=False)
+        monkeypatch.setattr(generator, "plan_pages", lambda **_kw: [nested_plan])
+        rendered = pipeline._rendered_files(generator, config, cache=cache, render_fingerprint="rf")  # noqa: SLF001
+        index_nested = dict(rendered)["index.md"]
+
+    assert "geo" in index_top_level
+    assert "geo" not in index_nested
+
+
 def _mtimes(api: Path) -> dict[str, float]:
     return {p.name: p.stat().st_mtime_ns for p in api.glob("*.md")}
 

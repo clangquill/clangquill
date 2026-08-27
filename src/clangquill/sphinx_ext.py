@@ -24,7 +24,7 @@ from sphinx.util import logging
 
 from clangquill import __version__, _core
 from clangquill.config import CONFIG_FIELDS, CONFIG_PREFIX, Config, ConfigError
-from clangquill.pipeline import COMPILE_COMMANDS_NAME, build, warnings_or_worse
+from clangquill.pipeline import COMPILE_COMMANDS_NAME, build, prune_stale, warnings_or_worse
 
 if TYPE_CHECKING:
     from sphinx.application import Sphinx
@@ -42,9 +42,21 @@ def _warn_unknown_config(app: Sphinx, config: SphinxConfig) -> None:  # noqa: AR
     mapping can be passed), which means a conf.py typo like ``clangquill_inputs``
     would otherwise vanish silently — Sphinx itself accepts any variable in
     conf.py. Suppressible via ``suppress_warnings = ["clangquill.config"]``.
+
+    The full conf.py namespace (including names Sphinx never registered as a
+    config value) has no supported public accessor, so this reaches into the
+    private ``_raw_config`` attribute. That attribute is looked up defensively:
+    if a future Sphinx version renames or removes it, this check is silently
+    skipped (a real config error still fails the build later, just without
+    this early, friendlier warning) rather than crashing ``config-inited`` and
+    taking the whole build down with it.
     """
+    raw_config = getattr(config, "_raw_config", None)
+    if raw_config is None:
+        logger.debug("clangquill: Config._raw_config is unavailable; skipping unknown-config-value check")
+        return
     known = {name for name, _ in CONFIG_FIELDS}
-    for name in config._raw_config:  # noqa: SLF001 - the conf.py namespace has no public accessor
+    for name in raw_config:
         if name.startswith(CONFIG_PREFIX) and name not in known:
             logger.warning(
                 "unknown config value %r — no clangquill option has that name (see clangquill.config.Config)",
@@ -183,13 +195,22 @@ def _enforce_strict(result: BuildResult) -> None:
 
 
 def _write_placeholder(app: Sphinx, config: Config) -> None:
-    """Write a stub root document so a toctree referencing the output resolves."""
+    """Write a stub root document so a toctree referencing the output resolves.
+
+    Only the root document is written, so any real pages a previous (libclang-
+    enabled) run left behind would otherwise linger with no toctree entry
+    pointing at them, producing Sphinx "document isn't included in any
+    toctree" warnings. :func:`prune_stale` removes them the same way a normal
+    build prunes pages whose symbol vanished.
+    """
     out = Path(app.srcdir) / config.output_dir
     out.mkdir(parents=True, exist_ok=True)
-    (out / f"{config.root_document}.md").write_text(
+    root_name = f"{config.root_document}.md"
+    (out / root_name).write_text(
         "# API Reference\n\nAPI generation was skipped (libclang unavailable).\n",
         encoding="utf-8",
     )
+    prune_stale(out, [root_name])
 
 
 def _cleanup(app: Sphinx, exception: Exception | None) -> None:  # noqa: ARG001

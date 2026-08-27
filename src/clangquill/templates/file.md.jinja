@@ -1,4 +1,4 @@
-{{ "#" * level }} File `{{ file.path | relpath }}`
+{{ level | heading }} File `{{ file.path | relpath }}`
 {% for symbol in symbols %}
 
 {{ gen.render_symbol(symbol, level=level + 1) }}

@@ -1,4 +1,4 @@
-{{ "#" * level }} Namespace `{{ name }}`
+{{ level | heading }} Namespace `{{ name }}`
 
 {{ render_comment(comment) }}
 {% if children %}
