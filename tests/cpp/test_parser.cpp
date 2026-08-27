@@ -605,15 +605,17 @@ TEST_CASE("headers with different compile-database commands are not batched toge
   // Each header is listed with its own -D, so the two commands genuinely differ
   // rather than both being interpolated from one entry.
   {
+    // generic_string() throughout: JSON has no \U escape, so a native Windows
+    // path would make the database unparseable ("Unrecognized escape code").
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string() << "\", \"file\": \""
-       << (dir / "alpha.hpp").string()
+    cc << "[{\"directory\": \"" << dir.generic_string() << "\", \"file\": \""
+       << (dir / "alpha.hpp").generic_string()
        << "\", \"arguments\": [\"c++\", \"-std=c++20\", \"-DCQ_ALPHA\", \"-c\", \""
-       << (dir / "alpha.hpp").string() << "\"]},"
-       << "{\"directory\": \"" << dir.string() << "\", \"file\": \""
-       << (dir / "beta.hpp").string()
+       << (dir / "alpha.hpp").generic_string() << "\"]},"
+       << "{\"directory\": \"" << dir.generic_string() << "\", \"file\": \""
+       << (dir / "beta.hpp").generic_string()
        << "\", \"arguments\": [\"c++\", \"-std=c++20\", \"-DCQ_BETA\", \"-c\", \""
-       << (dir / "beta.hpp").string() << "\"]}]";
+       << (dir / "beta.hpp").generic_string() << "\"]}]";
   }
 
   parser::ParseOptions opts;
@@ -649,11 +651,12 @@ TEST_CASE("every batched member that borrowed its flags is reported", "[parser]"
   std::ofstream(dir / "two.hpp") << "/// Two.\ninline int two_value() { return 2; }\n";
   std::ofstream(dir / "target.cpp") << "int target();\n";
   {
+    // generic_string(): see the sibling batching test above.
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string()
-       << "\", \"file\": \"" << (dir / "target.cpp").string()
+    cc << "[{\"directory\": \"" << dir.generic_string()
+       << "\", \"file\": \"" << (dir / "target.cpp").generic_string()
        << "\", \"arguments\": [\"c++\", \"-std=c++20\", \"-c\", \""
-       << (dir / "target.cpp").string() << "\"]}]";
+       << (dir / "target.cpp").generic_string() << "\"]}]";
   }
 
   parser::ParseOptions opts;
