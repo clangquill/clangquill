@@ -218,6 +218,47 @@ def test_invalid_config_value_raises_a_clean_extension_error(tmp_path: Path) -> 
         )
 
 
+def test_unreadable_ir_raises_a_clean_extension_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A StoreVersionError the build could not recover from is reported, not dumped."""
+    pytest.importorskip("sphinx")
+    pytest.importorskip("myst_parser")
+    from sphinx.application import Sphinx  # noqa: PLC0415
+    from sphinx.errors import ExtensionError  # noqa: PLC0415
+
+    from clangquill import sphinx_ext  # noqa: PLC0415
+    from clangquill.store import StoreVersionError  # noqa: PLC0415
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "geo.hpp").write_text(HEADER)
+    (src / "conf.py").write_text(
+        'extensions = ["clangquill.sphinx_ext"]\nmaster_doc = "index"\n'
+        'clangquill_input = ["geo.hpp"]\nclangquill_compile_commands = "."\n',
+    )
+    (src / "index.md").write_text(ROOT_INDEX)
+    _write_compile_commands(src, ["geo.hpp"])
+
+    def unreadable(*_args: object, **_kwargs: object) -> object:
+        msg = "artifact.sqlite is not a clangquill IR database"
+        raise StoreVersionError(msg)
+
+    monkeypatch.setattr(sphinx_ext, "build", unreadable)
+
+    with pytest.raises(ExtensionError, match="not a clangquill IR database"):
+        Sphinx(
+            str(src),
+            str(src),
+            str(tmp_path / "out"),
+            str(tmp_path / "doctree"),
+            "html",
+            status=None,
+            warning=(tmp_path / "warnings.txt").open("w", encoding="utf-8"),
+        )
+
+
 def test_missing_include_dir_warns(tmp_path: Path) -> None:
     """A ``clangquill_include_dirs`` entry that doesn't exist must warn, not fail."""
     pytest.importorskip("sphinx")

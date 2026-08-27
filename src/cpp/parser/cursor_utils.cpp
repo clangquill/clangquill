@@ -109,6 +109,22 @@ void append_token(std::string& buf, const std::string& tok) {
   buf += tok;
 }
 
+// How many template-argument lists @p tok closes, given @p depth already open.
+//
+// clang_tokenize is a raw lex, so the close of `A<B<C>>` arrives as a single
+// `>>` token (and `A<B<C<D>>>` as `>>` followed by `>`), matching neither "<"
+// nor ">". A `>>` closes two lists only when two are open: with a single list
+// open the same spelling is the shift operator of an expression (an NTTP
+// default such as `1 >> 4`), whose second `>` would have to close a list that
+// was never opened. `<<` needs no mirror rule -- no declaration opens two
+// argument lists with one token, so it is always a shift and stays an ordinary
+// token.
+int angle_closes(const std::string& tok, int depth) {
+  if (tok == ">") return 1;
+  if (tok == ">>" && depth >= 2) return 2;
+  return 0;
+}
+
 }  // namespace
 
 std::string macro_signature(CXCursor c) {
@@ -177,13 +193,17 @@ std::string template_head(CXCursor owner,
       ++depth;
       append_token(cur, t);
       if (in_default) append_token(cur_default, t);
-    } else if (t == ">") {
-      if (--depth == 0) {
-        push_seg();
-        done = true;
-      } else {
-        append_token(cur, t);
-        if (in_default) append_token(cur_default, t);
+    } else if (int closes = angle_closes(t, depth); closes > 0) {
+      for (int i = 0; i < closes; ++i) {
+        if (--depth == 0) {
+          push_seg();
+          done = true;
+          break;
+        }
+        // A `>>` that closes a nested list and then continues is re-emitted as
+        // the two `>` it stands for; token text carries no spacing to preserve.
+        append_token(cur, ">");
+        if (in_default) append_token(cur_default, ">");
       }
     } else if (t == "," && depth == 1) {
       push_seg();
@@ -196,9 +216,17 @@ std::string template_head(CXCursor owner,
     }
   }
 
-  if (!started || segs.empty() || (segs.size() == 1 && segs.front().empty())) {
+  if (!started || segs.empty()) {
     if (defaults_out != nullptr) defaults_out->clear();
     return "";
+  }
+  // `template <>`: the head of a full explicit specialization. Empty is not the
+  // same as absent -- it is what tells the specialization apart from the
+  // primary template, and from an explicit instantiation, which writes no head
+  // of its own (`template struct Traits<int>;` leaves `segs` empty above).
+  if (segs.size() == 1 && segs.front().empty()) {
+    if (defaults_out != nullptr) defaults_out->clear();
+    return "template<>";
   }
   if (defaults_out != nullptr) *defaults_out = defaults;
 
@@ -211,16 +239,38 @@ std::string template_head(CXCursor owner,
   return head;
 }
 
+SpecializationForm specialization_form(CXCursor c) {
+  if (clang_Cursor_isNull(clang_getSpecializedCursorTemplate(c)) != 0) {
+    return SpecializationForm::None;
+  }
+  // Both forms report a specialized template, and libclang reports both by the
+  // tag's own cursor kind. Only an explicit specialization writes a
+  // `template<...>` head of its own -- empty for a full one, the parameters its
+  // argument list uses for a partial one -- so the head is what separates them.
+  return template_head(c, nullptr).empty() ? SpecializationForm::Instantiation
+                                           : SpecializationForm::Explicit;
+}
+
 std::string param_default(CXCursor param) {
   std::vector<std::string> toks = cursor_tokens(param);
   std::string out;
   bool seen = false;
-  int depth = 0;
+  int depth = 0;   // `(`, `[` and `{` groups
+  int angles = 0;  // template-argument lists, counted apart from the above so
+                   // the `>>` rule in angle_closes() sees the angle depth only
   for (const std::string& t : toks) {
     if (!seen) {
-      if (t == "=" && depth == 0) seen = true;
-      else if (t == "(" || t == "[" || t == "{" || t == "<") ++depth;
-      else if (t == ")" || t == "]" || t == "}" || t == ">") --depth;
+      if (t == "=" && depth == 0 && angles == 0) {
+        seen = true;
+      } else if (t == "(" || t == "[" || t == "{") {
+        ++depth;
+      } else if (t == ")" || t == "]" || t == "}") {
+        --depth;
+      } else if (t == "<") {
+        ++angles;
+      } else if (int closes = angle_closes(t, angles); closes > 0) {
+        angles -= closes;
+      }
       continue;
     }
     append_token(out, t);
