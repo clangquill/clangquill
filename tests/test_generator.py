@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from clangquill.comments import CommentModel
 from clangquill.generator import Generator
 from clangquill.store import Reference, RefKind, SourceFile, Store, Symbol
 
@@ -135,6 +136,35 @@ def test_emitted_directives_cover_each_kind(gen: Generator, store: Store) -> Non
     rendered = gen.render_symbol(_symbol(store, "geo"), level=1)
     for directive in ("{cpp:class}", "{cpp:function}", "{cpp:member}", "{cpp:enum}", "{cpp:enumerator}"):
         assert directive in rendered
+
+
+def test_enumerator_comment_honours_comment_parser_override(fixture_db: Path) -> None:
+    # Regression for #210: enum.md.jinja used to call store.comment() directly,
+    # bypassing the comment_parser override applied to every other symbol.
+    con = sqlite3.connect(fixture_db)
+    try:
+        con.execute(
+            "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, ?, 'doxygen', '')",
+            ("c:@N@geo@E@Color@Red", "/// Warm."),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    def override(raw_text: str) -> CommentModel:
+        return CommentModel(brief=f"OVERRIDDEN: {raw_text}")
+
+    with Store.open(fixture_db) as store:
+        gen = Generator(store, comment_parser=override)
+        color = _symbol(store, "geo::Color")
+        red = next(e for e in gen.enumerators(color) if e.name == "Red")
+
+        comment = gen.enumerator_comment(red)
+        assert comment is not None
+        assert comment.brief == "OVERRIDDEN: /// Warm."
+
+        rendered = gen.render_symbol(color, level=2)
+        assert "OVERRIDDEN: /// Warm." in rendered
 
 
 def test_undocumented_symbol_is_present_but_marked(gen: Generator, store: Store) -> None:

@@ -64,13 +64,15 @@ always in scope:
 | Name | What it is |
 |------|------------|
 | `gen` | the {py:class}`~clangquill.generator.Generator` (relation/query/presentation helpers) |
-| `store` | the {py:class}`~clangquill.store.Store` for direct IR queries |
 | `SymbolKind`, `RefKind` | the IR enums, for `{% if symbol.kind == SymbolKind.CLASS %}` checks |
 | `xref(target)` | a `{cpp:any}` cross-reference role for a USR, `Symbol`, or `Reference` (degrades to inline code when there is no documented target) |
 | `render_comment(model)` | the prose block (brief, detail, admonitions) of a comment |
 | `field_list(model)` | the Sphinx field list (`:param:`, `:returns:`, …) of a comment |
 
-The most useful `gen` helpers are `gen.comment(symbol)`,
+There is deliberately no raw `store` global: every IR query a template needs
+goes through `gen`, so a `comment_parser` override (or any other generator
+setting) always applies consistently. The most useful `gen` helpers are
+`gen.comment(symbol)`, `gen.enumerator_comment(enumerator)`,
 `gen.children(symbol)`, `gen.bases(symbol)`, `gen.friends(symbol)`,
 `gen.enumerators(symbol)`, `gen.parameters(symbol)`, `gen.directive(symbol)`
 (the `cpp:*`/`c:*` directive name), `gen.label(symbol)` (the heading label),

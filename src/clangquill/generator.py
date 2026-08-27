@@ -430,7 +430,6 @@ class Generator:
         """Expose the helpers/globals templates rely on."""
         g = self.env.globals
         g["gen"] = self
-        g["store"] = self.store
         g["SymbolKind"] = SymbolKind
         g["RefKind"] = RefKind
         g["xref"] = self.xref
@@ -558,6 +557,10 @@ class Generator:
     def comment(self, symbol: Symbol) -> CommentModel | None:
         """Return the structured comment for ``symbol``, or ``None``."""
         return self.store.comment(symbol.usr, parser=self.comment_parser)
+
+    def enumerator_comment(self, enumerator: Enumerator) -> CommentModel | None:
+        """Return the structured comment for ``enumerator``, or ``None``."""
+        return self.store.comment(enumerator.usr, parser=self.comment_parser)
 
     # -- presentation helpers -------------------------------------------------
 
