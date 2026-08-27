@@ -113,25 +113,21 @@ jobs:
           python-version: '3.13'
       - name: Install nanobind (build-time dependency)
         run: python -m pip install nanobind
-          # The runner image ships LLVM, but only its bin/ is guaranteed; the
-          # build needs clang-c/Index.h and libclang.lib. Use them when they are
-          # there and fall back to the same pinned release the wheels bundle, so
-          # the job neither depends on image contents nor pays for a multi-GB
-          # download on every run.
-      - name: Locate libclang
+          # The same libclang the Windows wheels bundle, not whatever LLVM the
+          # runner image happens to ship. This job exists to catch what MSVC
+          # does differently, and an uncontrolled second variable — a libclang
+          # whose comment parser attaches a command's trailing prose
+          # differently, say — turns a divergence into a guess. verify-extraction
+          # pins its toolchain for the same reason. The image's own LLVM was
+          # tried first and is what made that concrete: it fails a comment test
+          # that passes here against both libclang 18 and 22.
+      - name: Fetch the pinned libclang
         shell: pwsh
         run: |
-          $root = "C:\Program Files\LLVM"
-          $haveHeaders = Test-Path "$root\include\clang-c\Index.h"
-          $haveImportLib = Test-Path "$root\lib\libclang.lib"
-          if (-not ($haveHeaders -and $haveImportLib)) {
-            Write-Host "preinstalled LLVM has no libclang SDK; fetching the pinned release"
-            & .\tools\ci\fetch-libclang.ps1 -Prefix C:\libclang
-            $root = "C:\libclang"
-          }
-          Write-Host "using libclang from $root"
-          "LIBCLANG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "$root\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          Write-Host "pinned LLVM: $((Get-Content tools\ci\llvm-version.txt -Raw).Trim())"
+          & .\tools\ci\fetch-libclang.ps1 -Prefix C:\libclang
+          "LIBCLANG_ROOT=C:\libclang" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "C:\libclang\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
           # The Visual Studio generator is the one that needs no vcvars dance;
           # it is multi-config, hence --config on the build and -C on ctest.
       - name: Configure
