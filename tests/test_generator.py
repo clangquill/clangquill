@@ -579,6 +579,74 @@ def test_related_block_absent_without_relates(gen: Generator, store: Store) -> N
     assert "**Related functions**" not in gen.render_symbol(_symbol(store, "geo::Shape"))
 
 
+def test_related_block_keeps_documented_cross_file_relates_when_hiding_undocumented(
+    multifile_db: Path,
+    tmp_path: Path,
+) -> None:
+    # A file-scoped page still renders a class's documented related functions
+    # even when those functions are declared in another file.
+    con = sqlite3.connect(multifile_db)
+    con.execute(
+        "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, display_name, "
+        "signature, type_repr, access, is_definition, is_documented, content_hash, file_id, line) "
+        "VALUES(?, 'c:@N@app', 5, ?, ?, ?, ?, ?, 0, 1, ?, ?, 2, 0)",
+        (
+            "c:@N@app@F@link_to_alpha",
+            "link_to_alpha",
+            "app::link_to_alpha",
+            "app::link_to_alpha",
+            "void link_to_alpha()",
+            "void ()",
+            1,
+            "hash-link-to-alpha",
+        ),
+    )
+    con.execute(
+        "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+        ("c:@N@app@F@link_to_alpha",),
+    )
+    con.executemany(
+        "INSERT INTO comment_fields(symbol_usr, name, arg, value, ordinal) VALUES(?, ?, '', ?, ?)",
+        [
+            ("c:@N@app@F@link_to_alpha", "brief", "Docs for link_to_alpha.", 0),
+            ("c:@N@app@F@link_to_alpha", "relates", "Alpha", 1),
+        ],
+    )
+    con.execute(
+        "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, display_name, "
+        "signature, type_repr, access, is_definition, is_documented, content_hash, file_id, line) "
+        "VALUES(?, 'c:@N@app', 5, ?, ?, ?, ?, ?, 0, 1, ?, ?, 2, 0)",
+        (
+            "c:@N@app@F@hidden_link",
+            "hidden_link",
+            "app::hidden_link",
+            "app::hidden_link",
+            "void hidden_link()",
+            "void ()",
+            0,
+            "hash-hidden-link",
+        ),
+    )
+    con.execute(
+        "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+        ("c:@N@app@F@hidden_link",),
+    )
+    con.execute(
+        "INSERT INTO comment_fields(symbol_usr, name, arg, value, ordinal) VALUES(?, 'relates', '', 'Alpha', 0)",
+        ("c:@N@app@F@hidden_link",),
+    )
+    con.commit()
+    con.close()
+
+    with Store.open(multifile_db) as store:
+        pages = Generator(store, include_undocumented=False).generate(tmp_path / "api", group_by="file")
+
+    assert pages == ["alpha_hpp", "beta_hpp"]
+    alpha = (tmp_path / "api" / "alpha_hpp.md").read_text()
+    assert "{cpp:any}`app::link_to_alpha`" in alpha
+    assert "{cpp:any}`app::hidden_link`" not in alpha
+
+
 def test_related_functions_bust_the_class_page_fingerprint(fixture_db: Path) -> None:
     # The class page reads another symbol's comment, which is the one incoming
     # edge in the dependency walk; editing the related function has to change
