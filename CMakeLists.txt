@@ -18,7 +18,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # checks for the `Python::SABIModule` target and silently falls back to a
 # regular per-version build (cp3<X>-cp3<X> tag, one wheel per interpreter)
 # if that target isn't found -- it does not error, so this is easy to miss.
-find_package(Python 3.11 REQUIRED
+#
+# The floor must track `requires-python` in pyproject.toml: nanobind's STABLE_ABI
+# is likewise a silent fallback below Python 3.12, so a lower floor here would
+# let an old interpreter produce a version-tagged wheel the package then refuses
+# to install.
+find_package(Python 3.13 REQUIRED
              COMPONENTS Interpreter Development.Module Development.SABIModule)
 
 execute_process(

@@ -173,8 +173,10 @@ uv run python -c "from clangquill import _core; print(_core.have_libclang())"
 ```
 
 The core optionally links **libclang**; when `libclang-dev` (or an LLVM prefix
-via `LibClang_ROOT`) is available at build time the extraction backend is
-enabled. Pass `-DCLANGQUILL_WITH_LIBCLANG=ON` to require it.
+via `LibClang_ROOT`) of LLVM 17 or newer is available at build time the
+extraction backend is enabled. Pass `-DCLANGQUILL_WITH_LIBCLANG=ON` to require
+it — the configure then fails instead of silently falling back to the stub
+backend when no libclang is found or the one found is too old.
 
 ## Documentation
 
