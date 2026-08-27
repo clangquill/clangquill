@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import sqlite3
 from pathlib import Path
@@ -795,27 +796,12 @@ def test_no_group_pages_when_db_has_no_groups(gen: Generator, tmp_path: Path) ->
 def test_rendered_myst_builds_as_cpp_domain_objects(gen: Generator, tmp_path: Path) -> None:
     sphinx = pytest.importorskip("sphinx")
     pytest.importorskip("myst_parser")
-    from sphinx.application import Sphinx  # noqa: PLC0415
 
     src = tmp_path / "src"
     gen.generate(src)
-    (src / "conf.py").write_text('project = "fix"\nextensions = ["myst_parser"]\nmaster_doc = "index"\n')
+    _build_strict(src, tmp_path, "fix")
 
-    out = tmp_path / "out"
-    warnings = tmp_path / "warnings.txt"
-    app = Sphinx(
-        str(src),
-        str(src),
-        str(out),
-        str(tmp_path / "doctree"),
-        "html",
-        warningiserror=True,
-        status=None,
-        warning=warnings.open("w"),
-    )
-    app.build()
-
-    html = (out / "geo.html").read_text()
+    html = (tmp_path / "out" / "geo.html").read_text()
     # The C++ domain produced mangled object ids and the {cpp:any} role linked to one.
     assert "_CPPv4N3geo6CircleE" in html
     assert 'href="#_CPPv4N3geo6CircleE"' in html
@@ -972,26 +958,89 @@ def test_specialization_pages_build_without_duplicate_or_parse_warnings(
         assert marker not in captured, f"unexpected C++ domain warning ({marker}):\n{captured}"
 
 
-def test_m7_kinds_build_as_domain_objects(m7_gen: Generator, tmp_path: Path) -> None:
-    pytest.importorskip("sphinx")
-    pytest.importorskip("myst_parser")
+def _build_strict(src: Path, build_root: Path, project: str) -> None:
+    """Build ``src`` with Sphinx and fail on any warning the pages caused.
+
+    ``warningiserror=True`` no longer raises in Sphinx 9 — it only sets
+    ``app.statuscode``, which ``app.build()`` does not check — so the warning
+    stream is captured and asserted here instead. Constructing several Sphinx
+    apps in one test process re-registers nodes, directives and roles, and each
+    re-registration logs a warning; that noise is about the process, not about
+    the pages under test, so it is the one thing filtered out.
+    """
     from sphinx.application import Sphinx  # noqa: PLC0415
 
-    src = tmp_path / "src"
-    m7_gen.generate(src)
-    (src / "conf.py").write_text('project = "m7"\nextensions = ["myst_parser"]\nmaster_doc = "index"\n')
-
-    warnings = tmp_path / "warnings.txt"
-    # warningiserror catches dangling cross-references, unknown directives, and
-    # malformed C++/C-domain signatures, so a clean build validates every kind.
+    (src / "conf.py").write_text(f'project = "{project}"\nextensions = ["myst_parser"]\nmaster_doc = "index"\n')
+    warnings = io.StringIO()
     app = Sphinx(
         str(src),
         str(src),
-        str(tmp_path / "out"),
-        str(tmp_path / "doctree"),
+        str(build_root / "out"),
+        str(build_root / "doctree"),
         "html",
         warningiserror=True,
         status=None,
-        warning=warnings.open("w"),
+        warning=warnings,
     )
     app.build()
+    offenders = [
+        line for line in warnings.getvalue().splitlines() if line.strip() and "is already registered" not in line
+    ]
+    assert not offenders, "the build warned:\n" + "\n".join(offenders)
+
+
+@pytest.mark.parametrize("group_by", ["class", "namespace"])
+@pytest.mark.parametrize("fixture", ["gen", "m7_gen"])
+def test_hierarchical_layouts_build_warning_free(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    fixture: str,
+    group_by: str,
+) -> None:
+    # The hierarchical layouts were validated only as generator unit tests over
+    # hand-built fixture databases: their output had never been handed to
+    # Sphinx. They are the modes with the most to get wrong — hub pages whose
+    # {toctree} entries must resolve, per-name function pages, collected
+    # Types/Constants pages (the geo fixture) and macro/group pages (m7) — and
+    # a dangling entry or a mistyped `Circle <geo_Circle>` label is invisible
+    # until a build refuses it.
+    pytest.importorskip("sphinx")
+    pytest.importorskip("myst_parser")
+
+    generator: Generator = request.getfixturevalue(fixture)
+    src = tmp_path / "src"
+    pages = generator.generate(src, group_by=group_by)
+    assert pages
+    _build_strict(src, tmp_path, fixture)
+
+    # Every generated page reached the output, so none was dropped as an orphan
+    # and no toctree entry pointed at a document that does not exist.
+    for stem in pages:
+        assert (tmp_path / "out" / f"{stem}.html").is_file()
+
+    if group_by == "namespace":
+        # A hub links its members instead of inlining them, so no page but the
+        # member's own carries its directive.
+        hubs = [
+            path for path in sorted(src.glob("*.md")) if path.stem != "index" and "```{toctree}" in path.read_text()
+        ]
+        assert hubs, "namespace mode produced no hub page"
+        for hub in hubs:
+            text = hub.read_text()
+            assert "{cpp:class}" not in text
+            assert "{cpp:struct}" not in text
+    if fixture == "gen" and group_by == "namespace":
+        # The two collected pages this mode invents rather than mirrors.
+        assert {"geo_types", "geo_constants"} <= set(pages)
+
+
+def test_m7_kinds_build_as_domain_objects(m7_gen: Generator, tmp_path: Path) -> None:
+    pytest.importorskip("sphinx")
+    pytest.importorskip("myst_parser")
+
+    src = tmp_path / "src"
+    m7_gen.generate(src)
+    # A warning-free build catches dangling cross-references, unknown
+    # directives, and malformed C++/C-domain signatures, so it validates every
+    # kind the fixture declares.
+    _build_strict(src, tmp_path, "m7")

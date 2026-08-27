@@ -591,6 +591,106 @@ def test_incremental_deletes_pages_for_removed_symbols(project: Path) -> None:
     assert "alpha.md" not in result.pages_written
 
 
+HIERARCHICAL_FIXTURE = """
+/// Geometry.
+namespace geo {
+/// A circle.
+struct Circle {
+  /// the area
+  double area() const;
+};
+/// A square.
+struct Square {
+  /// the side length
+  double side;
+};
+/// Scale a value.
+int scale(int f);
+}
+"""
+
+# The same header with Square removed, for the rebuild half of the tests below.
+HIERARCHICAL_FIXTURE_WITHOUT_SQUARE = HIERARCHICAL_FIXTURE.replace(
+    """/// A square.
+struct Square {
+  /// the side length
+  double side;
+};
+""",
+    "",
+)
+
+
+@requires_libclang
+def test_class_mode_pages_records_and_rewrites_the_index_on_removal(project: Path) -> None:
+    # group_by="class" had only ever been driven as a generator unit test over a
+    # hand-built fixture database. Through the pipeline it also owns page-cache
+    # keys, page deletion and index rewriting, all of which are mode-specific:
+    # here the flat root index is the toctree that has to shrink.
+    header = project / "geo.hpp"
+    header.write_text(HIERARCHICAL_FIXTURE)
+    config = Config(input=["geo.hpp"], output_dir="api", group_by="class", cache_dir=".cache")
+    api = project / "api"
+
+    first = build(config, base_dir=project)
+    assert first.pages == ["geo", "geo_Circle", "geo_Square"]
+    # Each record earns a page; the namespace page keeps only its leaf members.
+    assert "{cpp:function} int geo::scale" in (api / "geo.md").read_text()
+    assert "{cpp:struct} geo::Circle" not in (api / "geo.md").read_text()
+    assert (api / "geo_Circle.md").read_text().startswith("# Struct `geo::Circle`")
+    assert "geo_Square" in (api / "index.md").read_text()
+
+    header.write_text(HIERARCHICAL_FIXTURE_WITHOUT_SQUARE)
+    second = build(config, base_dir=project)
+
+    assert second.parsed
+    assert second.pages_deleted == ["geo_Square.md"]
+    assert not (api / "geo_Square.md").exists()
+    # Only the index changes: it lists every page in this mode, so dropping one
+    # rewrites it, while the surviving pages replay from the page cache.
+    assert second.pages_written == ["index.md"]
+    index = (api / "index.md").read_text()
+    assert "geo_Square" not in index
+    assert "geo_Circle" in index
+
+
+@requires_libclang
+def test_namespace_mode_rewrites_the_hub_toctree_on_removal(project: Path) -> None:
+    # The mode the issue calls out: removing a class must delete its page *and*
+    # rewrite the namespace hub whose toctree links it. The root index links
+    # only the hub here, so it is precisely the page that must not change.
+    header = project / "geo.hpp"
+    header.write_text(HIERARCHICAL_FIXTURE)
+    config = Config(input=["geo.hpp"], output_dir="api", group_by="namespace", cache_dir=".cache")
+    api = project / "api"
+
+    first = build(config, base_dir=project)
+    assert set(first.pages) == {"geo", "geo_Circle", "geo_Square", "geo_scale"}
+    hub = (api / "geo.md").read_text()
+    assert "```{toctree}" in hub
+    assert "Square <geo_Square>" in hub
+    # The hub links member bodies rather than inlining them.
+    assert "{cpp:struct}" not in hub
+    assert (api / "index.md").read_text().count("geo") == 1  # the hub, nothing deeper
+
+    before = _mtimes(api)
+    header.write_text(HIERARCHICAL_FIXTURE_WITHOUT_SQUARE)
+    second = build(config, base_dir=project)
+
+    assert second.parsed
+    assert second.pages_deleted == ["geo_Square.md"]
+    assert not (api / "geo_Square.md").exists()
+    # The hub is the only page whose text changed; the root index still points
+    # at the same single namespace, and the sibling pages are untouched.
+    assert second.pages_written == ["geo.md"]
+    hub = (api / "geo.md").read_text()
+    assert "Square <geo_Square>" not in hub
+    assert "Circle <geo_Circle>" in hub
+    after = _mtimes(api)
+    assert after["index.md"] == before["index.md"]
+    assert after["geo_Circle.md"] == before["geo_Circle.md"]
+
+
 def test_parse_fingerprint_tracks_compile_commands_file(tmp_path: Path) -> None:
     # ``compile_commands`` is a directory; the fingerprint must follow the JSON
     # file inside it so edits to the compile DB invalidate the cached parse.
