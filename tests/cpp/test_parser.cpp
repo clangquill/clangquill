@@ -506,6 +506,42 @@ TEST_CASE("a documented forward declaration is still extracted", "[parser]") {
   CHECK_FALSE(handle->is_definition);
 }
 
+TEST_CASE("a documented forward declaration spanning lines is extracted",
+          "[parser]") {
+  // Whether the comment belongs to this declaration is decided by where it
+  // sits, and a declaration begins at its extent -- not at the line its entity
+  // is named on, which a template head or a wrapped declarator puts below the
+  // comment. Measuring from the name line called these comments somebody
+  // else's and dropped both declarations.
+  const std::string dir = CLANGQUILL_FIXTURE_DIR;
+  const std::string header = dir + "/.fwd_multiline.hpp";
+  {
+    std::ofstream out(header);
+    out << "#pragma once\n"
+        << "/// An opaque handle type.\n"
+        << "template <typename T>\n"
+        << "class Holder;\n"
+        << "\n"
+        << "/// An opaque status enum.\n"
+        << "enum class\n"
+        << "    Status : int;\n";
+  }
+
+  parser::ParseOptions opts;
+  auto m = parser::parse_files({header}, opts);
+  std::filesystem::remove(header);
+
+  const auto* holder = find(m, "Holder");
+  REQUIRE(holder != nullptr);
+  CHECK(holder->is_documented);
+  CHECK_FALSE(holder->is_definition);
+
+  const auto* status = find(m, "Status");
+  REQUIRE(status != nullptr);
+  CHECK(status->is_documented);
+  CHECK_FALSE(status->is_definition);
+}
+
 TEST_CASE("umbrella batching attributes dependencies per member exactly",
           "[parser]") {
   // m7.hpp is self-contained while shapes.hpp has no includes: inside one
