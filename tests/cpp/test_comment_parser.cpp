@@ -180,27 +180,14 @@ TEST_CASE("a group command takes its line, not the paragraph below it",
     CHECK(g.id != "documents");
   }
 
-  const Field* brief = field(fields_of(m, fn->usr), "brief");
+  // fields_of returns by value: field() must be called on a named vector, not
+  // on that temporary directly, or the pointer it returns dangles the moment
+  // this statement ends (#266 -- the empty/garbage brief only ever showed up
+  // downstream of exactly this pattern).
+  auto fs = fields_of(m, fn->usr);
+  const Field* brief = field(fs, "brief");
   REQUIRE(brief != nullptr);
   CAPTURE(brief->value);
-  // TEMP DIAGNOSTIC for clangquill/clangquill#266: dump everything upstream of
-  // `brief` so a failing Windows run pins down where the divergence actually
-  // is, rather than only that it happened. CAPTURE only affects assertions in
-  // its own scope, so the values are pulled out into locals living alongside
-  // the final CHECK rather than captured inside the loop that finds them.
-  // Remove once the root cause lands.
-  std::string raw_text;
-  std::string fields_json;
-  for (const auto& c : m.comments) {
-    if (c.symbol_usr == fn->usr) {
-      raw_text = c.text;
-      fields_json = c.fields_json;
-      break;
-    }
-  }
-  CAPTURE(raw_text.size());
-  CAPTURE(raw_text);
-  CAPTURE(fields_json);
   CHECK(brief->value.find("documents the") != std::string::npos);
 }
 
