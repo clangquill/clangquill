@@ -1,0 +1,23 @@
+{
+  "description": "A comment opening with a @code block is never promoted to the brief; the first prose paragraph is.",
+  "raw": "/// @code\n/// x = 1\n/// @endcode\n/// The summary.\n",
+  "expected": {
+    "brief": "The summary.",
+    "detail": [
+      "```cpp\nx = 1\n```"
+    ],
+    "params": [],
+    "tparams": [],
+    "returns": "",
+    "retvals": [],
+    "throws": [],
+    "see": [],
+    "since": [],
+    "deprecated": [],
+    "note": [],
+    "warning": [],
+    "pre": [],
+    "post": [],
+    "custom": {}
+  }
+}

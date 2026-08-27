@@ -6,12 +6,23 @@ model as Python dataclasses and provides the read-side machinery:
 
 * :class:`CommentModel` and friends mirror ``clangquill::model::CommentModel``.
 * a parser *registry* maps a format name to a ``str -> CommentModel`` callable.
-* :func:`doxygen_parse` is the built-in default, a pure-Python Doxygen scanner.
+* :func:`doxygen_parse` is the built-in default, a pure-Python Doxygen scanner
+  that closely tracks ``DoxygenCommentParser::parse_raw_text`` (the C++ raw-text
+  path in ``parser/doxygen_comment_parser.cpp``) -- the two are independent
+  implementations, not a shared engine, so treat "mirrors" as an intent the
+  ``tests/comment_corpus/`` conformance corpus checks rather than a guarantee.
 * :func:`resolve_override` honours the ``CLANGQUILL_COMMENT_PARSER`` dotted-path
   hook so a project can swap in its own parser without recompiling the core.
 
 Keep the field names in sync with the C++ model and the ``comment_fields``
 projection written by :mod:`clangquill` (see ``parser/comment_parser.cpp``).
+
+``tests/comment_corpus/`` holds raw-comment fixtures with an expected
+``CommentModel`` JSON each, asserted both here (:mod:`tests.test_comment_corpus`,
+against :func:`doxygen_parse`) and in C++
+(``tests/cpp/test_comment_corpus.cpp``, against
+``DoxygenCommentParser::parse_raw_text``). A behavior fixed in one parser
+should get a case added to the corpus so the same fix is pinned in both.
 """
 
 from __future__ import annotations

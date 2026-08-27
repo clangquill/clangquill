@@ -1,0 +1,23 @@
+{
+  "description": "Inline commands (@b, @e, @c, @p, @ref with a quoted title) render as MyST markup, and a wrapped line starting with @ref stays prose rather than being read as a block command.",
+  "raw": "/// @brief A wrapped sentence about\n/// @ref Widget stays one sentence.\n///\n/// Emphasis: @b bold, @e italic, @c code and @p x. See\n/// @ref divide \"the divide function\" too.\n/// An address like user@b.example is left alone, and @c foo. keeps its stop.\n",
+  "expected": {
+    "brief": "A wrapped sentence about {cpp:any}`Widget` stays one sentence.",
+    "detail": [
+      "Emphasis: **bold**, *italic*, `code` and `x`. See {cpp:any}`the divide function <divide>` too. An address like user@b.example is left alone, and `foo`. keeps its stop."
+    ],
+    "params": [],
+    "tparams": [],
+    "returns": "",
+    "retvals": [],
+    "throws": [],
+    "see": [],
+    "since": [],
+    "deprecated": [],
+    "note": [],
+    "warning": [],
+    "pre": [],
+    "post": [],
+    "custom": {}
+  }
+}
