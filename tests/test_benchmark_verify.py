@@ -23,7 +23,7 @@ def _write_ir_copy(fixture_db: Path, tmp_path: Path) -> Path:
     return ir_path
 
 
-def _insert_doc_with_group_command(ir_path: Path, *, usr: str, qname: str, ingroup_value: str) -> None:
+def _insert_symbol_with_ingroup(ir_path: Path, *, usr: str, qname: str, ingroup_value: str) -> None:
     con = sqlite3.connect(ir_path)
     con.execute(
         "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, display_name, "
@@ -46,7 +46,7 @@ def _insert_doc_with_group_command(ir_path: Path, *, usr: str, qname: str, ingro
 def test_check_comments_allows_multi_id_ingroup_values(fixture_db: Path, tmp_path: Path, monkeypatch) -> None:
     verify = _load_verify(monkeypatch)
     ir_path = _write_ir_copy(fixture_db, tmp_path)
-    _insert_doc_with_group_command(
+    _insert_symbol_with_ingroup(
         ir_path,
         usr="c:@N@geo@F@ingroup_ok",
         qname="geo::ingroup_ok",
@@ -63,7 +63,7 @@ def test_check_comments_still_flags_swallowed_prose_in_ingroup(
 ) -> None:
     verify = _load_verify(monkeypatch)
     ir_path = _write_ir_copy(fixture_db, tmp_path)
-    _insert_doc_with_group_command(
+    _insert_symbol_with_ingroup(
         ir_path,
         usr="c:@N@geo@F@ingroup_bad",
         qname="geo::ingroup_bad",
