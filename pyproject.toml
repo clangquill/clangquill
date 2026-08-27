@@ -26,7 +26,10 @@ extend-ignore = ["E501", "ANN201", "ANN001", "D203", "D211", "D213"]
 ]
 
 [tool.pytest.ini_options]
-addopts = "--cov=clangquill --cov-report=term-missing"
+# `xml` is what the CI upload actually consumes: codecov cannot read the raw
+# `.coverage` SQLite file, so without it the upload silently ships nothing.
+# `term-missing` stays for the job log.
+addopts = "--cov=clangquill --cov-report=term-missing --cov-report=xml"
 
 
 [build-system]

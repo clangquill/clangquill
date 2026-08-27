@@ -22,6 +22,7 @@ jobs:
       X_VCPKG_ASSET_SOURCES: >-
         clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
         {url} {sha512} {dst}
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v7.0.1
             # Only the build tools and libclang come from apt: sqlite3,
@@ -36,15 +37,48 @@ jobs:
         uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.13'
-      - name: Install nanobind (build-time dependency)
-        run: python -m pip install nanobind
+      - name: Install nanobind (build-time dependency) and gcovr
+        run: python -m pip install nanobind 'gcovr==8.4'
+            # `--coverage` on both the compile and the link line instruments the
+            # C++ sources so ctest leaves .gcda files behind. The suite is a
+            # correctness gate, not a benchmark, so measuring the same build it
+            # gates is cheaper (and less prone to drift) than a second job that
+            # rebuilds everything just to count lines.
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
           -DCLANGQUILL_WITH_LIBCLANG=ON
           -DCLANGQUILL_BUILD_TESTS=ON
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS=--coverage
+          -DCMAKE_EXE_LINKER_FLAGS=--coverage
           -DPython_EXECUTABLE="$(which python)"
       - name: Build
         run: cmake --build build
       - name: Test
         run: ctest --test-dir build --output-on-failure
+            # Only clangquill's own sources count: the filter drops libclang,
+            # Catch2 and the vcpkg-installed headers. src/cpp/bindings is
+            # included and will read as uncovered — the nanobind layer is
+            # exercised by pytest, not by ctest, and the two reports land under
+            # separate codecov flags. gcov (GCC 13) emits an occasional
+            # `branch 1 taken -1` for a real line — a known gcov bug
+            # (gcc.gnu.org/PR68080) that gcovr treats as fatal by default;
+            # downgrade just that one to a per-file warning.
+      - name: Collect coverage
+        run: >-
+          gcovr --root . build --filter 'src/cpp/'
+          --gcov-ignore-parse-errors=negative_hits.warn_once_per_file
+          --xml cpp-coverage.xml --txt --print-summary
+      - name: Upload coverage
+            # Same token guard as the pytest workflow: no CODECOV_TOKEN on a
+            # fork PR (or where the secret is unset), and codecov rejects a
+            # tokenless upload.
+        if: ${{ env.CODECOV_TOKEN != '' }}
+        uses: codecov/codecov-action@v7.0.0
+        with:
+          files: cpp-coverage.xml
+          disable_search: true
+          flags: cpp
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
