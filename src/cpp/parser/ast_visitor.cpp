@@ -367,12 +367,62 @@ std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx,
   return usr;
 }
 
+// True when the enum declaration spells its own underlying type
+// (`enum class E : std::uint8_t`) rather than leaving it to the implementation.
+//
+// libclang has no query for this: clang_getEnumDeclIntegerType answers with the
+// type the implementation chose for an enum that fixes none, and with `int` for
+// both `enum class E` and `enum class E : int`. The `:` introducing the type is
+// what tells the two apart, so the declaration head -- everything up to the
+// first enumerator -- is tokenized to look for one. A qualified type name
+// spells `::` as a single token, so a bare `:` there is unambiguous.
+bool has_fixed_underlying_type(CXCursor enum_cursor) {
+  CXSourceRange extent = clang_getCursorExtent(enum_cursor);
+  if (clang_Range_isNull(extent) != 0) return false;
+
+  // Stop at the first enumerator so a large enum body is not tokenized (and so
+  // a `? :` in an enumerator's initializer cannot be mistaken for the type's).
+  CXSourceLocation head_end = clang_getRangeEnd(extent);
+  clang_visitChildren(
+      enum_cursor,
+      [](CXCursor child, CXCursor, CXClientData data) {
+        if (clang_getCursorKind(child) != CXCursor_EnumConstantDecl) {
+          return CXChildVisit_Continue;
+        }
+        *static_cast<CXSourceLocation*>(data) =
+            clang_getRangeStart(clang_getCursorExtent(child));
+        return CXChildVisit_Break;
+      },
+      &head_end);
+
+  CXTranslationUnit tu = clang_Cursor_getTranslationUnit(enum_cursor);
+  CXSourceRange head = clang_getRange(clang_getRangeStart(extent), head_end);
+  CXToken* tokens = nullptr;
+  unsigned count = 0;
+  clang_tokenize(tu, head, &tokens, &count);
+  bool fixed = false;
+  for (unsigned t = 0; t < count && !fixed; ++t) {
+    fixed = clang_getTokenKind(tokens[t]) == CXToken_Punctuation &&
+            to_string(clang_getTokenSpelling(tu, tokens[t])) == ":";
+  }
+  if (tokens != nullptr) clang_disposeTokens(tu, tokens, count);
+  return fixed;
+}
+
 void extract_enum(CXCursor enum_cursor, const std::string& enum_usr,
                   VisitCtx& ctx) {
   bool is_signed = true;
   CXType underlying = clang_getEnumDeclIntegerType(enum_cursor);
-  switch (underlying.kind) {
+  // Canonicalized first: the underlying type is written through a typedef at
+  // least as often as with a builtin keyword, and `std::uint64_t` arrives as
+  // CXType_Typedef (or CXType_Elaborated), neither of which is a case below.
+  // Reading that sugar as signed stores `Max = 0xFFFFFFFFFFFFFFFF` as -1.
+  switch (clang_getCanonicalType(underlying).kind) {
+    case CXType_Bool:
+    case CXType_Char_U:
     case CXType_UChar:
+    case CXType_Char16:
+    case CXType_Char32:
     case CXType_UShort:
     case CXType_UInt:
     case CXType_ULong:
@@ -382,6 +432,16 @@ void extract_enum(CXCursor enum_cursor, const std::string& enum_usr,
       break;
     default:
       break;
+  }
+
+  // The written underlying type is an edge like any other type mention, and the
+  // only one RefKind::EnumIntegerType is for. It is recorded with the sugar the
+  // author wrote (`std::uint8_t`, not `unsigned char`), matching every other
+  // reference. Only a *fixed* type is recorded: the implementation-chosen one
+  // is not something the header says.
+  if (has_fixed_underlying_type(enum_cursor)) {
+    ctx.mod->references.push_back(make_type_ref(
+        enum_usr, model::RefKind::EnumIntegerType, underlying, 0));
   }
 
   struct EnumCtx {
