@@ -136,4 +136,72 @@ TEST_CASE("an explicit instantiation declares nothing to document",
   CHECK(traits_rows == 3);  // primary, full specialization, partial
 }
 
+namespace {
+
+// The `vars::is_foo_v` whose display name carries @p args ("" for the primary).
+const model::Symbol* is_foo_v(const model::ParsedModule& m,
+                              const std::string& args) {
+  for (const auto& s : m.symbols) {
+    if (s.spelling == "is_foo_v" && s.display_name == "is_foo_v" + args) {
+      return &s;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST_CASE("a variable template is recorded as a variable with a head",
+          "[templates]") {
+  auto m = parse_fixture("variable_templates.hpp");
+
+  // libclang reports it as CXCursor_UnexposedDecl, which the visitor skipped
+  // without descending: the symbol was absent from the IR entirely.
+  const auto* primary = is_foo_v(m, "");
+  REQUIRE(primary != nullptr);
+  CHECK(primary->kind == model::SymbolKind::Variable);
+  CHECK(primary->signature == "template<typename T>");
+  CHECK(primary->type_repr == "inline constexpr bool");
+  CHECK(primary->is_documented);
+  CHECK(primary->qualified_name == "vars::is_foo_v");
+
+  // A type that closes two argument lists at once is recovered whole.
+  const model::Symbol* pair = nullptr;
+  for (const auto& s : m.symbols) {
+    if (s.spelling == "empty_pair") pair = &s;
+  }
+  REQUIRE(pair != nullptr);
+  CHECK(pair->type_repr == "inline constexpr Pair<T, Pair<int, int>>");
+}
+
+TEST_CASE("a specialized variable template keeps its arguments", "[templates]") {
+  auto m = parse_fixture("variable_templates.hpp");
+
+  const auto* primary = is_foo_v(m, "");
+  const auto* spec = is_foo_v(m, "<int>");
+  REQUIRE(primary != nullptr);
+  REQUIRE(spec != nullptr);
+  // Both spell `is_foo_v` and share a qualified name; the display name is what
+  // keeps them apart in the generated docs, as it does for class templates.
+  CHECK(spec->usr != primary->usr);
+  CHECK(spec->kind == model::SymbolKind::Variable);
+  CHECK(spec->signature == "template<>");
+}
+
+TEST_CASE("unexposed declarations that document nothing stay out",
+          "[templates]") {
+  auto m = parse_fixture("variable_templates.hpp");
+
+  for (const auto& s : m.symbols) {
+    // A deduction guide is spelled `<deduction guide for Wrapper>` -- neither a
+    // C++ name nor something the C++ domain can render -- in both the plain and
+    // the templated form (the latter is exposed, as a FunctionTemplate).
+    CHECK(s.spelling.rfind("<deduction guide", 0) != 0);
+    // A namespace alias and a using-declaration name an entity documented where
+    // it was declared; they introduce none of their own.
+    CHECK(s.spelling != "shorthand");
+    CHECK(s.qualified_name != "vars::Impl");
+  }
+}
+
 #endif  // CLANGQUILL_HAVE_LIBCLANG

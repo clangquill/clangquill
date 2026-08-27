@@ -679,7 +679,11 @@ class Generator:
             sig = _strip_recovery_defaults(sig)
             return self._qualify(sig, symbol)
         if symbol.kind in (SymbolKind.VARIABLE, SymbolKind.FIELD):
-            return self._variable_declaration(symbol)
+            # A variable template carries its ``template<...>`` head in
+            # ``signature`` (plain variables have none), so the directive
+            # declares a template object rather than a duplicate of the name.
+            head = f"{_repair_split_operators(symbol.signature)} " if symbol.signature else ""
+            return head + self._variable_declaration(symbol)
         if symbol.kind in (SymbolKind.TYPEDEF, SymbolKind.TYPE_ALIAS):
             target = self._underlying(symbol)
             return f"{symbol.qualified_name} = {target}" if target else symbol.qualified_name
@@ -718,14 +722,18 @@ class Generator:
         (``int (*)[8]``) or an array of function pointers -- carry a ``(`` in the
         base, and splicing the name on the end would still be invalid C++; those
         are left untouched (they do not occur in the documented headers).
+
+        A specialized variable template names its arguments (``is_foo_v<int>``),
+        which is what keeps it apart from the primary it shares a name with.
         """
         type_repr = symbol.type_repr.strip()
+        name = symbol.qualified_name + _spec_suffix(symbol)
         extent = self._ARRAY_EXTENT.search(type_repr)
         if extent:
             base = type_repr[: extent.start()].strip()
             if "(" not in base:
-                return f"{base} {symbol.qualified_name}{extent.group().strip()}".strip()
-        return f"{type_repr} {symbol.qualified_name}".strip()
+                return f"{base} {name}{extent.group().strip()}".strip()
+        return f"{type_repr} {name}".strip()
 
     def _strip_injected_template_id(self, signature: str, symbol: Symbol) -> str:
         """Drop the injected-class-name template-id on a ctor/dtor.

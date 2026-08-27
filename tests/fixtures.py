@@ -541,6 +541,29 @@ def _build_spec_db(path: Path) -> None:
             signature="static demo::DenseVector<double> create(const size_t size)",
             type_repr="demo::DenseVector<double> (const size_t)",
         )
+        # A variable template and one specialization of it: kind VARIABLE, but
+        # with a template head in ``signature`` and the argument list in the
+        # display name (recovered from the declaration text by the parser).
+        sym(
+            "c:@N@demo@is_dense_v",
+            demo,
+            10,
+            "is_dense_v",
+            "demo::is_dense_v",
+            display="is_dense_v",
+            signature="template<class T>",
+            type_repr="inline constexpr bool",
+        )
+        sym(
+            "c:@N@demo@is_dense_v>#d",
+            demo,
+            10,
+            "is_dense_v",
+            "demo::is_dense_v",
+            display="is_dense_v<double>",
+            signature="template<>",
+            type_repr="inline constexpr bool",
+        )
         # Class template whose constructor carries the injected template-id and
         # <recovery-expr> default arguments clang could not evaluate.
         sym(
@@ -575,6 +598,8 @@ def _build_spec_db(path: Path) -> None:
             (create_field, "Create a field vector."),
             (cf_double, "Container factory for doubles."),
             (create_double, "Create a vector of doubles."),
+            ("c:@N@demo@is_dense_v", "Whether the container is dense."),
+            ("c:@N@demo@is_dense_v>#d", "Doubles are dense."),
             (helper, "Adaptation helper."),
             (helper_ctor, "Construct an adaptation helper."),
         ):

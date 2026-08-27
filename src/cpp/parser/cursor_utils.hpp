@@ -106,6 +106,31 @@ std::string macro_signature(CXCursor c);
 ///   specialization's empty head, or "" when the owner has no head at all.
 std::string template_head(CXCursor owner, std::vector<std::string>* defaults_out);
 
+/// @brief Tests whether @p c declares a class-template deduction guide.
+///
+/// libclang spells one `<deduction guide for Wrapper>` -- not a C++ name, and
+/// neither Doxygen nor the Sphinx C++ domain has a place for guides.
+/// @param c The cursor to test.
+/// @return `true` when @p c is a deduction guide.
+bool is_deduction_guide(CXCursor c);
+
+/// @brief The parts of a variable template recovered from its tokens.
+///
+/// libclang exposes `VarTemplateDecl` only as `CXCursor_UnexposedDecl`: it
+/// answers with the name and the USR, but not with a type, template parameters
+/// or a specialization's argument list, so those are read back from the
+/// declaration text.
+struct VariableTemplate {
+  std::string head;       ///< `template<...>`, or `template<>` on a full specialization.
+  std::string type_repr;  ///< Declaration specifiers and type, e.g. `inline constexpr bool`.
+  std::string spec_args;  ///< `<int>` on an explicit specialization, else "".
+};
+
+/// @brief Recognizes a variable template behind an unexposed declaration.
+/// @param c The cursor to inspect.
+/// @return Its recovered parts, or `std::nullopt` when @p c is not one.
+std::optional<VariableTemplate> variable_template(CXCursor c);
+
 /// @brief How a cursor relates to the template it specializes, if any.
 enum class SpecializationForm {
   None = 0,       ///< Not a specialization of a template.

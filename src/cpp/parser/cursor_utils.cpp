@@ -1,5 +1,6 @@
 #include "parser/cursor_utils.hpp"
 
+#include <cctype>
 #include <filesystem>
 #include <system_error>
 #include <vector>
@@ -125,6 +126,26 @@ int angle_closes(const std::string& tok, int depth) {
   return 0;
 }
 
+// Joins declaration tokens back into readable text: a space only where two
+// tokens would otherwise run together into one identifier, plus one after every
+// comma. libclang's tokens carry no spacing of their own, and `Pair < T , int >`
+// is a poor thing to put in a rendered declaration.
+std::string join_declaration(const std::vector<std::string>& toks) {
+  auto is_word = [](char ch) {
+    return std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '_';
+  };
+  std::string out;
+  for (const std::string& t : toks) {
+    if (t.empty()) continue;
+    if (!out.empty() && ((is_word(out.back()) && is_word(t.front())) ||
+                         out.back() == ',')) {
+      out += ' ';
+    }
+    out += t;
+  }
+  return out;
+}
+
 }  // namespace
 
 std::string macro_signature(CXCursor c) {
@@ -237,6 +258,83 @@ std::string template_head(CXCursor owner,
   }
   head += '>';
   return head;
+}
+
+bool is_deduction_guide(CXCursor c) {
+  // libclang spells a guide `<deduction guide for Wrapper>`, which is not a
+  // name anything can be documented or cross-referenced under.
+  return spelling(c).rfind("<deduction guide", 0) == 0;
+}
+
+std::optional<VariableTemplate> variable_template(CXCursor c) {
+  if (clang_getCursorKind(c) != CXCursor_UnexposedDecl) return std::nullopt;
+  const std::string name = spelling(c);
+  if (name.empty() || is_deduction_guide(c)) return std::nullopt;
+
+  VariableTemplate out;
+  out.head = template_head(c, nullptr);
+  if (out.head.empty()) return std::nullopt;
+
+  // Walk past the head, then read `<decl-specifiers and type> <name>` and, on an
+  // explicit specialization, the argument list that follows the name.
+  const std::vector<std::string> toks = cursor_tokens(c);
+  std::size_t i = 0;
+  while (i < toks.size() && toks[i] != "template") ++i;
+  ++i;  // the `template` keyword itself
+  int depth = 0;
+  for (; i < toks.size(); ++i) {
+    if (toks[i] == "<") {
+      ++depth;
+      continue;
+    }
+    if (int closes = angle_closes(toks[i], depth); closes > 0) {
+      depth -= closes;
+      if (depth <= 0) {
+        ++i;
+        break;
+      }
+    }
+  }
+
+  std::vector<std::string> type_toks;
+  bool named = false;
+  depth = 0;
+  for (; i < toks.size(); ++i) {
+    if (depth == 0 && toks[i] == name) {
+      named = true;
+      ++i;
+      break;
+    }
+    if (toks[i] == "<") {
+      ++depth;
+    } else if (int closes = angle_closes(toks[i], depth); closes > 0) {
+      depth -= closes;
+    }
+    type_toks.push_back(toks[i]);
+  }
+  // No declarator, or a declarator with no type before it: not the shape of a
+  // variable template, so leave the cursor to whatever else may recognize it.
+  if (!named || type_toks.empty()) return std::nullopt;
+  out.type_repr = join_declaration(type_toks);
+
+  if (i < toks.size() && toks[i] == "<") {
+    std::vector<std::string> args{toks[i]};
+    depth = 1;
+    for (++i; i < toks.size() && depth > 0; ++i) {
+      if (toks[i] == "<") {
+        ++depth;
+        args.push_back(toks[i]);
+      } else if (int closes = angle_closes(toks[i], depth); closes > 0) {
+        depth -= closes;
+        args.insert(args.end(), static_cast<std::size_t>(closes), ">");
+      } else {
+        args.push_back(toks[i]);
+      }
+    }
+    if (depth != 0) return std::nullopt;  // unbalanced: not understood
+    out.spec_args = join_declaration(args);
+  }
+  return out;
 }
 
 SpecializationForm specialization_form(CXCursor c) {
