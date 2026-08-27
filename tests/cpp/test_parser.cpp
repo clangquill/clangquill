@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -1521,16 +1522,29 @@ namespace {
 // The whole `failed to parse` group: the record itself plus every note nested
 // under it, joined so a test can assert on the report as a reader sees it.
 // Renders `arg` the way the report's copy-pasteable command tail does: an
-// argument holding a backslash — every absolute path on Windows — comes back
-// shell-quoted with its backslashes escaped (see join_args in parser.cpp).
+// argument carrying anything a shell would act on — a backslash, as every
+// absolute path on Windows does, or a `$` — comes back single-quoted (see
+// shell_quote in parser.cpp).
 std::string as_logged(const std::string& arg) {
-  if (arg.find_first_of(" \t\"'\\") == std::string::npos) return arg;
-  std::string quoted = "\"";
+  static const std::string kUnquotedChars = "@%+=:,./-_";
+  bool needs_quotes = arg.empty();
   for (char c : arg) {
-    if (c == '"' || c == '\\') quoted += '\\';
-    quoted += c;
+    if (std::isalnum(static_cast<unsigned char>(c)) == 0 &&
+        kUnquotedChars.find(c) == std::string::npos) {
+      needs_quotes = true;
+      break;
+    }
   }
-  return quoted + "\"";
+  if (!needs_quotes) return arg;
+  std::string quoted = "'";
+  for (char c : arg) {
+    if (c == '\'') {
+      quoted += "'\\''";
+    } else {
+      quoted += c;
+    }
+  }
+  return quoted + "'";
 }
 
 std::string failure_report(const model::ParsedModule& m) {
@@ -1579,6 +1593,43 @@ TEST_CASE("a missing input reports why libclang refused it", "[parser]") {
     if (d.depth > 0) CHECK(d.severity == model::kSeverityNote);
   }
   CHECK(top_level == 1);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("the logged command tail survives a paste into a shell", "[parser]") {
+  // The report advertises the argv as something a reader can paste back, so it
+  // has to be quoted the way a POSIX shell reads it. Double quotes are not
+  // enough: `$`, a backtick and `!` keep their meaning inside them, so a
+  // define carrying a command substitution used to come back as a command the
+  // paste would *run*. Single quotes leave nothing special, with `'` spliced.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-parse-fail-quoting";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+
+  const std::string substitution = "-DGREETING=$(id)";
+  const std::string backticks = "-DSTAMP=`date`";
+  const std::string apostrophe = "-DNAME=it's";
+
+  parser::ParseOptions opts;
+  opts.capture_all_diagnostics = true;
+  opts.extra_args = {substitution, backticks, apostrophe};
+  model::ParsedModule mod;
+  CHECK_FALSE(parser::Parser(opts).parse_file((dir / "gone.hpp").string(), mod));
+
+  const std::string report = failure_report(mod);
+  CHECK(report.find("'" + substitution + "'") != std::string::npos);
+  CHECK(report.find("'" + backticks + "'") != std::string::npos);
+  CHECK(report.find("'-DNAME=it'\\''s'") != std::string::npos);
+  // Nothing survives outside quotes: a bare `$(` or backtick in the tail is
+  // exactly the paste hazard this guards against.
+  CHECK(report.find("\"" + substitution) == std::string::npos);
+  CHECK(report.find("\"" + backticks) == std::string::npos);
+
+  // Ordinary flags stay unquoted, so the common tail reads as it always did.
+  CHECK(report.find("-std=c++20") != std::string::npos);
+  CHECK(report.find("'-std=c++20'") == std::string::npos);
 
   fs::remove_all(dir);
 }

@@ -496,22 +496,47 @@ const char* error_code_name(int code) {
   return "unrecognised CXErrorCode";
 }
 
+// Renders one argument so a POSIX shell reproduces it verbatim.
+//
+// Single quotes, not double: inside double quotes `$`, a backtick and (in an
+// interactive shell) `!` keep their meaning, so a command tail carrying
+// `-DGREETING="$(id)"` would run `id` when the reader pasted the advertised
+// command back. Inside single quotes nothing is special at all, and the one
+// character that cannot appear there -- a single quote -- is spliced in as the
+// standard `'\''`.
+//
+// Quoted unless every character is one a shell leaves alone, which keeps the
+// common tail (`-std=c++20 -I/usr/include -xc++-header`) as readable as it was.
+std::string shell_quote(const std::string& arg) {
+  static const std::string kUnquotedChars = "@%+=:,./-_";
+  bool needs_quotes = arg.empty();
+  for (char c : arg) {
+    if (std::isalnum(static_cast<unsigned char>(c)) == 0 &&
+        kUnquotedChars.find(c) == std::string::npos) {
+      needs_quotes = true;
+      break;
+    }
+  }
+  if (!needs_quotes) return arg;
+  std::string quoted = "'";
+  for (char c : arg) {
+    if (c == '\'') {
+      quoted += "'\\''";
+    } else {
+      quoted += c;
+    }
+  }
+  quoted += '\'';
+  return quoted;
+}
+
 // Renders `args` as a copy-pasteable command tail, quoting anything that would
 // not survive a shell round trip.
 std::string join_args(const std::vector<std::string>& args) {
   std::string joined;
   for (const auto& a : args) {
     if (!joined.empty()) joined += ' ';
-    if (a.empty() || a.find_first_of(" \t\"'\\") != std::string::npos) {
-      joined += '"';
-      for (char c : a) {
-        if (c == '"' || c == '\\') joined += '\\';
-        joined += c;
-      }
-      joined += '"';
-    } else {
-      joined += a;
-    }
+    joined += shell_quote(a);
   }
   return joined;
 }
@@ -675,8 +700,8 @@ void Parser::report_parse_failure(const std::string& path, int error_code,
   if (rc != CXError_Success || tu == nullptr) {
     if (tu) clang_disposeTranslationUnit(tu);
     push_note(out, 1,
-              std::string("re-parsing with '") + join_args(retry_args) +
-                  "' failed the same way (" + error_code_name(rc) +
+              std::string("re-parsing with \"") + join_args(retry_args) +
+                  "\" failed the same way (" + error_code_name(rc) +
                   "), so the input itself — not the compilation database entry "
                   "— is what libclang refuses");
     return;
@@ -690,15 +715,15 @@ void Parser::report_parse_failure(const std::string& path, int error_code,
                       /*base_depth=*/2);
   if (recovered.diagnostics.empty()) {
     push_note(out, 1,
-              std::string("re-parsing with '") + join_args(retry_args) +
-                  "' produced no diagnostics: the file is fine on its own, so "
+              std::string("re-parsing with \"") + join_args(retry_args) +
+                  "\" produced no diagnostics: the file is fine on its own, so "
                   "the compile flags are what libclang rejected");
     return;
   }
 
   push_note(out, 1,
-            std::string("re-parsed with '") + join_args(retry_args) +
-                "' to recover libclang's own diagnostics; they describe the "
+            std::string("re-parsed with \"") + join_args(retry_args) +
+                "\" to recover libclang's own diagnostics; they describe the "
                 "file under those flags, not under the project's build:");
   for (auto& d : recovered.diagnostics) {
     out.diagnostics.push_back(std::move(d));
