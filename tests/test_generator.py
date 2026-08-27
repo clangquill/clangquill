@@ -867,6 +867,27 @@ def test_member_of_specialization_qualifies_with_spec_args(spec_gen: Generator, 
     )
 
 
+def test_full_specialization_signature_keeps_its_empty_head(spec_gen: Generator, spec_store: Store) -> None:
+    # ``template<>`` is what makes the C++ domain index the specialization as its
+    # own object rather than a redeclaration of the primary template.
+    full = _spec_symbol(spec_store, "ContainerFactory<double>")
+    assert spec_gen.signature(full) == "template<> demo::ContainerFactory<double>"
+
+
+def test_member_of_full_specialization_carries_the_empty_head(spec_gen: Generator, spec_store: Store) -> None:
+    # The member is qualified by the specialized parent and keeps the parent's
+    # ``template<>``: the C++ domain counts parameter lists against argument
+    # lists and warns ("Too many template argument lists") without it.
+    sym = next(
+        s
+        for s in spec_store.symbols()
+        if s.spelling == "create" and s.type_repr.startswith("demo::DenseVector<double>")
+    )
+    assert spec_gen.signature(sym) == (
+        "template<> static demo::DenseVector<double> demo::ContainerFactory<double>::create(const size_t size)"
+    )
+
+
 def test_plain_member_signature_unchanged(gen: Generator, store: Store) -> None:
     # A member whose parent is not a specialization keeps the legacy form.
     assert gen.signature(_symbol(store, "geo::Circle::area")) == "double geo::Circle::area() const"

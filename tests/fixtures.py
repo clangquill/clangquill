@@ -466,8 +466,10 @@ def _build_spec_db(path: Path) -> None:
         cf_primary = "c:@N@demo@CT0@ContainerFactory"
         cf_dense = "c:@N@demo@CTPS1@ContainerFactory"
         cf_field = "c:@N@demo@CTPS2@ContainerFactory"
+        cf_double = "c:@N@demo@CTS1@ContainerFactory"
         create_dense = cf_dense + "@F@create"
         create_field = cf_field + "@F@create"
+        create_double = cf_double + "@F@create"
         helper = "c:@N@demo@CT@AdaptationHelper"
         helper_ctor = helper + "@F@AdaptationHelper"
 
@@ -501,6 +503,17 @@ def _build_spec_db(path: Path) -> None:
             display="ContainerFactory<demo::FieldVector<S, 4>>",
             signature="template<class S>",
         )
+        # A *full* specialization: its head is empty (`template<>`), and unlike a
+        # partial specialization that head must not repeat on its members.
+        sym(
+            cf_double,
+            demo,
+            16,
+            "ContainerFactory",
+            "demo::ContainerFactory",
+            display="ContainerFactory<double>",
+            signature="template<>",
+        )
         sym(
             create_dense,
             cf_dense,
@@ -518,6 +531,15 @@ def _build_spec_db(path: Path) -> None:
             "demo::ContainerFactory::create",
             signature="static demo::FieldVector<S, 4> create(const size_t size)",
             type_repr="demo::FieldVector<S, 4> (const size_t)",
+        )
+        sym(
+            create_double,
+            cf_double,
+            6,
+            "create",
+            "demo::ContainerFactory::create",
+            signature="static demo::DenseVector<double> create(const size_t size)",
+            type_repr="demo::DenseVector<double> (const size_t)",
         )
         # Class template whose constructor carries the injected template-id and
         # <recovery-expr> default arguments clang could not evaluate.
@@ -551,6 +573,8 @@ def _build_spec_db(path: Path) -> None:
             (cf_field, "Container factory for field vectors."),
             (create_dense, "Create a dense vector."),
             (create_field, "Create a field vector."),
+            (cf_double, "Container factory for doubles."),
+            (create_double, "Create a vector of doubles."),
             (helper, "Adaptation helper."),
             (helper_ctor, "Construct an adaptation helper."),
         ):

@@ -83,4 +83,57 @@ TEST_CASE("a shift in a non-type default is not an argument list",
   CHECK(bits->default_repr.find("4") != std::string::npos);
 }
 
+namespace {
+
+// The specialization of `spec::Traits` whose display name carries @p args
+// (every specialization shares the primary's qualified name).
+const model::Symbol* traits_with(const model::ParsedModule& m,
+                                 const std::string& args) {
+  for (const auto& s : m.symbols) {
+    if (s.spelling == "Traits" && s.display_name == "Traits" + args) return &s;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST_CASE("a full specialization is a class template, not a plain struct",
+          "[templates]") {
+  auto m = parse_fixture("specializations.hpp");
+
+  const auto* full = traits_with(m, "<int, void>");
+  REQUIRE(full != nullptr);
+  // libclang reports it as a StructDecl; without the specialization check it
+  // was a Struct named `spec::Traits`, indistinguishable from the primary.
+  CHECK(full->kind == model::SymbolKind::ClassTemplate);
+  CHECK(full->signature == "template<>");
+
+  const auto* primary = traits_with(m, "<T, Tag>");
+  REQUIRE(primary != nullptr);
+  CHECK(primary->kind == model::SymbolKind::ClassTemplate);
+  CHECK(primary->usr != full->usr);
+  CHECK(primary->signature.find("typename T") != std::string::npos);
+
+  const auto* partial = traits_with(m, "<U *, void>");
+  REQUIRE(partial != nullptr);
+  CHECK(partial->kind == model::SymbolKind::ClassTemplate);
+  CHECK(partial->signature == "template<typename U>");
+}
+
+TEST_CASE("an explicit instantiation declares nothing to document",
+          "[templates]") {
+  auto m = parse_fixture("specializations.hpp");
+
+  // `template struct Traits<char, void>;` writes no head of its own: it asks
+  // for code for the primary template, which is already documented, so it must
+  // not add a second row under the primary's name.
+  CHECK(traits_with(m, "<char, void>") == nullptr);
+
+  int traits_rows = 0;
+  for (const auto& s : m.symbols) {
+    if (s.qualified_name == "spec::Traits") ++traits_rows;
+  }
+  CHECK(traits_rows == 3);  // primary, full specialization, partial
+}
+
 #endif  // CLANGQUILL_HAVE_LIBCLANG
