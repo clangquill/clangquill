@@ -772,7 +772,11 @@ bool Parser::parse_file(const std::string& path, model::ParsedModule& out,
   // cached parse for every translation unit that pulled it in.
   InclusionCtx ctx{&out, &seen, &sink, nullptr};
   clang_getInclusions(tu, record_inclusion, &ctx);
-  visit_translation_unit(clang_getTranslationUnitCursor(tu), path, out);
+  VisitOptions visit_options;
+  visit_options.extract_anonymous_namespaces =
+      options_.extract_anonymous_namespaces;
+  visit_translation_unit(clang_getTranslationUnitCursor(tu), path, out,
+                         visit_options);
 
   return true;
 }
@@ -863,8 +867,11 @@ bool Parser::parse_batch(const std::vector<std::string>& paths,
   mains.reserve(paths.size() * 2);
   mains.insert(mains.end(), paths.begin(), paths.end());
   mains.insert(mains.end(), abs.begin(), abs.end());
+  VisitOptions visit_options;
+  visit_options.extract_anonymous_namespaces =
+      options_.extract_anonymous_namespaces;
   visit_translation_unit(clang_getTranslationUnitCursor(tu), mains,
-                         /*trust_main_file=*/false, out);
+                         /*trust_main_file=*/false, out, visit_options);
 
   // Checked unconditionally — not just when a caller asked for the per-member
   // sinks — because a member that never got parsed has to reach the log either

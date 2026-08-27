@@ -72,6 +72,10 @@ Every knob is a `clangquill_*` config value mirroring a field of
 `clangquill.config.Config`, including
 `clangquill_defines`, `clangquill_template_dirs`, `clangquill_templates`
 (per-kind overrides), `clangquill_include_undocumented`,
+`clangquill_extract_anonymous_namespaces` (off by default, like Doxygen's
+`EXTRACT_ANON_NSPACES`: anonymous-namespace contents have internal linkage, so
+they are documented — qualified by `@anonymous`, the C++ domain's spelling for
+an anonymous entity — only when asked for),
 `clangquill_comment_parser`, `clangquill_group_by` (`symbol`, `file`, `class` or
 `namespace` — the last builds a browsable index → namespace → per-symbol
 hierarchy; recommended for libraries rooted in a single namespace, which would

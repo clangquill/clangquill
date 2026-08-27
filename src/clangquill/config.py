@@ -77,6 +77,7 @@ _TYPE_CHECKS: tuple[tuple[str, Callable[[object], bool], str], ...] = (
     ("defines", _is_str_list, "a list of strings"),
     ("template_dirs", _is_str_list, "a list of strings"),
     ("include_undocumented", _is_bool, "a boolean"),
+    ("extract_anonymous_namespaces", _is_bool, "a boolean"),
     ("warnings_as_errors", _is_bool, "a boolean"),
     ("templates", _is_str_dict, "a mapping of kind name to template name"),
 )
@@ -122,6 +123,14 @@ class Config:
     #: the command the database answers with and an input whose flags are
     #: unique is parsed on its own.
     tu_batch: int = 0
+    #: Extract what anonymous namespaces contain. ``False`` (the default)
+    #: matches Doxygen's ``EXTRACT_ANON_NSPACES = NO``: an anonymous namespace
+    #: has internal linkage, so its contents are one translation unit's
+    #: implementation detail rather than API anyone can name, include or link
+    #: against. When enabled they are documented with ``@anonymous`` in their
+    #: qualified name -- the Sphinx C++ domain's spelling for an anonymous
+    #: entity -- rather than under the enclosing namespace's name.
+    extract_anonymous_namespaces: bool = False
 
     # -- output ---------------------------------------------------------------
     #: Directory (under the Sphinx srcdir / CWD) that generated pages go into.

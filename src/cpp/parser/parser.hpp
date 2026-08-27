@@ -30,6 +30,13 @@ struct ParseOptions {
   /// per batch, so a warning in a common header is re-reported per batch and
   /// the extra volume is only worth paying for when someone asked to see it.
   bool capture_all_diagnostics = false;
+  /// Extract the contents of anonymous namespaces. Off by default, matching
+  /// Doxygen's `EXTRACT_ANON_NSPACES = NO`: an anonymous namespace has
+  /// internal linkage, so what it holds is one translation unit's
+  /// implementation detail rather than API anyone can name. When on, its
+  /// contents carry `@anonymous` in their qualified name instead of appearing
+  /// under the enclosing namespace's.
+  bool extract_anonymous_namespaces = false;
   int jobs = 0;  ///< Parse threads; `<= 0` means auto (hardware concurrency).
   /// Inputs grouped into one umbrella translation unit. Grouping amortises the
   /// dominant parse cost — re-lexing the shared `#include` closure — across the
