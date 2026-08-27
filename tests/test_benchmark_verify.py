@@ -67,6 +67,7 @@ def test_check_comments_still_flags_swallowed_prose_in_ingroup(
         ir_path,
         usr="c:@N@geo@F@ingroup_bad",
         qname="geo::ingroup_bad",
+        # "?" is not allowed by GROUP_ID_RE, so this simulates swallowed prose.
         ingroup_value="Geometry_Module prose?",
     )
     result = verify.check_comments(SimpleNamespace(cache_dir=ir_path.parent))
