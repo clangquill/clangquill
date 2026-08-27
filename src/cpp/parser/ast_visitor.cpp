@@ -196,7 +196,19 @@ bool is_forward_declarable(model::SymbolKind kind) {
 // declaration was documented — a forward declaration reports its definition's
 // comment whenever both are in the same unit. So ask where the comment sits: it
 // belongs to this cursor when it ends in the same file, on or just above the
-// line the cursor starts on. Trailing `///<` comments end on that line too.
+// line the declaration starts on. Trailing `///<` comments end on that line
+// too.
+//
+// The declaration's start is the start of its *extent*, not the cursor
+// location: the latter is where the entity is named, which a template head or
+// an attribute puts lines below the comment --
+//
+//     /// An opaque handle type.
+//     template <typename T>
+//     class Foo;
+//
+// -- and measuring against the `Foo` line called that comment somebody else's,
+// dropping a deliberately documented forward declaration.
 bool documented_here(CXCursor c) {
   CXSourceRange range = clang_Cursor_getCommentRange(c);
   if (clang_Range_isNull(range) != 0) return false;
@@ -204,7 +216,8 @@ bool documented_here(CXCursor c) {
   CXFile cursor_file = nullptr;
   unsigned comment_end = 0, cursor_line = 0, col = 0, off = 0;
   clang_getSpellingLocation(clang_getRangeEnd(range), &comment_file, &comment_end, &col, &off);
-  clang_getSpellingLocation(clang_getCursorLocation(c), &cursor_file, &cursor_line, &col, &off);
+  clang_getSpellingLocation(clang_getRangeStart(clang_getCursorExtent(c)),
+                            &cursor_file, &cursor_line, &col, &off);
   if (comment_file == nullptr || clang_File_isEqual(comment_file, cursor_file) == 0) return false;
   return comment_end + 1 >= cursor_line;
 }
