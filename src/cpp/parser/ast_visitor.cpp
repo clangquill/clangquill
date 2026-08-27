@@ -470,12 +470,58 @@ void extract_template_parameters(CXCursor c, const std::string& usr,
       &tctx);
 }
 
+// Whether @p friend_decl (a CXCursor_FriendDecl) gives its befriended
+// function a body right here -- the "hidden friend" idiom -- rather than
+// merely declaring it.
+//
+// This can't be asked of the FriendDecl's function child directly:
+// translation units here are parsed with CXTranslationUnit_SkipFunctionBodies
+// (a deliberate perf tradeoff, since this tool only needs signatures and
+// docs), which makes libclang report a body-less clang_getCursorExtent and
+// clang_isCursorDefinition()==false for every function -- defined or not.
+// Raw tokenization of a range that isn't itself truncated still sees the
+// body, though, so @p record_tokens holds the enclosing record's tokens
+// (comments excluded, tokenized once for the whole record) as (file offset,
+// spelling) pairs; the answer is just whichever one comes right after this
+// FriendDecl's own (truncated) extent.
+bool friend_decl_has_inline_body(
+    CXCursor friend_decl,
+    const std::vector<std::pair<unsigned, std::string>>& record_tokens) {
+  CXFile file = nullptr;
+  unsigned line = 0, col = 0, end_offset = 0;
+  clang_getFileLocation(clang_getRangeEnd(clang_getCursorExtent(friend_decl)),
+                        &file, &line, &col, &end_offset);
+  for (const auto& [offset, spelling] : record_tokens) {
+    if (offset < end_offset) continue;
+    return spelling == "{";
+  }
+  return false;
+}
+
 void extract_friends(CXCursor record, const std::string& usr, VisitCtx& ctx) {
+  CXTranslationUnit tu = clang_Cursor_getTranslationUnit(record);
+  CXToken* raw_tokens = nullptr;
+  unsigned raw_count = 0;
+  clang_tokenize(tu, clang_getCursorExtent(record), &raw_tokens, &raw_count);
+  std::vector<std::pair<unsigned, std::string>> record_tokens;
+  record_tokens.reserve(raw_count);
+  for (unsigned i = 0; i < raw_count; ++i) {
+    if (clang_getTokenKind(raw_tokens[i]) == CXToken_Comment) continue;
+    CXFile file = nullptr;
+    unsigned line = 0, col = 0, offset = 0;
+    clang_getFileLocation(clang_getTokenLocation(tu, raw_tokens[i]), &file,
+                          &line, &col, &offset);
+    record_tokens.emplace_back(
+        offset, to_string(clang_getTokenSpelling(tu, raw_tokens[i])));
+  }
+  if (raw_tokens != nullptr) clang_disposeTokens(tu, raw_tokens, raw_count);
+
   struct FriendCtx {
-    model::ParsedModule* mod;
+    VisitCtx* ctx;
+    const std::vector<std::pair<unsigned, std::string>>* record_tokens;
     std::string from_usr;
     int index;
-  } fctx{ctx.mod, usr, 0};
+  } fctx{&ctx, &record_tokens, usr, 0};
 
   clang_visitChildren(
       record,
@@ -484,12 +530,16 @@ void extract_friends(CXCursor record, const std::string& usr, VisitCtx& ctx) {
         if (clang_getCursorKind(child) != CXCursor_FriendDecl) {
           return CXChildVisit_Continue;
         }
+        bool has_body = friend_decl_has_inline_body(child, *f.record_tokens);
         // The befriended entity is the FriendDecl's child: a TypeRef for a
         // friend class, or a function declaration for a friend function.
         struct Inner {
           model::Reference ref;
           bool found = false;
+          bool has_body = false;
+          CXCursor func_def = clang_getNullCursor();
         } inner;
+        inner.has_body = has_body;
         clang_visitChildren(
             child,
             [](CXCursor gc, CXCursor, CXClientData d) {
@@ -510,6 +560,11 @@ void extract_friends(CXCursor record, const std::string& usr, VisitCtx& ctx) {
                 in.ref.to_spelling = display_name(gc);
                 in.ref.is_resolved = !in.ref.to_usr.empty();
                 in.found = true;
+                // A hidden friend: this function is never reached by
+                // ordinary top-level traversal (a FriendDecl child maps to
+                // Unknown in map_kind and is pruned without descent), so it
+                // gets no symbol unless we give it one here.
+                if (in.has_body) in.func_def = gc;
                 return CXChildVisit_Break;
               }
               return CXChildVisit_Continue;
@@ -519,7 +574,17 @@ void extract_friends(CXCursor record, const std::string& usr, VisitCtx& ctx) {
           inner.ref.from_usr = f.from_usr;
           inner.ref.kind = model::RefKind::Friend;
           inner.ref.ordinal = f.index++;
-          f.mod->references.push_back(std::move(inner.ref));
+          f.ctx->mod->references.push_back(std::move(inner.ref));
+        }
+        if (!clang_Cursor_isNull(inner.func_def)) {
+          // Attributed to the enclosing namespace scope, as Doxygen does:
+          // f.ctx->parent_usr is still the record's own parent here, since
+          // that's the ctx handle_symbol(record, ...) was itself called
+          // with, before it descends into the record's own scope.
+          model::SymbolKind fk = map_kind(clang_getCursorKind(inner.func_def));
+          if (fk != model::SymbolKind::Unknown) {
+            handle_symbol(inner.func_def, fk, *f.ctx);
+          }
         }
         return CXChildVisit_Continue;
       },
