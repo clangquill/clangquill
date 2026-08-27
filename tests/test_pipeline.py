@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from clangquill import _core, cli, pipeline
-from clangquill.cache import BuildCache
+from clangquill.cache import BuildCache, file_sha256, hash_text
 from clangquill.config import Config
 from clangquill.pipeline import MANIFEST_NAME, build
 from clangquill.store import Store
@@ -230,10 +230,26 @@ def test_incremental_touched_but_identical_output_still_noops(project: Path) -> 
 
     # Rewriting identical bytes moves the stat but not the content: the build
     # must recognise the page as intact (via the hash fallback) and still noop.
-    page.write_text(page.read_text(), encoding="utf-8")
+    # Bytes, not text: a text round-trip would translate the newlines on
+    # Windows and genuinely change the file, testing the opposite of this.
+    page.write_bytes(page.read_bytes())
     result = build(config, base_dir=project)
     assert not result.parsed
     assert result.pages_written == []
+
+
+@requires_libclang
+def test_pages_are_written_as_the_bytes_their_hash_covers(project: Path) -> None:
+    # The invariant the whole incremental path rests on: a page's record holds
+    # the hash of the rendered *text*, while _output_intact re-checks the page
+    # by hashing its *bytes*. Any newline translation on the way to disk breaks
+    # that equality — on Windows it would make every touched page read as
+    # damaged — and nothing else in the suite would notice on a POSIX runner.
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    build(config, base_dir=project)
+
+    page = project / "api" / "demo.md"
+    assert file_sha256(page) == hash_text(page.read_text(encoding="utf-8"))
 
 
 @requires_libclang
@@ -832,7 +848,7 @@ def test_diagnostics_log_written_with_header(project: Path) -> None:
 
     log = project / "parse.log"
     assert result.diagnostics_log == log.resolve()
-    header = _log_header(log.read_text())
+    header = _log_header(log.read_text(encoding="utf-8"))
     assert header["parse"] == "full"
     assert header["inputs"] == "1 file(s)"
     assert "generated" in header
@@ -867,7 +883,7 @@ def test_warnings_reach_the_log_but_not_the_console_stream(project: Path) -> Non
     result = build(config, base_dir=project)
 
     assert result.diagnostics == []
-    text = (project / "parse.log").read_text()
+    text = (project / "parse.log").read_text(encoding="utf-8")
     assert "demo is on its way out" in text
     assert "warning" in _log_header(text)["totals"]
     assert any(record.severity == 2 for record in result.diagnostic_records)
@@ -879,7 +895,7 @@ def test_error_notes_are_logged_indented_under_their_parent(project: Path) -> No
     config = Config(input=["demo.hpp"], output_dir="api", diagnostics_log="parse.log")
     build(config, base_dir=project)
 
-    lines = (project / "parse.log").read_text().splitlines()
+    lines = (project / "parse.log").read_text(encoding="utf-8").splitlines()
     parent = next(i for i, line in enumerate(lines) if "redefinition" in line)
     note = lines[parent + 1]
     assert "previous definition" in note
@@ -909,7 +925,7 @@ def test_a_failed_parse_explains_itself_in_the_log(project: Path) -> None:
     )
     result = build(config, base_dir=project)
 
-    lines = (project / "parse.log").read_text().splitlines()
+    lines = (project / "parse.log").read_text(encoding="utf-8").splitlines()
     start = next(i for i, line in enumerate(lines) if line.startswith("failed to parse:"))
     # The group is self-delimiting: the failure line is unindented and every
     # note under it is indented, so it ends at the next unindented line. A fixed
@@ -969,7 +985,7 @@ def test_diagnostics_log_labels_a_partial_reparse(project: Path) -> None:
     result = build(config, base_dir=project)
 
     assert result.parsed
-    header = _log_header((project / "parse.log").read_text())
+    header = _log_header((project / "parse.log").read_text(encoding="utf-8"))
     assert header["parse"] == "incremental — 1 of 2 translation unit(s) re-parsed"
 
 
@@ -1193,7 +1209,7 @@ def test_write_diagnostics_log_orders_and_indents_records(tmp_path: Path) -> Non
     log = tmp_path / "parse.log"
     pipeline.write_diagnostics_log(log, records, inputs=2, partial=1)
 
-    text = log.read_text()
+    text = log.read_text(encoding="utf-8")
     header = _log_header(text)
     assert header["parse"] == "incremental — 1 of 2 translation unit(s) re-parsed"
     assert header["totals"] == "1 note(s), 1 warning(s), 1 error(s)"
@@ -1205,7 +1221,7 @@ def test_write_diagnostics_log_with_no_records(tmp_path: Path) -> None:
     log = tmp_path / "parse.log"
     pipeline.write_diagnostics_log(log, [], inputs=3)
 
-    header = _log_header(log.read_text())
+    header = _log_header(log.read_text(encoding="utf-8"))
     assert header["totals"] == "none"
     assert header["parse"] == "full"
 
