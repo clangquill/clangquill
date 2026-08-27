@@ -30,7 +30,7 @@ The field-name-to-front-end mapping is mechanical:
 | Field | Sphinx value | Default | Description |
 |-------|--------------|---------|-------------|
 | `output_dir` | `clangquill_output_dir` | `"api"` | Directory (under the srcdir / CWD) the generated pages are written to. |
-| `template_dirs` | `clangquill_template_dirs` | `[]` | Directories searched before the bundled templates for overrides. See the [template-override guide](templates.md). |
+| `template_dirs` | `clangquill_template_dirs` | `[]` | Directories searched before the bundled templates for overrides. Override templates disable per-page render memoisation unless they [declare themselves](templates.md#custom-templates-and-warm-builds). See the [template-override guide](templates.md). |
 | `templates` | `clangquill_templates` | `{}` | Per-kind template overrides, e.g. `{"class": "my_class"}`. |
 | `cache_dir` | `clangquill_cache_dir` | `None` | Directory holding the persistent incremental cache. `None` disables caching (re-parse + rewrite every page each build). See [incremental builds](../usage.md#incremental-builds). |
 | `include_undocumented` | `clangquill_include_undocumented` | `True` | Emit pages/sections for symbols that carry no documentation comment. |

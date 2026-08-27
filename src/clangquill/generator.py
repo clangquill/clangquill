@@ -1402,7 +1402,7 @@ class Generator:
 
     # -- per-page dependency fingerprint --------------------------------------
 
-    def page_fingerprint(self, plan: PagePlan) -> str:
+    def page_fingerprint(self, plan: PagePlan, *, wide: bool = False) -> str:
         """Hash everything ``plan`` reads from the IR into a render-cache key.
 
         The digest covers each symbol the page renders (its ``content_hash``,
@@ -1412,6 +1412,15 @@ class Generator:
         lists. It is deliberately render-config-agnostic: the pipeline combines
         it with the render fingerprint (templates, grouping, …) for the full key,
         so this method need only track the IR data the bundled templates read.
+
+        ``wide`` widens it to every per-symbol field the *documented* template
+        context can reach, not just the ones the bundled templates use: the
+        symbol-row fields ``content_hash`` leaves out (spelling, display name,
+        parent, documented flag, declaring file and line) and the symbol's
+        template parameters. That is what lets a custom template opt back into
+        page memoisation (see :func:`~clangquill.pipeline._page_cache_mode`); it
+        is off by default because it is strictly more conservative — a page
+        whose symbols merely shifted lines re-renders under it.
         """
         tokens: list[str] = []
         # A hub page's text is its toctree of child stems, so a changed child set
@@ -1431,9 +1440,9 @@ class Generator:
             self._file_scope = plan.file_scope
             try:
                 for symbol in plan.shallow_seeds:
-                    self._collect_symbol_tokens(symbol, tokens, visited, recurse=False)
+                    self._collect_symbol_tokens(symbol, tokens, visited, recurse=False, wide=wide)
                 for symbol in plan.subtree_seeds:
-                    self._collect_symbol_tokens(symbol, tokens, visited, recurse=True)
+                    self._collect_symbol_tokens(symbol, tokens, visited, recurse=True, wide=wide)
             finally:
                 self._file_scope = previous
         return hashlib.sha256(_DEP_RECORD_SEP.join(tokens).encode("utf-8")).hexdigest()
@@ -1460,6 +1469,7 @@ class Generator:
         visited: set[str],
         *,
         recurse: bool,
+        wide: bool = False,
     ) -> None:
         r"""Append the dependency tokens for ``symbol`` (and, if ``recurse``, its subtree).
 
@@ -1473,6 +1483,23 @@ class Generator:
             return
         visited.add(symbol.usr)
         tokens.append(f"S{_DEP_FIELD_SEP}{symbol.usr}{_DEP_FIELD_SEP}{symbol.content_hash}")
+        if wide:
+            tokens.extend(self._wide_tokens(symbol))
+        tokens.extend(self._reference_tokens(symbol))
+        tokens.extend(self._related_tokens(symbol))
+        if symbol.kind == SymbolKind.ENUM:
+            tokens.extend(self._enumerator_tokens(symbol))
+        if recurse and (symbol.kind == SymbolKind.NAMESPACE or symbol.kind in _RECORD_KINDS):
+            for child in self.children(symbol):
+                self._collect_symbol_tokens(child, tokens, visited, recurse=True, wide=wide)
+
+    def _reference_tokens(self, symbol: Symbol) -> list[str]:
+        """Return the tokens for ``symbol``'s outgoing cross-references.
+
+        The content hash of every resolved target rides along, because a
+        cross-reference prints the target's qualified name.
+        """
+        tokens: list[str] = []
         for ref in self.store.references(symbol.usr):
             tokens.append(
                 _DEP_FIELD_SEP.join(
@@ -1491,18 +1518,57 @@ class Generator:
                 target = self.store.symbol(ref.to_usr)
                 if target is not None:
                     tokens.append(f"T{_DEP_FIELD_SEP}{ref.to_usr}{_DEP_FIELD_SEP}{target.content_hash}")
-        tokens.extend(self._related_tokens(symbol))
-        if symbol.kind == SymbolKind.ENUM:
-            for en in self.enumerators(symbol):
-                tokens.append(
-                    _DEP_FIELD_SEP.join(("N", en.usr, en.name, str(en.value), str(int(en.value_is_signed)))),
+        return tokens
+
+    def _enumerator_tokens(self, symbol: Symbol) -> list[str]:
+        """Return the tokens for the enumerators an enum page lists."""
+        tokens: list[str] = []
+        for en in self.enumerators(symbol):
+            tokens.append(
+                _DEP_FIELD_SEP.join(("N", en.usr, en.name, str(en.value), str(int(en.value_is_signed)))),
+            )
+            enumerator = self.store.symbol(en.usr)
+            if enumerator is not None:
+                tokens.append(f"E{_DEP_FIELD_SEP}{en.usr}{_DEP_FIELD_SEP}{enumerator.content_hash}")
+        return tokens
+
+    def _wide_tokens(self, symbol: Symbol) -> list[str]:
+        """Return the extra dependency tokens a custom template may need.
+
+        ``content_hash`` folds in what the bundled templates render; a custom
+        template can also read the rest of the symbol row and the symbol's
+        template parameters (which no bundled template touches, and which no
+        other token covers). Both are per-symbol, so a page picks up only what
+        it renders.
+        """
+        return [
+            _DEP_FIELD_SEP.join(
+                (
+                    "W",
+                    symbol.usr,
+                    symbol.spelling,
+                    symbol.display_name,
+                    symbol.parent_usr,
+                    str(int(symbol.is_documented)),
+                    str(symbol.file_id),
+                    str(symbol.line),
+                ),
+            ),
+            *(
+                _DEP_FIELD_SEP.join(
+                    (
+                        "WT",
+                        symbol.usr,
+                        str(tp.idx),
+                        str(tp.param_kind),
+                        tp.name,
+                        tp.type_repr,
+                        tp.default_repr,
+                    ),
                 )
-                enumerator = self.store.symbol(en.usr)
-                if enumerator is not None:
-                    tokens.append(f"E{_DEP_FIELD_SEP}{en.usr}{_DEP_FIELD_SEP}{enumerator.content_hash}")
-        if recurse and (symbol.kind == SymbolKind.NAMESPACE or symbol.kind in _RECORD_KINDS):
-            for child in self.children(symbol):
-                self._collect_symbol_tokens(child, tokens, visited, recurse=True)
+                for tp in self.store.template_parameters(symbol.usr)
+            ),
+        ]
 
     def _collect_group_tokens(self, group: Group, tokens: list[str]) -> None:
         """Append the dependency tokens a group page reads (heading, members, subgroups)."""
