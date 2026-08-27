@@ -284,9 +284,27 @@ void SqliteStore::insert_rows(const model::ParsedModule& module,
   }
 
   {
+    // Upsert, never INSERT OR REPLACE. REPLACE is delete+insert, and under
+    // `PRAGMA foreign_keys=ON` deleting a `groups` row fires `group_members`'
+    // ON DELETE CASCADE — so merely re-inserting an existing group would wipe
+    // every membership row it owns, including the ones contributed by
+    // translation units this write is not touching.
+    //
+    // The WHERE additionally refuses the *downgrade*: `ensure_group` emits a
+    // stub row (title == id, no brief/detail/parent) for every `\ingroup`
+    // reference whose `\defgroup` block this parse did not read, and last
+    // write wins would let such a stub overwrite the real title and prose —
+    // both on an incremental write whose re-parsed units only reference the
+    // group, and on a full parse where batch order decides which copy lands
+    // last. A stub therefore only ever creates a row, never updates one.
     Stmt g(db_,
-           "INSERT OR REPLACE INTO groups(id, title, brief, detail, "
-           "parent_group_id) VALUES(?,?,?,?,?);");
+           "INSERT INTO groups(id, title, brief, detail, parent_group_id) "
+           "VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+           "title = excluded.title, brief = excluded.brief, "
+           "detail = excluded.detail, "
+           "parent_group_id = excluded.parent_group_id "
+           "WHERE excluded.title <> excluded.id OR excluded.brief <> '' "
+           "OR excluded.detail <> '' OR excluded.parent_group_id IS NOT NULL;");
     for (const auto& grp : module.groups) {
       g.reset();
       g.bind(1, grp.id);
