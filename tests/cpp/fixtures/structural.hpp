@@ -113,3 +113,15 @@ class Chained {
  public:
   int c = 0;
 };
+
+/** \ingroup shapes
+  * \brief A blank line ends the brief.
+  *
+  * This paragraph is the detailed description; a paragraph command runs to the
+  * next blank line, so it must not be folded into the one-line summary.
+  *
+  * \param a the input value
+  *
+  * A closing paragraph documents the function, not the parameter above it.
+  */
+int paragraph_helper(int a);

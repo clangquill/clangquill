@@ -236,6 +236,34 @@ TEST_CASE("a marker does not own the rest of its line", "[comments]") {
   CHECK(chained->is_documented);
 }
 
+TEST_CASE("a blank line ends a paragraph command", "[comments]") {
+  // A `takes_paragraph` command runs to the next blank line. Letting it run on
+  // put a symbol's whole detailed description inside its one-line brief, and
+  // folded the prose after a `\param` into that parameter's description.
+  auto m = parse_fixture("structural.hpp");
+  const auto* fn = find(m, "paragraph_helper");
+  REQUIRE(fn != nullptr);
+  auto fs = fields_of(m, fn->usr);
+
+  const Field* brief = field(fs, "brief");
+  REQUIRE(brief != nullptr);
+  CHECK(brief->value == "A blank line ends the brief.");
+
+  const Field* param = field(fs, "param", "a");
+  REQUIRE(param != nullptr);
+  CHECK(param->value == "the input value");
+
+  // Both paragraphs below a blank line belong to the entity.
+  bool detailed = false, closing = false;
+  for (const auto& f : fs) {
+    if (f.name != "detail") continue;
+    if (f.value.find("detailed description") != std::string::npos) detailed = true;
+    if (f.value.find("closing paragraph") != std::string::npos) closing = true;
+  }
+  CHECK(detailed);
+  CHECK(closing);
+}
+
 TEST_CASE("doxygen parser covers the common commands", "[comments]") {
   auto m = parse_fixture("doxygen.hpp");
   const auto* divide = find(m, "doc::divide");

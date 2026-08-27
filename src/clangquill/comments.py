@@ -232,9 +232,14 @@ def doxygen_parse(raw: str) -> CommentModel:
             flush()
             cmd = match.group(1).lower()
             buf.append(match.group(2))
-        elif not line and cmd is None and have_lead_para:
-            flush()
-        elif line:
+        elif not line:
+            # A blank line ends whatever section is open: a Doxygen paragraph
+            # command runs only to the next blank line, so the paragraphs below
+            # one document the entity rather than extending ``@brief`` or the
+            # last ``@param``.
+            if cmd is not None or have_lead_para:
+                flush()
+        else:
             buf.append(line)
             have_lead_para = have_lead_para or cmd is None
     flush()

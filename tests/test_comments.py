@@ -89,6 +89,31 @@ def test_doxygen_parse_strips_post_item_markers(raw: str) -> None:
     assert model.brief == "trailing member doc"
 
 
+PARAGRAPHS = """
+/**
+ * @brief A blank line ends the brief.
+ *
+ * This paragraph is the detailed description.
+ *
+ * @param a the input value
+ *
+ * A closing paragraph documents the function.
+ */
+"""
+
+
+def test_doxygen_parse_blank_line_ends_a_paragraph_command() -> None:
+    # A paragraph command runs to the next blank line; the paragraphs below one
+    # document the entity rather than extending @brief or the last @param.
+    model = doxygen_parse(PARAGRAPHS)
+    assert model.brief == "A blank line ends the brief."
+    assert [(p.name, p.description) for p in model.params] == [("a", "the input value")]
+    assert model.detail == [
+        "This paragraph is the detailed description.",
+        "A closing paragraph documents the function.",
+    ]
+
+
 def test_model_from_fields_round_trips() -> None:
     rows = [
         ("brief", "", "A brief."),

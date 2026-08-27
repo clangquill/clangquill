@@ -395,11 +395,12 @@ model::CommentModel parse_raw(const std::string& raw) {
         continue;
       }
       if (line.empty()) {
-        // Blank line ends a lead paragraph and ends a single-name command whose
-        // argument is complete, but continues a prose command like `\brief`.
-        if (cmd.empty() && have_lead_para) flush();
-        else if (!cmd.empty() && !takes_paragraph(cmd)) flush();
-        else if (!cmd.empty()) buf += ' ';
+        // A blank line ends whatever section is open. Doxygen's paragraph
+        // commands run only to the next blank line, so the paragraphs below one
+        // document the entity rather than extending `\brief` or the last
+        // `\param` -- letting them run on put a symbol's entire detailed
+        // description inside its one-line summary.
+        if (!cmd.empty() || have_lead_para) flush();
         continue;
       }
       // A command that does not take a paragraph already has its argument, so
