@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -396,6 +398,45 @@ def test_structural_block_resolves_the_same_under_any_batching(tmp_path: Path) -
     assert batched == isolated
     assert ("Local", True) in batched
     assert ("Elsewhere", False) in batched
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_parse_releases_the_gil(tmp_path: Path) -> None:
+    """Another Python thread must keep running while a parse is in flight.
+
+    The parse is bound with ``nb::call_guard<nb::gil_scoped_release>()``; without
+    it the calling thread holds the GIL for the whole (multi-minute, on a real
+    project) parse, which is what makes Ctrl-C look dead and starves every other
+    thread in the process.
+    """
+    header = tmp_path / "demo.hpp"
+    header.write_text(FIXTURE)
+    db = tmp_path / "out.sqlite"
+
+    ticks = 0
+    stop = threading.Event()
+
+    def tick() -> None:
+        nonlocal ticks
+        while not stop.is_set():
+            ticks += 1
+            time.sleep(0.001)
+
+    worker = threading.Thread(target=tick, daemon=True)
+    worker.start()
+    try:
+        # Wait for the first tick so a zero delta below can only mean the worker
+        # was blocked, never that it had not started yet.
+        while ticks == 0:
+            time.sleep(0.001)
+        before = ticks
+        _core.parse_to_sqlite([str(header)], str(db), _core.ParseOptions())
+        during = ticks - before
+    finally:
+        stop.set()
+        worker.join(timeout=5)
+
+    assert during > 0
 
 
 def test_schema_version_exposed() -> None:

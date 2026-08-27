@@ -243,17 +243,27 @@ NB_MODULE(_core, m) {
       .def_ro("diagnostic_records", &ParseResult::diagnostic_records)
       .def_ro("translation_units", &ParseResult::translation_units);
 
+  // The three parse entry points run for minutes on a large project and touch
+  // no Python objects between argument conversion and return, so each releases
+  // the GIL for the duration of the call. Without this the calling interpreter
+  // thread holds the GIL throughout: Ctrl-C is not serviced until the parse
+  // returns, and no other Python thread (progress reporting, Sphinx's parallel
+  // machinery) can run. nanobind destroys the guard before converting the
+  // result, so the ParseResult is built back under the GIL as usual.
   m.def("parse_to_sqlite", &parse_to_sqlite, nb::arg("inputs"),
         nb::arg("db_path"), nb::arg("options") = PyParseOptions{},
+        nb::call_guard<nb::gil_scoped_release>(),
         "Parse C++ inputs and write the IR into a SQLite DB at db_path.");
 
   m.def("parse_tus_to_sqlite", &parse_tus_to_sqlite, nb::arg("inputs"),
         nb::arg("db_path"), nb::arg("options") = PyParseOptions{},
+        nb::call_guard<nb::gil_scoped_release>(),
         "Re-parse the given inputs into an existing SQLite IR (in parallel, in "
         "one transaction), replacing only those translation units' rows.");
 
   m.def("parse_tu_to_sqlite", &parse_tu_to_sqlite, nb::arg("input"),
         nb::arg("db_path"), nb::arg("options") = PyParseOptions{},
+        nb::call_guard<nb::gil_scoped_release>(),
         "Re-parse one input into an existing SQLite IR, replacing only that "
         "translation unit's rows.");
 }
