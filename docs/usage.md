@@ -94,6 +94,14 @@ Wrote 1 page(s) to /path/to/docs/api.
 Run `clangquill build --help` for the full set of options, which mirror the
 `clangquill_*` config values.
 
+If the installed core was built without libclang (`clangquill --version`
+prints `libclang: not linked (stub backend)`), `build` exits immediately with
+`Error: clangquill was built without libclang (stub backend) — cannot parse.`
+and status code 1, rather than attempting a parse. Unlike the [Sphinx
+extension](#sphinx-extension), which degrades to a placeholder page so a
+docs build can still complete, there is no partial output the standalone CLI
+can usefully fall back to.
+
 To gate CI on a clean parse, add `--warnings-as-errors` (exit 1 if libclang
 emitted any warning or worse) and `--diagnostics-log` (the full diagnostic list,
 all severities, as a file you can archive):

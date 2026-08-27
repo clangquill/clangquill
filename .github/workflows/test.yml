@@ -161,3 +161,43 @@ jobs:
           uv sync --frozen --extra docs
           uv run python -c "from clangquill._libclang import libclang_major; assert (libclang_major() or 0) >= 22, libclang_major()"
           uv run make -C docs html
+  py-check-no-libclang:
+    # Every job above builds with libclang linked, so the `not have_libclang()`
+    # branches — the Sphinx extension's placeholder page, the CLI's clean-exit
+    # message, the `have_libclang()`/`libclang_version()` stub — were dead code
+    # in CI (issue #226). No libclang-dev is installed here on purpose: a build
+    # that silently found some other libclang would defeat the point.
+    runs-on: ubuntu-24.04
+    name: pytest (no libclang)
+    env:
+          # sqlite.org 403s vcpkg's default downloader, so distfiles go through
+          # a browser-User-Agent script (SHA512 is still checked by vcpkg).
+      X_VCPKG_ASSET_SOURCES: >-
+        clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
+        {url} {sha512} {dst}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install dependencies
+        env:
+          SKBUILD_CMAKE_DEFINE: CLANGQUILL_WITH_LIBCLANG=OFF
+        run: uv sync --frozen --extra ci
+          # Load-bearing, like the pytest-newer-llvm assert: a core that
+          # silently linked a libclang would make every test below skip via
+          # the ordinary `not have_libclang()` markers instead of exercising
+          # the stub backend they exist to cover.
+      - name: Assert the stub backend actually landed
+        run: |
+          uv run python -c "
+          from clangquill import _core
+          assert not _core.have_libclang()
+          assert _core.libclang_version() == ''
+          "
+      - name: run pytest
+        run: uv run pytest

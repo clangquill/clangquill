@@ -14,8 +14,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   ctest:
-    name: C++ unit tests
+    name: C++ unit tests (libclang ${{ matrix.with_libclang }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # ON is the real, day-to-day suite. OFF builds the same Catch2 binary
+        # with CLANGQUILL_HAVE_LIBCLANG undefined, which swaps the parser/m7/
+        # comment-parser suites for their `[!mayfail]` stub TEST_CASEs — that
+        # branch was otherwise never compiled, let alone run, in CI (issue #226).
+        with_libclang: ['ON', 'OFF']
     env:
           # sqlite.org 403s vcpkg's default downloader, so distfiles go through
           # a browser-User-Agent script (SHA512 is still checked by vcpkg).
@@ -25,14 +33,20 @@ jobs:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v7.0.1
-            # Only the build tools and libclang come from apt: sqlite3,
-            # nlohmann-json and catch2 are provided by vcpkg, which the CMake
-            # build bootstraps itself (cmake/VcpkgBootStrap.cmake).
+            # Only the build tools come from apt (libclang too, but only for
+            # the ON leg): sqlite3, nlohmann-json and catch2 are provided by
+            # vcpkg, which the CMake build bootstraps itself
+            # (cmake/VcpkgBootStrap.cmake).
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build libclang-dev
+          sudo apt-get install -y --no-install-recommends cmake ninja-build
+            # Deliberately not installed on the OFF leg: an accidentally
+            # discovered libclang there would silently turn it back into a
+            # duplicate of the ON leg instead of exercising the stub backend.
+      - name: Install libclang
+        if: matrix.with_libclang == 'ON'
+        run: sudo apt-get install -y --no-install-recommends libclang-dev
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:
@@ -47,7 +61,7 @@ jobs:
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
-          -DCLANGQUILL_WITH_LIBCLANG=ON
+          -DCLANGQUILL_WITH_LIBCLANG=${{ matrix.with_libclang }}
           -DCLANGQUILL_BUILD_TESTS=ON
           -DCMAKE_BUILD_TYPE=Debug
           -DCMAKE_CXX_FLAGS=--coverage
@@ -65,7 +79,11 @@ jobs:
             # `branch 1 taken -1` for a real line — a known gcov bug
             # (gcc.gnu.org/PR68080) that gcovr treats as fatal by default;
             # downgrade just that one to a per-file warning.
+            # OFF-leg coverage is skipped: it would just report every
+            # libclang-gated line as uncovered, duplicating the ON leg's
+            # numbers under a less accurate build.
       - name: Collect coverage
+        if: matrix.with_libclang == 'ON'
         run: >-
           gcovr --root . build --filter 'src/cpp/'
           --gcov-ignore-parse-errors=negative_hits.warn_once_per_file
@@ -74,7 +92,7 @@ jobs:
             # Same token guard as the pytest workflow: no CODECOV_TOKEN on a
             # fork PR (or where the secret is unset), and codecov rejects a
             # tokenless upload.
-        if: ${{ env.CODECOV_TOKEN != '' }}
+        if: ${{ matrix.with_libclang == 'ON' && env.CODECOV_TOKEN != '' }}
         uses: codecov/codecov-action@v7.0.0
         with:
           files: cpp-coverage.xml

@@ -96,6 +96,11 @@ docs = ["sphinx>=6",
 ci = [
     "pytest",
     "pytest-cov",
+    # Without this, tests/test_sphinx_ext.py's `pytest.importorskip("sphinx")`
+    # made the whole acceptance-test file a no-op in every CI job — including
+    # the no-libclang job, which exists specifically to assert the Sphinx
+    # extension's graceful-degradation path (issue #226).
+    "clangquill[docs]",
 ]
 dev = [
     "ty",

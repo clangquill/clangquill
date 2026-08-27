@@ -134,3 +134,20 @@ def test_diagnostics_log_option_writes_the_file(tmp_path: Path):
     assert result.exit_code == 0
     assert "on its way out" in log.read_text()
     assert str(log) in _streams(result)
+
+
+def test_build_without_libclang_exits_with_the_documented_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The stub backend's ``RuntimeError`` must not reach the user as a raw traceback.
+
+    Forces the branch via monkeypatching so it runs regardless of how this
+    core was actually built — see issue #226, which found the branch dead in
+    every CI job because every job links libclang.
+    """
+    monkeypatch.setattr(cli._core, "have_libclang", lambda: False)  # noqa: SLF001
+
+    result = _run_build(tmp_path, CLEAN_HEADER)
+
+    assert result.exit_code == 1
+    output = _streams(result)
+    assert "clangquill was built without libclang" in output
+    assert "Traceback" not in output
