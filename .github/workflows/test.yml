@@ -52,10 +52,19 @@ jobs:
       - name: run pytest
         run: uv run pytest
       - name: Upload coverage
+      # A fork PR cannot read CODECOV_TOKEN, and a tokenless upload is rejected
+      # outright; skip the step there instead of failing the run on it.
+        if: ${{ !github.event.pull_request.head.repo.fork }}
         uses: codecov/codecov-action@v7.0.0
         with:
           env_vars: OS,PYTHON
-          fail_ci_if_error: false
+          # pytest writes coverage.xml (see pyproject addopts); name it
+          # explicitly so a missing report is an error rather than an
+          # upload of whatever else the action happens to discover.
+          files: coverage.xml
+          flags: python
+          # The report now exists, so a failed upload means a real problem.
+          fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
     # Docs build on the distro libclang (18). The C++23/26 dogfood header is
     # gated on libclang >= 22, so here it is omitted — exercising the graceful
