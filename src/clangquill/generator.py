@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
     from jinja2 import Template
 
-    from clangquill.comments import CommentModel
+    from clangquill.comments import CommentModel, CommentParser
     from clangquill.store import Enumerator, Group, Parameter, Reference, SourceFile, Store, Symbol
 
 # Per-kind Jinja template (the ``{kind}.md.jinja`` override seam). Several
@@ -344,7 +344,7 @@ class Generator:
         template_dirs: Sequence[str | Path] | None = None,
         templates: Mapping[str, str] | None = None,
         include_undocumented: bool = True,
-        comment_parser: str | None = None,
+        comment_parser: str | CommentParser | None = None,
         path_base: str | Path | None = None,
     ) -> None:
         """Bind a store and build the Jinja environment with overrides first.
@@ -353,8 +353,9 @@ class Generator:
         name, e.g. ``"method"``, or the bundled template stem, e.g. ``"class"``)
         to a replacement template stem. ``include_undocumented`` controls
         whether symbols lacking a documentation comment are emitted.
-        ``comment_parser`` overrides the comment format (a registered name or a
-        dotted import path) for every symbol. ``path_base`` is the directory
+        ``comment_parser`` overrides the comment format (a registered name, a
+        dotted import path, or a ``str -> CommentModel`` callable) for every
+        symbol. ``path_base`` is the directory
         that rendered file paths are shown relative to; ``None`` leaves the
         absolute paths libclang reports unchanged (see :meth:`_relpath`).
         """
