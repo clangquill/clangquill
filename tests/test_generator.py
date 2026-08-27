@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
 from clangquill.comments import CommentModel
-from clangquill.generator import Generator, write_if_changed
+from clangquill.generator import Generator, PagePlan, write_if_changed
 from clangquill.store import Reference, RefKind, SourceFile, Store, Symbol
 
 if TYPE_CHECKING:
@@ -130,6 +131,21 @@ def test_write_if_changed_reports_and_repairs(tmp_path: Path) -> None:
     # Undecodable bytes are not a reason to keep them.
     target.write_bytes(b"\xff\xfe not utf-8")
     assert write_if_changed(target, "hello\n") is True
+
+
+def test_wide_page_fingerprint_covers_what_content_hash_omits(gen: Generator, store: Store) -> None:
+    # content_hash folds in the fields the bundled templates render, so a symbol
+    # that only moved lines keeps its default key -- and its cached page. A
+    # custom template may render the declaration line, so the wide key (the one
+    # a declared template opts into) has to move with it.
+    symbol = _symbol(store, "geo")
+    moved = replace(symbol, line=symbol.line + 10)
+
+    def plan_for(sym: Symbol) -> PagePlan:
+        return PagePlan(sym.spelling, sym.spelling, lambda: "", subtree_seeds=(sym,))
+
+    assert gen.page_fingerprint(plan_for(symbol)) == gen.page_fingerprint(plan_for(moved))
+    assert gen.page_fingerprint(plan_for(symbol), wide=True) != gen.page_fingerprint(plan_for(moved), wide=True)
 
 
 def test_unique_stem_dedupes_case_insensitively() -> None:

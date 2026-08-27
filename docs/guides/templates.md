@@ -79,6 +79,48 @@ setting) always applies consistently. The most useful `gen` helpers are
 `gen.signature(symbol)` (the directive argument), and
 `gen.render_symbol(child, level=...)` to recurse into a container's members.
 
+## Custom templates and warm builds
+
+With `clangquill_cache_dir` set, an incremental build memoises each rendered
+page: a page whose symbols did not change replays its previous text instead of
+running Jinja again (see [incremental builds](../usage.md#incremental-builds)).
+That replay is only safe if the per-page dependency key covers everything the
+templates read — and a custom template can read anything, including
+`gen.roots()`, which reaches outside the page entirely. So by default **any
+`template_dirs` override turns page memoisation off** and every page re-renders
+on every build.
+
+A template opts back in by declaring it, in a comment anywhere in the file:
+
+```jinja
+{# clangquill:page-cache #}
+```
+
+Declared templates are keyed on a wider fingerprint that covers every per-symbol
+field the documented template context exposes: the symbol row in full (spelling,
+display name, parent, documented flag, declaring file and line), its parameters,
+template parameters, comment, cross-references and enumerators, plus the same
+data for every symbol the page renders below it.
+
+The declaration is a promise about the template, and it is yours to keep. It
+says: *this template renders only the page's own symbols and what `gen` reaches
+from them.* Do not declare a template that
+
+- calls `gen.roots()` or `gen.file_roots(...)`, or otherwise renders symbols
+  from outside the page (a global index of every class, a "see also everything
+  in this namespace" section), or
+- reads anything outside the IR that can change between builds — the clock, an
+  environment variable, a file it opens itself.
+
+Everything in [what a template receives](#what-a-template-receives) is otherwise
+fair game. Editing the template still busts the whole cache, so a declaration
+that turns out to be wrong is fixed by correcting the template.
+
+The rule applies per build: one undeclared template file in your
+`template_dirs` turns memoisation off for the whole build, and the setting is
+about template *files* only — a `templates` mapping that points a kind at
+another bundled stem keeps the bundled behaviour.
+
 ## Example: a minimal class template
 
 The bundled `class.md.jinja` emits a heading, an "Inherits from"/"Friends" line,
