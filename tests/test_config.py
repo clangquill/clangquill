@@ -217,3 +217,37 @@ def test_diagnostics_log_accepts_none_and_a_path():
 def test_diagnostics_log_rejects_bad_values(value):
     with pytest.raises(ConfigError, match="clangquill_diagnostics_log"):
         Config(input=["a.hpp"], diagnostics_log=value).validate()
+
+
+# -- root_document / output_dir must be safe, non-path-shaped values ----------
+
+
+def test_validate_rejects_empty_root_document():
+    with pytest.raises(ConfigError, match="root_document"):
+        Config(input=["a.hpp"], root_document="").validate()
+
+
+@pytest.mark.parametrize("value", ["../foo", "sub/dir", "sub\\dir", "/etc/passwd"])
+def test_validate_rejects_root_document_with_path_separators(value: str):
+    with pytest.raises(ConfigError, match="root_document"):
+        Config(input=["a.hpp"], root_document=value).validate()
+
+
+def test_validate_accepts_bare_root_document():
+    cfg = Config(input=["a.hpp"], root_document="my-index").validate()
+    assert cfg.root_document == "my-index"
+
+
+@pytest.mark.parametrize("value", ["../api", "sub/../../escape", "docs/../../escape"])
+def test_validate_rejects_output_dir_with_dotdot_segments(value: str):
+    with pytest.raises(ConfigError, match="output_dir"):
+        Config(input=["a.hpp"], output_dir=value).validate()
+
+
+@pytest.mark.parametrize("value", ["api", "docs/api", "./api", "/etc/clangquill-api"])
+def test_validate_accepts_relative_and_absolute_output_dir(value: str):
+    # An absolute output_dir is a legitimate, explicit choice (the CLI's
+    # ``-o`` accepts one directly); only unintentional ``..`` traversal is
+    # rejected.
+    cfg = Config(input=["a.hpp"], output_dir=value).validate()
+    assert cfg.output_dir == value
