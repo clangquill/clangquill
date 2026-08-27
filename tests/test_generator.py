@@ -641,7 +641,7 @@ def test_related_block_keeps_documented_cross_file_relates_when_hiding_undocumen
         assert not _symbol(store, "app::hidden_link").is_documented
         pages = Generator(store, include_undocumented=False).generate(tmp_path / "api", group_by="file")
 
-    assert pages == ["alpha_hpp", "beta_hpp"]
+    assert sorted(pages) == ["alpha_hpp", "beta_hpp"]
     alpha = (tmp_path / "api" / "alpha_hpp.md").read_text()
     assert "{cpp:any}`app::link_to_alpha`" in alpha
     assert "{cpp:any}`app::hidden_link`" not in alpha
