@@ -107,6 +107,13 @@ TEST_CASE("parser captures operator overloads", "[m7]") {
   CHECK(subscript->kind == model::SymbolKind::Method);
 }
 
+TEST_CASE("parser captures conversion operators", "[m7]") {
+  auto m = parse_m7();
+  const auto* conv = find(m, "m7::Vec::operator bool");
+  REQUIRE(conv != nullptr);
+  CHECK(conv->kind == model::SymbolKind::Method);
+}
+
 TEST_CASE("parser assembles Doxygen groups and members", "[m7]") {
   auto m = parse_m7();
 
