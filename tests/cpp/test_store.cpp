@@ -449,3 +449,81 @@ TEST_CASE("SqliteStore never downgrades a group row to a stub", "[store]") {
     std::remove(path.c_str());
   }
 }
+
+TEST_CASE("SqliteStore write_tus drops dependencies that left the closure",
+          "[store]") {
+  // ha.hpp is an input; hdep.hpp is a header it #includes (and carries symbols
+  // for, as it would when both sit in the same umbrella batch).
+  model::ParsedModule original;
+
+  model::SourceFile a;
+  a.path = "/tmp/ha.hpp";
+  a.sha256 = std::string(64, 'a');
+  original.files.push_back(a);
+
+  model::SourceFile dep;
+  dep.path = "/tmp/hdep.hpp";
+  dep.sha256 = std::string(64, 'd');
+  original.files.push_back(dep);
+
+  model::SourceFile other;
+  other.path = "/tmp/hother.hpp";
+  other.sha256 = std::string(64, 'o');
+  original.files.push_back(other);
+
+  original.symbols.push_back(group_symbol("c:@F@ha", "/tmp/ha.hpp"));
+  original.symbols.push_back(group_symbol("c:@F@hdep", "/tmp/hdep.hpp"));
+  original.symbols.push_back(group_symbol("c:@F@hother", "/tmp/hother.hpp"));
+
+  std::string path = temp_db_path();
+  {
+    store::SqliteStore writer(path);
+    writer.write(original, store::Meta::current());
+  }
+
+  // ha.hpp is re-parsed and no longer includes hdep.hpp. The caller knows
+  // hdep.hpp was reached only through ha.hpp, so it is offered as a candidate;
+  // hother.hpp belongs to a unit this write does not touch and is not offered.
+  model::ParsedModule reparse;
+  model::SourceFile a2;
+  a2.path = "/tmp/ha.hpp";
+  a2.sha256 = std::string(64, 'c');
+  reparse.files.push_back(a2);
+  reparse.symbols.push_back(group_symbol("c:@F@ha", "/tmp/ha.hpp"));
+
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(writer.write_tus(reparse, store::Meta::current(),
+                                     {"/tmp/ha.hpp"},
+                                     {"/tmp/ha.hpp", "/tmp/hdep.hpp"}));
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  bool has_a = false;
+  bool has_dep = false;
+  bool has_other = false;
+  for (const auto& f : got.files) {
+    if (f.path == "/tmp/ha.hpp") has_a = true;
+    if (f.path == "/tmp/hdep.hpp") has_dep = true;
+    if (f.path == "/tmp/hother.hpp") has_other = true;
+  }
+  CHECK(has_a);          // still reached by the fresh parse
+  CHECK_FALSE(has_dep);  // dropped out of every closure -> gone
+  CHECK(has_other);      // never offered; belongs to another unit
+
+  bool sym_a = false;
+  bool sym_dep = false;
+  bool sym_other = false;
+  for (const auto& s : got.symbols) {
+    if (s.usr == "c:@F@ha") sym_a = true;
+    if (s.usr == "c:@F@hdep") sym_dep = true;
+    if (s.usr == "c:@F@hother") sym_other = true;
+  }
+  CHECK(sym_a);
+  CHECK_FALSE(sym_dep);
+  CHECK(sym_other);
+
+  std::remove(path.c_str());
+}

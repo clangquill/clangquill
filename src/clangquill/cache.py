@@ -319,6 +319,18 @@ class BuildCache:
             mapping.setdefault(row["dep_path"], set()).add(row["input_path"])
         return mapping
 
+    def deps_only_from(self, inputs: Iterable[str]) -> list[str]:
+        """Return tracked files the cached parse attributed *only* to ``inputs``.
+
+        Re-parsing those inputs is the only chance to notice that one of these
+        files has left the build: no other translation unit contributes it, so
+        if the fresh parse no longer reaches it, nothing ever will and its IR
+        rows can go. A dependency any surviving unit also pulls in is never
+        returned, so the caller can delete the whole list unconditionally.
+        """
+        owners = set(inputs)
+        return sorted(dep for dep, tus in self.tu_inputs().items() if tus and tus <= owners)
+
     def parse_status(self, parse_fingerprint: str) -> ParseStatus:
         """Classify how much of the cached parse a rebuild can reuse.
 
