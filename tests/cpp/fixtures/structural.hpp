@@ -148,3 +148,12 @@ int directed_helper(int* result, int value, int* scratch, int plain);
   * Prose written after the block stays after it.
   */
 int coded_helper(int x);
+
+/** \ingroup shapes
+  * \brief A wrapped sentence about
+  * \ref Widget stays one sentence.
+  *
+  * Emphasis reaches the reader: \b bold, \e italic, \c code and \p x. HTML
+  * such as <b>tags</b> and <ul><li>list items</li></ul> survives too.
+  */
+int inline_helper(int x);

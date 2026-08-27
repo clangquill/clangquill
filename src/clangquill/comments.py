@@ -159,6 +159,68 @@ _COMMAND_RE = re.compile(r"^\s*[@\\](\w+)((?:\[[^\]\s]*\])|(?:\{[^}\s]*\}))?\s*(
 # Commands opening a block whose lines are carried through verbatim.
 _VERBATIM_CMDS = frozenset({"code", "verbatim"})
 
+# Doxygen's inline commands: markup that decorates the next word inside a
+# sentence rather than opening a block, mapped to the MyST that says the same
+# thing. ``@n`` (a hard line break) has no equivalent that survives whitespace
+# normalization, so it is dropped.
+_INLINE_MARKUP: dict[str, tuple[str, str]] = {
+    "c": ("`", "`"),
+    "p": ("`", "`"),
+    "b": ("**", "**"),
+    "e": ("*", "*"),
+    "em": ("*", "*"),
+    "a": ("*", "*"),
+    "ref": ("{cpp:any}`", "`"),
+    "link": ("{cpp:any}`", "`"),
+    "n": ("", ""),
+}
+
+# A command and the word it decorates, where the command starts a word (so an
+# address like ``user@b.example`` is left alone). The optional quoted string is
+# Doxygen's ``@ref target "a title"`` link text.
+_INLINE_RE = re.compile(
+    r"""(?<![^\s(\[{"'])[@\\](?P<cmd>\w+)[ ](?P<arg>\S+)(?:[ ]"(?P<title>[^"]*)")?""",
+)
+
+# Punctuation that ends a sentence rather than belonging to the decorated word.
+_SENTENCE_END = ".,;:!?"
+
+
+def _is_inline_command(name: str) -> bool:
+    """Report whether ``name`` is inline markup rather than a block command."""
+    return name in _INLINE_MARKUP
+
+
+def _render_inline_markup(text: str) -> str:
+    """Rewrite Doxygen's inline commands in ``text`` as MyST markup.
+
+    Without this ``@c x``, ``@p arg`` and ``@ref X`` reach the output as literal
+    backslash text. Trailing sentence punctuation is left outside the markup, so
+    ``@c foo.`` reads as a code span followed by a full stop.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        markup = _INLINE_MARKUP.get(match["cmd"].lower())
+        if markup is None:
+            return match[0]
+        prefix, suffix = markup
+        if not prefix:
+            return ""
+        arg, title = match["arg"], match["title"]
+        tail = ""
+        while arg and arg[-1] in _SENTENCE_END:
+            arg, tail = arg[:-1], arg[-1] + tail
+        if not arg:
+            return match[0]
+        if title is not None and not tail:
+            arg = f"{title} <{arg}>"
+        elif title is not None:
+            return match[0]
+        return f"{prefix}{arg}{suffix}{tail}"
+
+    return _INLINE_RE.sub(replace, text)
+
+
 # Command aliases collapsed onto a canonical model field/handler.
 _RETURN_CMDS = {"return", "returns", "result"}
 _BRIEF_CMDS = {"brief", "short"}
@@ -371,7 +433,7 @@ class _Scan:
 
     def flush(self) -> None:
         """Close the open section, routing what it collected into the model."""
-        text = " ".join(self.buf).strip()
+        text = _render_inline_markup(" ".join(self.buf).strip())
         self.buf.clear()
         if self.cmd is None:
             if text:
@@ -400,7 +462,10 @@ def doxygen_parse(raw: str) -> CommentModel:
             block.feed(line)
             continue
         match = _COMMAND_RE.match(line)
-        if match:
+        # Inline markup is not a block command: a wrapped prose line can begin
+        # with one (``@ref Foo is the ...``), and taking it for a command
+        # flushed the open section and swallowed the rest of the paragraph.
+        if match and not _is_inline_command(match.group(1).lower()):
             scan.flush()
             cmd, attribute = _split_command_word(match.group(1).lower(), match.group(2))
             if cmd in _VERBATIM_CMDS:

@@ -37,6 +37,20 @@ fence's info string; a plain `@code` is `cpp` (the only language a
 libclang-driven parser sees) and `@verbatim` gets none, being preformatted text
 rather than code. Such a block is never promoted to the `brief`.
 
+### Inline markup
+
+Doxygen's inline commands are rewritten into the MyST that says the same thing,
+in both the text of a command and in the prose: `@c x` / `@p x` become code
+spans, `@b x` bold, `@e` / `@em` / `@a x` italic, and `@ref X` (optionally
+`@ref X "a title"`) a `{cpp:any}` cross-reference role. A command has to start a
+word, so an address like `user@b.example` is left alone, and trailing sentence
+punctuation stays outside the markup. Because inline markup never opens a block,
+a wrapped prose line beginning with one — `@ref Foo is the …` — stays prose
+rather than becoming a command.
+
+HTML in a comment (`<b>`, `<br>`, `<ul><li>…`) is passed through verbatim;
+Markdown keeps raw inline HTML, so the emphasis and list structure survives.
+
 The `custom` bucket is the graceful-degradation seam: a command the parser does
 not recognize is never dropped — it lands in `custom["<name>"]` so a template can
 still render it.

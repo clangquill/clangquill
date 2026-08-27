@@ -167,6 +167,96 @@ std::string fenced_block(const std::string& kind, const std::string& language,
 // one-line summary, so it must not be promoted to the brief.
 bool is_fenced_block(const std::string& s) { return s.rfind("```", 0) == 0; }
 
+// Doxygen's inline commands: markup that decorates the next word inside a
+// sentence rather than opening a block. Each maps to the MyST that says the
+// same thing -- `\c x` is a code span, `\ref X` a cross-reference role -- so the
+// command reaches the reader as markup instead of literal backslash text.
+struct InlineMarkup {
+  const char* name;
+  const char* prefix;
+  const char* suffix;
+};
+
+const InlineMarkup* inline_markup(const std::string& name) {
+  static const InlineMarkup kMarkup[] = {
+      {"c", "`", "`"},         {"p", "`", "`"},
+      {"b", "**", "**"},       {"e", "*", "*"},
+      {"em", "*", "*"},        {"a", "*", "*"},
+      {"ref", "{cpp:any}`", "`"}, {"link", "{cpp:any}`", "`"},
+      // Takes no argument: a hard line break, which survives neither
+      // normalize_ws nor a Sphinx field list, so it is simply dropped.
+      {"n", nullptr, nullptr},
+  };
+  for (const InlineMarkup& m : kMarkup) {
+    if (name == m.name) return &m;
+  }
+  return nullptr;
+}
+
+bool is_inline_command(const std::string& name) {
+  return inline_markup(name) != nullptr;
+}
+
+// Rewrites Doxygen's inline commands into MyST markup. Runs on already
+// normalized text, so an argument is simply the next space-delimited token.
+//
+// Trailing sentence punctuation is left outside the markup -- `\c foo.` reads
+// as a code span followed by a full stop, not a code span containing one -- and
+// a `\ref target "a title"` becomes a role with that title. The command has to
+// start a word, so an address like `user@b.example` is left alone.
+std::string render_inline_markup(const std::string& text) {
+  static const std::string kSentenceEnd = ".,;:!?";
+  std::string out;
+  std::size_t i = 0;
+  while (i < text.size()) {
+    const bool starts_word =
+        i == 0 || text[i - 1] == ' ' || std::string("([{\"'").find(text[i - 1]) !=
+                                            std::string::npos;
+    if ((text[i] != '\\' && text[i] != '@') || !starts_word) {
+      out += text[i++];
+      continue;
+    }
+    std::size_t word_end = text.find(' ', i + 1);
+    const InlineMarkup* markup =
+        word_end == std::string::npos
+            ? nullptr
+            : inline_markup(lower(text.substr(i + 1, word_end - i - 1)));
+    if (markup == nullptr || markup->prefix == nullptr) {
+      out += text[i++];
+      continue;
+    }
+    std::size_t arg_end = text.find(' ', word_end + 1);
+    if (arg_end == std::string::npos) arg_end = text.size();
+    std::string arg = text.substr(word_end + 1, arg_end - word_end - 1);
+    std::string tail;
+    while (!arg.empty() && kSentenceEnd.find(arg.back()) != std::string::npos) {
+      tail.insert(tail.begin(), arg.back());
+      arg.pop_back();
+    }
+    if (arg.empty()) {
+      out += text[i++];
+      continue;
+    }
+    // `\ref target "a title"` -- Doxygen's way of writing the link text. The
+    // role spells the same thing as ``title <target>``.
+    std::size_t next = arg_end;
+    if (tail.empty() && next + 1 < text.size() && text[next] == ' ' &&
+        text[next + 1] == '"') {
+      std::size_t close = text.find('"', next + 2);
+      if (close != std::string::npos) {
+        arg = text.substr(next + 2, close - next - 2) + " <" + arg + ">";
+        next = close + 1;
+      }
+    }
+    out += markup->prefix;
+    out += arg;
+    out += markup->suffix;
+    out += tail;
+    i = next;
+  }
+  return out;
+}
+
 // Group commands carry cross-symbol bookkeeping (assembled separately from the
 // symbol's raw comment); they must never leak into the rendered prose.
 bool is_group_command(const std::string& name) {
@@ -182,20 +272,50 @@ void collect_text(CXComment c, std::string& out) {
     return;
   }
   if (kind == CXComment_InlineCommand) {
-    if (is_group_command(
-            lower(to_string(clang_InlineCommandComment_getCommandName(c))))) {
+    std::string name =
+        lower(to_string(clang_InlineCommandComment_getCommandName(c)));
+    if (is_group_command(name)) return;
+    unsigned n = clang_InlineCommandComment_getNumArgs(c);
+    if (is_inline_command(name)) {
+      // Written back in source form so text_of's single markup pass covers the
+      // parsed tree and parse_raw's scan identically -- and so a `\ref X "a
+      // title"`, whose title libclang leaves in the following text, is still
+      // one string when the markup is applied.
+      if (n == 0) return;
+      out += '\\';
+      out += name;
+      for (unsigned i = 0; i < n; ++i) {
+        out += ' ';
+        out += to_string(clang_InlineCommandComment_getArgText(c, i));
+      }
+      out += ' ';
       return;
     }
-    unsigned n = clang_InlineCommandComment_getNumArgs(c);
     if (n == 0) {
-      out += to_string(clang_InlineCommandComment_getCommandName(c));
+      out += name;
       out += ' ';
-    } else {
-      for (unsigned i = 0; i < n; ++i) {
-        out += to_string(clang_InlineCommandComment_getArgText(c, i));
-        out += ' ';
-      }
+      return;
     }
+    for (unsigned i = 0; i < n; ++i) {
+      out += to_string(clang_InlineCommandComment_getArgText(c, i));
+      out += ' ';
+    }
+    return;
+  }
+  // libclang models HTML markup as tag nodes with no children, so anything not
+  // handled here is deleted outright -- `<b>`, `<br>` and whole `<ul><li>`
+  // lists vanished from the text along with the structure they carried. They
+  // are passed through instead: Markdown keeps raw inline HTML, whereas
+  // rewriting the tags as Markdown emphasis would have to fight the space this
+  // walk puts after every text node (`** bold **` is not emphasis).
+  if (kind == CXComment_HTMLStartTag) {
+    out += to_string(clang_HTMLTagComment_getAsString(c));
+    return;
+  }
+  if (kind == CXComment_HTMLEndTag) {
+    out += "</";
+    out += to_string(clang_HTMLTagComment_getTagName(c));
+    out += '>';
     return;
   }
   if (kind == CXComment_VerbatimBlockLine) {
@@ -215,7 +335,7 @@ void collect_text(CXComment c, std::string& out) {
 std::string text_of(CXComment c) {
   std::string s;
   collect_text(c, s);
-  return normalize_ws(s);
+  return render_inline_markup(normalize_ws(s));
 }
 
 // True when the raw comment uses a command libclang's parsed tree mishandles:
@@ -302,7 +422,7 @@ std::string block_text(CXComment bc) {
     s += ' ';
   }
   collect_text(clang_BlockCommandComment_getParagraph(bc), s);
-  return normalize_ws(s);
+  return render_inline_markup(normalize_ws(s));
 }
 
 // Routes one command (lowercased name, normalized text) into the model. The
@@ -553,7 +673,7 @@ model::CommentModel parse_raw(const std::string& raw) {
   std::vector<std::string> verbatim_lines;
 
   auto flush = [&]() {
-    std::string text = normalize_ws(buf);
+    std::string text = render_inline_markup(normalize_ws(buf));
     buf.clear();
     if (cmd.empty()) {
       if (!text.empty()) lead.push_back(text);
@@ -615,13 +735,22 @@ model::CommentModel parse_raw(const std::string& raw) {
     for (bool again = true; again;) {
       again = false;
       std::size_t s = line.find_first_not_of(" \t");
+      std::size_t e = std::string::npos;
+      CommandWord word;
       bool is_command = s != std::string::npos && (line[s] == '@' || line[s] == '\\');
       if (is_command) {
-        flush();
-        std::size_t e = line.find_first_of(" \t", s + 1);
-        CommandWord word = split_command_word(
+        e = line.find_first_of(" \t", s + 1);
+        word = split_command_word(
             lower(line.substr(s + 1,
                               (e == std::string::npos ? line.size() : e) - s - 1)));
+        // Inline markup is not a block command: a wrapped prose line can begin
+        // with one (`\ref Foo is the ...`), and taking it for a command flushed
+        // the open section and swallowed the rest of the paragraph into
+        // `custom`. render_inline_markup handles it as the prose it is.
+        if (is_inline_command(word.name)) is_command = false;
+      }
+      if (is_command) {
+        flush();
         cmd = word.name;
         dir = word.direction;
         std::string rest = e == std::string::npos ? std::string{} : line.substr(e + 1);

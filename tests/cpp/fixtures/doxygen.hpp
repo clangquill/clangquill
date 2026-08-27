@@ -53,4 +53,14 @@ int square(int x);
  */
 void fill(int* result, int value, int* scratch, int plain);
 
+/**
+ * @brief Emphasis and HTML reach the reader.
+ *
+ * Inline markup: @b bold, @e italic, @c code and @p value. A cross-reference
+ * to @ref divide "the divide function" too.
+ *
+ * HTML such as <b>tags</b> and <ul><li>list items</li></ul> is preserved.
+ */
+int emphasize(int value);
+
 }  // namespace doc

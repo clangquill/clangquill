@@ -423,6 +423,53 @@ TEST_CASE("a verbatim block keeps its lines, language and place",
   expect_block(fields_of(raw, coded->usr), "```py\n", "\n    print(y)");
 }
 
+TEST_CASE("inline markup and HTML reach the reader", "[comments]") {
+  // Inline commands used to survive as literal backslash text (and a `\ref` at
+  // the start of a wrapped line was mistaken for a block command, swallowing
+  // the rest of the paragraph); HTML tags were deleted outright, taking their
+  // list and emphasis structure with them.
+  auto prose_of = [](const std::vector<Field>& fs) {
+    std::string all;
+    for (const auto& f : fs) {
+      if (f.name == "brief" || f.name == "detail") all += f.value + '\n';
+    }
+    return all;
+  };
+  auto check_markup = [](const std::string& prose) {
+    CHECK(prose.find("**bold**") != std::string::npos);
+    CHECK(prose.find("*italic*") != std::string::npos);
+    CHECK(prose.find("`code`") != std::string::npos);
+    CHECK(prose.find("<b>tags</b>") != std::string::npos);
+    CHECK(prose.find("<li>list items") != std::string::npos);
+    // No inline command may reach the output as literal backslash text.
+    CHECK(prose.find("\\b ") == std::string::npos);
+    CHECK(prose.find("\\c ") == std::string::npos);
+  };
+
+  auto parsed = parse_fixture("doxygen.hpp");
+  const auto* emphasize = find(parsed, "doc::emphasize");
+  REQUIRE(emphasize != nullptr);
+  std::string parsed_prose = prose_of(fields_of(parsed, emphasize->usr));
+  check_markup(parsed_prose);
+  // `\ref target "a title"` becomes a role carrying that title.
+  CHECK(parsed_prose.find("{cpp:any}`the divide function <divide>`") !=
+        std::string::npos);
+
+  auto raw = parse_fixture("structural.hpp");
+  const auto* helper = find(raw, "inline_helper");
+  REQUIRE(helper != nullptr);
+  auto fs = fields_of(raw, helper->usr);
+  check_markup(prose_of(fs));
+
+  // A wrapped line beginning with `\ref` is prose, not a block command: the
+  // sentence stays whole and nothing lands in custom["ref"].
+  const Field* brief = field(fs, "brief");
+  REQUIRE(brief != nullptr);
+  CHECK(brief->value ==
+        "A wrapped sentence about {cpp:any}`Widget` stays one sentence.");
+  CHECK(field(fs, "ref") == nullptr);
+}
+
 TEST_CASE("parsed comments store a format and JSON projection", "[comments]") {
   auto m = parse_fixture("doxygen.hpp");
   const auto* divide = find(m, "doc::divide");

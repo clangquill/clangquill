@@ -204,6 +204,30 @@ def test_doxygen_parse_leading_block_is_not_the_brief() -> None:
     assert model.detail == ["```cpp\nx = 1\n```"]
 
 
+INLINE = """
+/// @brief A wrapped sentence about
+/// @ref Widget stays one sentence.
+///
+/// Emphasis: @b bold, @e italic, @c code and @p x. See
+/// @ref divide "the divide function" too.
+/// An address like user@b.example is left alone, and @c foo. keeps its stop.
+"""
+
+
+def test_doxygen_parse_renders_inline_markup() -> None:
+    model = doxygen_parse(INLINE)
+    # A wrapped line beginning with @ref is prose, not a block command: the
+    # sentence stays whole and nothing lands in custom["ref"].
+    assert model.brief == "A wrapped sentence about {cpp:any}`Widget` stays one sentence."
+    assert "ref" not in model.custom
+    expected = (
+        "Emphasis: **bold**, *italic*, `code` and `x`. "
+        "See {cpp:any}`the divide function <divide>` too. "
+        "An address like user@b.example is left alone, and `foo`. keeps its stop."
+    )
+    assert model.detail == [expected]
+
+
 def test_model_from_fields_round_trips() -> None:
     rows = [
         ("brief", "", "A brief."),
