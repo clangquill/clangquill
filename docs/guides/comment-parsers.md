@@ -18,8 +18,14 @@ A `CommentModel` is a plain dataclass of structured fields the templates render:
 | `returns` | `str` | `@return` |
 | `retvals` | `list[CommentRetval]` | `@retval` |
 | `throws` | `list[CommentThrow]` | `@throws` / `@exception` |
-| `see`, `since`, `deprecated`, `note`, `warning`, `pre`, `post` | `list[str]` | the matching commands |
+| `see`, `since`, `deprecated`, `note`, `warning`, `pre`, `post` | `list[str]` | the matching commands (`note` also takes `@remark`) |
+| `invariant`, `todo`, `bug` | `list[str]` | `@invariant`, `@todo`, `@bug`, each rendered as its own admonition |
+| `author`, `version`, `date` | `list[str]` | `@author` / `@authors`, `@version`, `@date` |
 | `custom` | `dict[str, list[str]]` | **any unrecognized command**, keyed by its name |
+
+`@details` and `@par` are prose: their text joins `detail`, the same as an
+unmarked paragraph. A second `@brief` in one comment is joined onto the first
+rather than dropped, which is what Doxygen does with it.
 
 A `CommentParam` carries `name`, `description` and `direction`. `direction` is
 Doxygen's parameter-passing attribute with the brackets removed — `"in"`,
@@ -54,6 +60,19 @@ Markdown keeps raw inline HTML, so the emphasis and list structure survives.
 The `custom` bucket is the graceful-degradation seam: a command the parser does
 not recognize is never dropped — it lands in `custom["<name>"]` so a template can
 still render it.
+
+### Commands that are not resolved
+
+`@copydoc`, `@copybrief` and `@copydetails` name another entity whose
+documentation should be pulled in. Nothing in the pipeline resolves them, so
+the text they promise is not in the rendered page: the command reaches
+`custom["copydoc"]` and the parse records a **note**-severity diagnostic
+naming the file, the line and the target. Notes never fail a
+`warnings_as_errors` build — that setting is about the C++ libclang saw — but
+they are counted, and `clangquill_diagnostics_log` writes them out.
+
+Doxygen's `ALIASES` are likewise unsupported: an aliased command reaches
+`custom` under the alias's own name, so a template can still render it.
 
 ### Structural commands
 

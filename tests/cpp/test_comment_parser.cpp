@@ -2,6 +2,8 @@
 
 #include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "model/module.hpp"
 
@@ -341,10 +343,66 @@ TEST_CASE("doxygen parser covers the common commands", "[comments]") {
 
   CHECK(field(fs, "see") != nullptr);
 
-  // Unknown command lands under its own name (the "custom" bucket).
   const Field* author = field(fs, "author");
   REQUIRE(author != nullptr);
   CHECK(author->value == "Ada");
+}
+
+TEST_CASE("doxygen parser routes prose and section commands", "[comments]") {
+  // Every one of these used to land in the `custom` bucket, where the bundled
+  // templates render nothing: `\details` is the detailed description itself.
+  auto m = parse_fixture("doxygen.hpp");
+  const auto* sorter = find(m, "doc::sort_range");
+  REQUIRE(sorter != nullptr);
+  auto fs = fields_of(m, sorter->usr);
+
+  const Field* brief = field(fs, "brief");
+  REQUIRE(brief != nullptr);
+  CHECK(brief->value == "Sorts a range in place.");
+
+  // `\details` and `\par` are prose: they join the detail paragraphs.
+  std::vector<std::string> detail;
+  for (const auto& f : fs) {
+    if (f.name == "detail") detail.push_back(f.value);
+  }
+  REQUIRE(detail.size() == 2);
+  CHECK(detail[0].find("stable insertion sort") != std::string::npos);
+  CHECK(detail[1].find("Rationale") != std::string::npos);
+
+  // A `\remark` is a note by another name.
+  const Field* note = field(fs, "note");
+  REQUIRE(note != nullptr);
+  CHECK(note->value.find("strict weak ordering") != std::string::npos);
+
+  for (const auto& [name, needle] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"invariant", "permutation"},
+           {"todo", "merge sort"},
+           {"bug", "irreflexive"},
+           {"version", "2.1"},
+           {"date", "2026-08-01"}}) {
+    const Field* f = field(fs, name);
+    REQUIRE(f != nullptr);
+    CHECK(f->value.find(needle) != std::string::npos);
+  }
+}
+
+TEST_CASE("an unresolved copy command is reported, not swallowed",
+          "[comments]") {
+  // Nothing in the pipeline resolves `\copydoc`, so the documentation it
+  // promises is absent from the page. That has to be said out loud.
+  auto m = parse_fixture("doxygen.hpp");
+
+  bool reported = false;
+  for (const auto& d : m.diagnostics) {
+    if (d.text.find("copydoc") == std::string::npos) continue;
+    reported = true;
+    CHECK(d.severity == model::kSeverityNote);
+    CHECK(d.text.find("sort_range") != std::string::npos);
+    CHECK(d.file.find("doxygen.hpp") != std::string::npos);
+    CHECK(d.line > 0);
+  }
+  CHECK(reported);
 }
 
 TEST_CASE("doxygen parser handles /// brief and tparam", "[comments]") {

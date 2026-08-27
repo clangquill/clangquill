@@ -53,6 +53,12 @@ std::string to_fields_json(const model::CommentModel& m) {
       {"warning", m.warning},
       {"pre", m.pre},
       {"post", m.post},
+      {"invariant", m.invariant},
+      {"todo", m.todo},
+      {"bug", m.bug},
+      {"author", m.author},
+      {"version", m.version},
+      {"date", m.date},
       {"custom", m.custom},
   };
   return j.dump();
@@ -87,6 +93,12 @@ std::vector<model::CommentField> to_comment_fields(
   for (const auto& s : m.warning) add("warning", "", s);
   for (const auto& s : m.pre) add("pre", "", s);
   for (const auto& s : m.post) add("post", "", s);
+  for (const auto& s : m.invariant) add("invariant", "", s);
+  for (const auto& s : m.todo) add("todo", "", s);
+  for (const auto& s : m.bug) add("bug", "", s);
+  for (const auto& s : m.author) add("author", "", s);
+  for (const auto& s : m.version) add("version", "", s);
+  for (const auto& s : m.date) add("date", "", s);
   for (const auto& [name, values] : m.custom) {
     for (const auto& v : values) add(name, "", v);
   }

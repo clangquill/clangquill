@@ -225,6 +225,34 @@ bool documented_here(CXCursor c) {
   return comment_end + 1 >= cursor_line;
 }
 
+// Reports the copy commands nothing in this pipeline resolves.
+//
+// `\copydoc Other::f` asks for another entity's documentation to be pulled in
+// here. No stage does that, so the text the comment promises is simply missing
+// from the page -- silently, which is the worst way not to support something.
+//
+// Recorded as a note rather than a warning: `warnings_as_errors` is about the
+// C++ libclang saw, and a docs build that asked to be strict about that should
+// not fail over a comment command clangquill has yet to implement. The record
+// still reaches the diagnostics log and the severity counts.
+void report_unresolved_copies(VisitCtx& ctx, const model::CommentModel& parsed,
+                              CXCursor c) {
+  for (const char* command : {"copydoc", "copybrief", "copydetails"}) {
+    auto it = parsed.custom.find(command);
+    if (it == parsed.custom.end()) continue;
+    auto [file, line] = cursor_file_line(c);
+    for (const std::string& target : it->second) {
+      model::Diagnostic d;
+      d.severity = model::kSeverityNote;
+      d.text = std::string("clangquill: \\") + command + ' ' + target +
+               " is not resolved: the documentation it names is not copied in";
+      d.file = file;
+      d.line = static_cast<int>(line);
+      ctx.mod->diagnostics.push_back(std::move(d));
+    }
+  }
+}
+
 // Records @p raw as @p usr's documentation, once per USR per translation unit.
 //
 // First writer wins, which is what makes an entity's own comment beat a
@@ -237,6 +265,7 @@ void record_comment(VisitCtx& ctx, const std::string& usr,
   if (!ctx.documented->insert(usr).second) return;
 
   model::CommentModel parsed = ctx.comment_parser->parse(c, raw);
+  report_unresolved_copies(ctx, parsed, c);
 
   model::RawComment comment;
   comment.symbol_usr = usr;

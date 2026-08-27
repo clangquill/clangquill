@@ -423,9 +423,16 @@ bool takes_paragraph(const std::string& cmd) {
 
 bool raw_has_unroutable_command(const std::string& raw) {
   static const char* const kCmds[] = {
-      "ingroup",  "defgroup", "addtogroup", "class", "struct",  "union",
-      "enum",     "namespace", "fn",        "var",   "typedef", "relates",
-      "internal", "li"};
+      "ingroup",   "defgroup", "addtogroup",  "class",       "struct",
+      "union",     "enum",     "namespace",   "fn",          "var",
+      "typedef",   "relates",  "internal",    "li",          "copydoc",
+      "copybrief", "copydetails"};
+  // The copy commands are here for a third reason: libclang's tree models
+  // `\copydoc other::f` as *inline* markup, so the command disappears and the
+  // entity name it names is left sitting in the middle of the prose ("Sorts a
+  // range into a new buffer. sort_range"). The raw path routes it into
+  // `custom`, where it is intact, reportable, and out of the description.
+  //
   // Deliberately not `code`/`endcode`: nothing about a verbatim block needs the
   // raw path. Both paths now render one as a fenced block with its lines
   // intact, so a comment reaches either one none the worse.
@@ -468,7 +475,17 @@ void route_command(model::CommentModel& m, const std::string& name,
                    const std::string& text,
                    const std::string& direction = {}) {
   if (name == "brief" || name == "short") {
-    if (m.brief.empty()) m.brief = text;
+    // Doxygen joins a second `\brief` onto the first rather than dropping it.
+    if (m.brief.empty()) {
+      m.brief = text;
+    } else if (!text.empty()) {
+      m.brief += ' ';
+      m.brief += text;
+    }
+  } else if (name == "details" || name == "par") {
+    // `\details` is the detailed description, and `\par [title] text` a
+    // paragraph of it -- both are prose, not an unrecognized command.
+    if (!text.empty()) m.detail.push_back(text);
   } else if (name == "return" || name == "returns" || name == "result") {
     if (!m.returns.empty()) m.returns += ' ';
     m.returns += text;
@@ -490,7 +507,8 @@ void route_command(model::CommentModel& m, const std::string& name,
     m.since.push_back(text);
   } else if (name == "deprecated") {
     m.deprecated.push_back(text);
-  } else if (name == "note") {
+  } else if (name == "note" || name == "remark" || name == "remarks") {
+    // Doxygen sets a `\remark` off from the prose exactly as it does a note.
     m.note.push_back(text);
   } else if (name == "warning" || name == "attention") {
     m.warning.push_back(text);
@@ -498,6 +516,18 @@ void route_command(model::CommentModel& m, const std::string& name,
     m.pre.push_back(text);
   } else if (name == "post") {
     m.post.push_back(text);
+  } else if (name == "invariant") {
+    m.invariant.push_back(text);
+  } else if (name == "todo") {
+    m.todo.push_back(text);
+  } else if (name == "bug") {
+    m.bug.push_back(text);
+  } else if (name == "author" || name == "authors") {
+    m.author.push_back(text);
+  } else if (name == "version") {
+    m.version.push_back(text);
+  } else if (name == "date") {
+    m.date.push_back(text);
   } else {
     m.custom[name].push_back(text);
   }

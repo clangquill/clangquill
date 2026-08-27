@@ -83,6 +83,38 @@ def test_class_directive_widens_its_fence_around_an_embedded_code_block(gen: Gen
     assert "```\ncode inside\n```" in rendered
 
 
+def test_section_commands_render_as_admonitions_and_metadata(gen: Generator, store: Store) -> None:
+    """@invariant / @todo / @bug / @author / @version / @date reach the page."""
+    shape = _symbol(store, "geo::Shape")
+    model = CommentModel(
+        brief="A shape.",
+        invariant=["the area is never negative"],
+        todo=["support ellipses"],
+        bug=["rounds the wrong way at zero"],
+        author=["Ada"],
+        version=["2.1"],
+        date=["2026-08-01"],
+    )
+    original_comment = gen.comment
+    gen.comment = lambda symbol, model=model, shape=shape, original=original_comment: (
+        model if symbol.usr == shape.usr else original(symbol)
+    )
+    try:
+        rendered = gen.render_symbol(shape, level=1)
+    finally:
+        gen.comment = original_comment
+
+    assert ":::{admonition} Invariant" in rendered
+    assert "the area is never negative" in rendered
+    assert ":::{admonition} To do" in rendered
+    assert "support ellipses" in rendered
+    assert ":::{admonition} Bug" in rendered
+    assert "rounds the wrong way at zero" in rendered
+    assert "*Version: 2.1.*" in rendered
+    assert "*Date: 2026-08-01.*" in rendered
+    assert "*Author: Ada.*" in rendered
+
+
 def test_generate_writes_pages_and_index(gen: Generator, tmp_path: Path) -> None:
     out = tmp_path / "api"
     pages = gen.generate(out)

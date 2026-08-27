@@ -63,4 +63,25 @@ void fill(int* result, int value, int* scratch, int plain);
  */
 int emphasize(int value);
 
+/**
+ * @brief Sorts a range in place.
+ * @details The long story: a stable insertion sort, chosen for short ranges.
+ * @par Rationale
+ * Short ranges dominate the call sites.
+ * @remark the comparison must be a strict weak ordering
+ * @invariant the range stays a permutation of its input
+ * @todo switch to a merge sort above a length threshold
+ * @bug loops forever on a comparator that is not irreflexive
+ * @author Ada
+ * @version 2.1
+ * @date 2026-08-01
+ */
+void sort_range(int* first, int* last);
+
+/**
+ * @brief Sorts a range into a new buffer.
+ * @copydoc sort_range
+ */
+void sort_copy(const int* first, const int* last, int* out);
+
 }  // namespace doc

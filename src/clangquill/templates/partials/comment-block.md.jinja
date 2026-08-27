@@ -41,9 +41,39 @@
 {{ text }}
 :::
 {% endfor %}
+{% for text in model.invariant %}
+
+:::{admonition} Invariant
+{{ text }}
+:::
+{% endfor %}
+{% for text in model.bug %}
+
+:::{admonition} Bug
+{{ text }}
+:::
+{% endfor %}
+{% for text in model.todo %}
+
+:::{admonition} To do
+{{ text }}
+:::
+{% endfor %}
 {% if model.since %}
 
 *Since: {{ model.since | join(", ") }}.*
+{% endif %}
+{% if model.version %}
+
+*Version: {{ model.version | join(", ") }}.*
+{% endif %}
+{% if model.date %}
+
+*Date: {{ model.date | join(", ") }}.*
+{% endif %}
+{% if model.author %}
+
+*Author: {{ model.author | join(", ") }}.*
 {% endif %}
 {% if model.see %}
 
