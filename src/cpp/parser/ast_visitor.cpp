@@ -1,6 +1,7 @@
 #include "parser/ast_visitor.hpp"
 
 #include <map>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -236,9 +237,18 @@ void record_comment(VisitCtx& ctx, const std::string& usr,
   register_symbol_groups(ctx, usr, raw);
 }
 
+// Fields a caller recovered itself, for a cursor libclang does not describe.
+// Every member is optional: an empty one leaves the cursor's own value.
+struct SymbolOverrides {
+  std::string signature;
+  std::string type_repr;
+  std::string display_name;
+};
+
 // Records a symbol row (and its details) for a cursor, then recurses into
 // scopes. Returns the symbol's USR (empty if skipped).
-std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx) {
+std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx,
+                          const SymbolOverrides* overrides = nullptr) {
   std::string usr = canonical_usr(c);
   if (usr.empty()) return {};  // anonymous/local entity: no stable identity
 
@@ -315,6 +325,13 @@ std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx) {
     // qualified name (and base clause) to form the domain directive argument.
     sym.signature = template_head(c, nullptr);
   }
+  if (overrides != nullptr) {
+    if (!overrides->signature.empty()) sym.signature = overrides->signature;
+    if (!overrides->type_repr.empty()) sym.type_repr = overrides->type_repr;
+    if (!overrides->display_name.empty()) {
+      sym.display_name = overrides->display_name;
+    }
+  }
   fill_location(c, sym);
 
   if (is_function_like(kind)) extract_function_details(c, usr, ctx);
@@ -339,8 +356,11 @@ std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx) {
     model::RefKind rk = kind == model::SymbolKind::Field
                             ? model::RefKind::FieldType
                             : model::RefKind::VariableType;
-    ctx.mod->references.push_back(
-        make_type_ref(usr, rk, clang_getCursorType(c), 0));
+    // A variable template's cursor describes the template, not the declaration,
+    // so it has no type of its own; a reference to nothing is only noise.
+    if (CXType type = clang_getCursorType(c); type.kind != CXType_Invalid) {
+      ctx.mod->references.push_back(make_type_ref(usr, rk, type, 0));
+    }
   }
 
   ctx.mod->symbols.push_back(std::move(sym));
@@ -844,6 +864,38 @@ CXChildVisitResult visit(CXCursor c, CXCursor /*parent*/, CXClientData data) {
     clang_visitChildren(c, visit, &ctx);
     return CXChildVisit_Continue;
   }
+
+  // libclang gives neither variable templates nor deduction guides a cursor
+  // kind of their own: both arrive as CXCursor_UnexposedDecl, which map_kind()
+  // answers Unknown and the walk below skips without descending. A variable
+  // template is documented C++ -- `inline constexpr bool is_foo_v = ...` is the
+  // modern trait spelling -- so it is recovered from the declaration text and
+  // recorded as a variable carrying a template head.
+  //
+  // The other declarations behind this cursor kind stay out: a deduction guide
+  // is spelled `<deduction guide for X>` and has no directive to render into,
+  // and a namespace alias or using-declaration names an entity documented where
+  // it was declared rather than introducing one.
+  if (clang_getCursorKind(c) == CXCursor_UnexposedDecl) {
+    if (std::optional<VariableTemplate> var = variable_template(c)) {
+      SymbolOverrides overrides;
+      overrides.signature = var->head;
+      overrides.type_repr = var->type_repr;
+      // A specialization shares the primary's spelling, so give it the same
+      // `name<args>` display name libclang gives a class specialization: that
+      // is what keeps the two apart in the generated docs.
+      if (!var->spec_args.empty()) {
+        overrides.display_name = spelling(c) + var->spec_args;
+      }
+      handle_symbol(c, model::SymbolKind::Variable, ctx, &overrides);
+    }
+    return CXChildVisit_Continue;
+  }
+
+  // A *templated* deduction guide is exposed, as a FunctionTemplate whose
+  // spelling is that same `<deduction guide for X>`; drop it for the same
+  // reason rather than emitting a symbol under a name that is not one.
+  if (is_deduction_guide(c)) return CXChildVisit_Continue;
 
   model::SymbolKind kind = map_kind(clang_getCursorKind(c));
   if (kind == model::SymbolKind::Unknown) return CXChildVisit_Continue;

@@ -888,6 +888,31 @@ def test_member_of_full_specialization_carries_the_empty_head(spec_gen: Generato
     )
 
 
+def test_variable_template_declaration_carries_its_head(spec_gen: Generator, spec_store: Store) -> None:
+    # libclang leaves a variable template unexposed; the parser recovers the
+    # head and the declaration text, and the directive has to carry both or the
+    # domain indexes a plain variable.
+    primary = _spec_symbol(spec_store, "is_dense_v")
+    assert spec_gen.signature(primary) == "template<class T> inline constexpr bool demo::is_dense_v"
+
+
+def test_specialized_variable_template_names_its_arguments(
+    spec_gen: Generator,
+    spec_store: Store,
+) -> None:
+    spec = _spec_symbol(spec_store, "is_dense_v<double>")
+    assert spec_gen.signature(spec) == "template<> inline constexpr bool demo::is_dense_v<double>"
+
+
+def test_plain_variable_declaration_has_no_head(gen: Generator, store: Store) -> None:
+    from clangquill.store import SymbolKind  # noqa: PLC0415
+
+    # A variable with no template head renders exactly as before.
+    var = next(s for s in store.symbols() if s.kind == SymbolKind.VARIABLE)
+    assert not var.signature
+    assert gen.signature(var) == f"{var.type_repr} {var.qualified_name}"
+
+
 def test_plain_member_signature_unchanged(gen: Generator, store: Store) -> None:
     # A member whose parent is not a specialization keeps the legacy form.
     assert gen.signature(_symbol(store, "geo::Circle::area")) == "double geo::Circle::area() const"
