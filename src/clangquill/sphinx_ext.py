@@ -16,6 +16,7 @@ Every knob is a ``clangquill_*`` config value mirroring a field of
 from __future__ import annotations
 
 import glob
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +26,7 @@ from sphinx.util import logging
 from clangquill import __version__, _core
 from clangquill.config import CONFIG_FIELDS, CONFIG_PREFIX, Config, ConfigError
 from clangquill.pipeline import COMPILE_COMMANDS_NAME, build, prune_stale, warnings_or_worse
+from clangquill.store import StoreVersionError
 
 if TYPE_CHECKING:
     from sphinx.application import Sphinx
@@ -142,10 +144,12 @@ def _run(app: Sphinx) -> None:
         return
     try:
         result = build(config, base_dir=app.srcdir)
-    except (ConfigError, FileNotFoundError) as exc:
+    except (ConfigError, FileNotFoundError, StoreVersionError, sqlite3.DatabaseError) as exc:
         # Anticipated user-input failures (a bad clangquill_* value, an input
         # pattern matching nothing) become a clean build error instead of a
-        # raw traceback.
+        # raw traceback. So does an unreadable IR the build could not recover
+        # from itself — a cached one is discarded and re-parsed, but a database
+        # named explicitly, or damaged mid-build, still has to be reported.
         msg = f"clangquill: {exc}"
         raise ExtensionError(msg) from exc
     # Remembered for the build-finished hook so a throwaway IR can be removed.

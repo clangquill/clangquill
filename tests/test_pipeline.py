@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -219,6 +220,69 @@ def test_incremental_detects_an_edit_made_during_the_parse(
 
     assert result.parsed
     assert "gadget" in (project / "api" / "demo.md").read_text()
+
+
+@requires_libclang
+def test_incremental_recovers_from_a_truncated_ir(project: Path) -> None:
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    build(config, base_dir=project)
+    ir = project / ".cache" / "clangquill.sqlite"
+
+    # A build killed mid-write (or a full disk) leaves a truncated IR. Nothing
+    # touches the inputs, so the cache still believes the parse is current and
+    # would otherwise open this file and raise.
+    ir.write_bytes(ir.read_bytes()[:64])
+    (project / "api" / "demo.md").unlink()
+
+    result = build(config, base_dir=project)
+
+    assert result.parsed  # recovered by re-parsing from scratch
+    assert result.symbol_count > 0
+    assert (project / "api" / "demo.md").is_file()
+    # The replacement IR is a real database again, so the next build noops.
+    with Store.open(ir) as store:
+        assert store.symbol_count() == result.symbol_count
+    assert not build(config, base_dir=project).parsed
+
+
+@requires_libclang
+def test_incremental_recovers_from_an_ir_of_a_foreign_schema(project: Path) -> None:
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    build(config, base_dir=project)
+    ir = project / ".cache" / "clangquill.sqlite"
+
+    # An IR left behind by another clangquill version: readable SQLite, wrong
+    # schema. Store.open rejects it, so the build has to discard and re-parse.
+    con = sqlite3.connect(ir)
+    con.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(_core.SCHEMA_VERSION + 1),))
+    con.commit()
+    con.close()
+
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    with Store.open(ir) as store:
+        assert store.meta("schema_version") == str(_core.SCHEMA_VERSION)
+
+
+@requires_libclang
+def test_incremental_recovers_from_a_truncated_ir_on_the_partial_path(project: Path) -> None:
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    (project / "beta.hpp").write_text("/// beta ns\nnamespace beta { /// g\nint g(); }\n")
+    config = Config(input=["alpha.hpp", "beta.hpp"], output_dir="api", cache_dir=".cache")
+    build(config, base_dir=project)
+    ir = project / ".cache" / "clangquill.sqlite"
+
+    # One input changed, so the cache would take the per-TU path and re-parse
+    # into a copy of this file — which the C++ writer cannot open either.
+    ir.write_bytes(b"not a database at all")
+    (project / "alpha.hpp").write_text("/// alpha ns edited\nnamespace alpha { /// f\nint f(); }\n")
+
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    # A full re-parse, so both units are back in the IR, not just the stale one.
+    assert sorted(p.name for p in (project / "api").glob("*.md")) == ["alpha.md", "beta.md", "index.md"]
 
 
 @requires_libclang
