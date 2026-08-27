@@ -216,9 +216,17 @@ std::string template_head(CXCursor owner,
     }
   }
 
-  if (!started || segs.empty() || (segs.size() == 1 && segs.front().empty())) {
+  if (!started || segs.empty()) {
     if (defaults_out != nullptr) defaults_out->clear();
     return "";
+  }
+  // `template <>`: the head of a full explicit specialization. Empty is not the
+  // same as absent -- it is what tells the specialization apart from the
+  // primary template, and from an explicit instantiation, which writes no head
+  // of its own (`template struct Traits<int>;` leaves `segs` empty above).
+  if (segs.size() == 1 && segs.front().empty()) {
+    if (defaults_out != nullptr) defaults_out->clear();
+    return "template<>";
   }
   if (defaults_out != nullptr) *defaults_out = defaults;
 
@@ -229,6 +237,18 @@ std::string template_head(CXCursor owner,
   }
   head += '>';
   return head;
+}
+
+SpecializationForm specialization_form(CXCursor c) {
+  if (clang_Cursor_isNull(clang_getSpecializedCursorTemplate(c)) != 0) {
+    return SpecializationForm::None;
+  }
+  // Both forms report a specialized template, and libclang reports both by the
+  // tag's own cursor kind. Only an explicit specialization writes a
+  // `template<...>` head of its own -- empty for a full one, the parameters its
+  // argument list uses for a partial one -- so the head is what separates them.
+  return template_head(c, nullptr).empty() ? SpecializationForm::Instantiation
+                                           : SpecializationForm::Explicit;
 }
 
 std::string param_default(CXCursor param) {

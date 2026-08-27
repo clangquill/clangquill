@@ -102,8 +102,23 @@ std::string macro_signature(CXCursor c);
 /// @param defaults_out When non-null, filled with the per-parameter default
 ///   text (text after a top-level `=`), one entry per template parameter in
 ///   declaration order.
-/// @return The `template<...>` head, or "" when the owner has no template head.
+/// @return The `template<...>` head, `"template<>"` for a full explicit
+///   specialization's empty head, or "" when the owner has no head at all.
 std::string template_head(CXCursor owner, std::vector<std::string>* defaults_out);
+
+/// @brief How a cursor relates to the template it specializes, if any.
+enum class SpecializationForm {
+  None = 0,       ///< Not a specialization of a template.
+  Explicit,       ///< `template <> struct T<int>` or a partial specialization:
+                  ///< declares an entity of its own.
+  Instantiation,  ///< `template struct T<int>;` (or the `extern` form): asks
+                  ///< for code, declares nothing new.
+};
+
+/// @brief Classifies @p c as a specialization, an instantiation, or neither.
+/// @param c The cursor to classify.
+/// @return The form @p c was written in.
+SpecializationForm specialization_form(CXCursor c);
 
 /// @brief Recovers the default-argument text of a function parameter cursor.
 ///
