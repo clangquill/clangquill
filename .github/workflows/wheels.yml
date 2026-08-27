@@ -76,13 +76,12 @@ jobs:
             SKBUILD_CMAKE_DEFINE="CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/opt/libclang"
             X_VCPKG_ASSET_SOURCES="clear;x-script,/opt/vcpkg-asset-fetch.sh {url}
             {sha512} {dst}"
-                  # The wheel is tested by the real suite, not an import
-                  # smoke: aarch64 ships to users on the strength of this run,
-                  # and a parse-heavy suite is what exercises the paths that
-                  # actually differ per platform. The `_core` assert stays in
-                  # front of it because every parser test is skipped (not
-                  # failed) when libclang is missing, so pytest alone could go
-                  # green on a wheel that bundles nothing.
+          # The wheel is tested by the real suite, not an import smoke:
+          # aarch64 ships to users on the strength of this run, and a
+          # parse-heavy suite is what exercises the paths that actually differ
+          # per platform. The `_core` assert stays in front of it because every
+          # parser test is skipped (not failed) when libclang is missing, so
+          # pytest alone could go green on a wheel that bundles nothing.
           CIBW_TEST_REQUIRES: >-
             pytest pytest-cov pytest-datadir pytest-regressions sphinx
             myst-parser
@@ -128,11 +127,11 @@ jobs:
           CIBW_BEFORE_ALL_WINDOWS: >-
             powershell -NoProfile -ExecutionPolicy Bypass
             -File {project}\tools\ci\wheel-setup-windows.ps1
-                  # vcpkg's default triplet on Windows would build sqlite3 as a
-                  # shared DLL; the *-static-md triplet keeps it (and
-                  # nlohmann-json) statically linked while still using the
-                  # dynamic CRT that Python extensions require, so libclang.dll
-                  # is the only third-party DLL the wheel needs to vendor.
+          # vcpkg's default triplet on Windows would build sqlite3 as a shared
+          # DLL; the *-static-md triplet keeps it (and nlohmann-json)
+          # statically linked while still using the dynamic CRT that Python
+          # extensions require, so libclang.dll is the only third-party DLL the
+          # wheel needs to vendor.
           CIBW_ENVIRONMENT_WINDOWS: >-
             VCPKG_TARGET_TRIPLET="x64-windows-static-md"
             PATH="C:\\libclang\\bin;$PATH"
@@ -142,11 +141,11 @@ jobs:
             {sha512} {dst}"
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
             delvewheel repair --add-path C:\libclang\bin -w {dest_dir} {wheel}
-                  # Same as the Linux job: run the suite against the built
-                  # wheel. This is the only place the Windows-specific code
-                  # (path handling, `Generator._unique_stem`'s
-                  # case-insensitive-filesystem guard, MSVC-built parser
-                  # behaviour) is executed by anything but an import check.
+          # Same as the Linux job: run the suite against the built wheel. This
+          # is the only place the Windows-specific code (path handling,
+          # `Generator._unique_stem`'s case-insensitive-filesystem guard,
+          # MSVC-built parser behaviour) is executed by anything but an import
+          # check.
           CIBW_TEST_REQUIRES: >-
             pytest pytest-cov pytest-datadir pytest-regressions sphinx
             myst-parser

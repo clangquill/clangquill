@@ -101,9 +101,9 @@ jobs:
         clear;x-script,powershell -NoProfile -ExecutionPolicy Bypass -File
         ${{ github.workspace }}\tools\ci\vcpkg-asset-fetch.ps1 {url}
         {sha512} {dst}
-          # Matches the Windows wheel build: sqlite3, nlohmann-json and catch2
-          # link statically against the dynamic CRT, so no third-party DLL has
-          # to sit next to the test executable.
+      # Matches the Windows wheel build: sqlite3, nlohmann-json and catch2 link
+      # statically against the dynamic CRT, so no third-party DLL has to sit
+      # next to the test executable.
       VCPKG_TARGET_TRIPLET: x64-windows-static-md
     steps:
       - uses: actions/checkout@v7.0.1
