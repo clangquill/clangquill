@@ -188,6 +188,55 @@ TEST_CASE("SqliteStore write/read round-trips the IR", "[store]") {
   std::remove(path.c_str());
 }
 
+TEST_CASE("SqliteStore write against a non-empty DB replaces prior contents",
+          "[store]") {
+  std::string path = temp_db_path();
+
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(writer.write(make_module(), store::Meta::current()));
+  }
+
+  // Re-running the full write against the same path must neither throw a
+  // UNIQUE-constraint error on repeated paths/usrs nor leave stale rows from
+  // the first parse sitting next to the second's.
+  model::ParsedModule second;
+  model::SourceFile f;
+  f.path = "/tmp/other.hpp";
+  f.sha256 = std::string(64, 'b');
+  f.size_bytes = 42;
+  second.files.push_back(f);
+
+  model::Symbol s;
+  s.usr = "c:@F@only_in_second";
+  s.kind = model::SymbolKind::Function;
+  s.spelling = "only_in_second";
+  s.qualified_name = "only_in_second";
+  s.display_name = "only_in_second()";
+  s.location.file_path = "/tmp/other.hpp";
+  second.symbols.push_back(s);
+
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(writer.write(second, store::Meta::current()));
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  REQUIRE(got.files.size() == 1);
+  CHECK(got.files[0].path == "/tmp/other.hpp");
+
+  REQUIRE(got.symbols.size() == 1);
+  CHECK(got.symbols[0].usr == "c:@F@only_in_second");
+  CHECK(got.parameters.empty());
+  CHECK(got.references.empty());
+  CHECK(got.enumerators.empty());
+  CHECK(got.comments.empty());
+
+  std::remove(path.c_str());
+}
+
 TEST_CASE("SqliteStore write_tus replaces only the re-parsed file's rows",
           "[store]") {
   // Two files in the IR: one to re-parse, one that must survive untouched.

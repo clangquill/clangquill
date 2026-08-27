@@ -38,6 +38,10 @@ class SqliteStore {
 
   /// @brief Writes the whole module in a single transaction.
   ///
+  /// Clears every existing IR row first, so calling this against a
+  /// non-empty database (as the exported `parse_to_sqlite` binding may) is
+  /// safe: it replaces prior contents rather than throwing a UNIQUE-constraint
+  /// error or leaving stale rows from an earlier parse.
   /// `files.id` is resolved from each symbol's location path.
   /// @param module The IR to persist.
   /// @param meta Metadata stored alongside the IR.
@@ -84,6 +88,9 @@ class SqliteStore {
 
   /// Upserts the `meta` rows describing this build.
   void put_meta(const Meta& meta);
+  /// Deletes every row from every IR table, so a full @ref write starts from
+  /// an empty database even when @ref path already held a previous parse.
+  void clear_all();
   /// Inserts @p module's files (assumes an empty `files` table) and returns ids.
   FileIds insert_files(const model::ParsedModule& module);
   /// Upserts @p module's files (insert-or-update on path) and returns their ids.
