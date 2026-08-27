@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -51,6 +52,7 @@ from typing import TYPE_CHECKING
 
 from clangquill import _core
 from clangquill.cache import BuildCache, OutputRecord, ParseStatus, file_sha256, fingerprint, hash_text
+from clangquill.comments import OVERRIDE_ENV
 from clangquill.config import CONFIG_PREFIX
 from clangquill.generator import Generator, write_if_changed
 from clangquill.store import Store, StoreVersionError
@@ -472,6 +474,12 @@ def _render_fingerprint(config: Config, base_dir: Path) -> str:
     directories. The IR itself is excluded on purpose: the caller only consults
     this when the parse was served from cache, which already guarantees the IR is
     byte-identical to the run that produced the cached render.
+
+    Also covers the ``CLANGQUILL_COMMENT_PARSER`` environment variable: it can
+    override the effective comment parser (see :func:`clangquill.comments.resolve_override`),
+    and a page's ``content_hash`` covers only the raw comment text, not its
+    parse — so without this, changing the env var would silently replay
+    stale rendered comments from cache.
     """
     template_dirs = [str((base_dir / d).resolve()) for d in config.template_dirs]
     return fingerprint(
@@ -481,6 +489,7 @@ def _render_fingerprint(config: Config, base_dir: Path) -> str:
             "templates": dict(sorted(config.templates.items())),
             "include_undocumented": config.include_undocumented,
             "comment_parser": config.comment_parser or "",
+            "comment_parser_env_override": os.environ.get(OVERRIDE_ENV, ""),
             "group_by": config.group_by,
             "toctree_maxdepth": config.toctree_maxdepth,
             "root_document": config.root_document,
