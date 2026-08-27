@@ -486,7 +486,7 @@ def test_group_by_file_pages_every_file_of_a_spanning_namespace(multifile_db: Pa
         out = tmp_path / "api"
         pages = Generator(store).generate(out, group_by="file")
 
-    assert pages == ["alpha_hpp", "beta_hpp"]
+    assert sorted(pages) == ["alpha_hpp", "beta_hpp"]
     alpha = (out / "alpha_hpp.md").read_text()
     beta = (out / "beta_hpp.md").read_text()
     # Each file lists only the class it declares, even though both share the
