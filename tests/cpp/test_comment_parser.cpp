@@ -185,14 +185,22 @@ TEST_CASE("a group command takes its line, not the paragraph below it",
   CAPTURE(brief->value);
   // TEMP DIAGNOSTIC for clangquill/clangquill#266: dump everything upstream of
   // `brief` so a failing Windows run pins down where the divergence actually
-  // is, rather than only that it happened. Remove once the root cause lands.
+  // is, rather than only that it happened. CAPTURE only affects assertions in
+  // its own scope, so the values are pulled out into locals living alongside
+  // the final CHECK rather than captured inside the loop that finds them.
+  // Remove once the root cause lands.
+  std::string raw_text;
+  std::string fields_json;
   for (const auto& c : m.comments) {
     if (c.symbol_usr == fn->usr) {
-      CAPTURE(c.text.size());
-      CAPTURE(c.text);
-      CAPTURE(c.fields_json);
+      raw_text = c.text;
+      fields_json = c.fields_json;
+      break;
     }
   }
+  CAPTURE(raw_text.size());
+  CAPTURE(raw_text);
+  CAPTURE(fields_json);
   CHECK(brief->value.find("documents the") != std::string::npos);
 }
 
