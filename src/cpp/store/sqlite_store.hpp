@@ -56,12 +56,23 @@ class SqliteStore {
   /// than the whole module. File rows (path, hash, size) are upserted for the
   /// whole module so changed dependencies refresh their hashes.
   ///
+  /// Files named in @p dropped_candidates that @p module does not carry are
+  /// removed outright (rows first, then the `files` row): they belonged to a
+  /// replaced unit's previous `#include` closure and nothing pulls them in any
+  /// more, so without this their `files` and `symbols` rows would survive every
+  /// later incremental build and only vanish on a full rebuild.
+  ///
   /// @param module The freshly re-parsed IR (its files plus their symbols).
   /// @param meta Metadata refreshed alongside the IR.
   /// @param replaced_files The inputs whose rows must be replaced wholesale,
   ///        even when their re-parse produced no symbols.
+  /// @param dropped_candidates Files the previous parse attributed *only* to
+  ///        the replaced units. Each one the fresh @p module no longer carries
+  ///        is deleted; the caller must not list a file any surviving unit
+  ///        still contributes to.
   void write_tus(const model::ParsedModule& module, const Meta& meta,
-                 const std::vector<std::string>& replaced_files);
+                 const std::vector<std::string>& replaced_files,
+                 const std::vector<std::string>& dropped_candidates = {});
 
   /// @brief Reconstructs a ParsedModule from the database.
   /// @return The IR read back from storage.
@@ -83,6 +94,10 @@ class SqliteStore {
                        const FileIds& known);
   /// Deletes every symbol (and cascaded child rows) sourced from @p file_ids.
   void delete_files_rows(const FileIds& file_ids);
+  /// Drops the `files` rows (and their symbols) of @p candidates that the fresh
+  /// module — whose files are @p fresh — no longer carries.
+  void drop_vanished_files(const std::vector<std::string>& candidates,
+                           const FileIds& fresh);
   /// Inserts all non-file IR rows (symbols, params, refs, comments, groups, …).
   void insert_rows(const model::ParsedModule& module, const FileIds& file_ids);
 

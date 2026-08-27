@@ -99,6 +99,9 @@ void add_parameter(VisitCtx& ctx, const std::string& usr, int index,
   p.index = index;
   p.name = spelling(arg);
   p.type_repr = to_string(clang_getTypeSpelling(clang_getCursorType(arg)));
+  // Recovered from the declaration tokens: libclang exposes the default
+  // argument only as a child expression cursor, with no API for its text.
+  p.default_value = param_default(arg);
   (*ctx.params_by_func)[usr].push_back(p);
   ctx.mod->parameters.push_back(p);
 
@@ -844,6 +847,34 @@ CXChildVisitResult visit(CXCursor c, CXCursor /*parent*/, CXClientData data) {
 
   model::SymbolKind kind = map_kind(clang_getCursorKind(c));
   if (kind == model::SymbolKind::Unknown) return CXChildVisit_Continue;
+
+  // Specializations arrive by their tag kind, so map_kind() answers
+  // Struct/Class/Union for them and they would be recorded with no template
+  // head under the primary template's qualified name -- the name the primary
+  // itself occupies.
+  //
+  // A *full* specialization (`template <> struct Traits<int>`) becomes a
+  // ClassTemplate: that gives it the head (`template<>`) and, with the argument
+  // list libclang puts in its display name, an identity of its own. Partial
+  // specializations already arrive as their own cursor kind and land here
+  // unchanged.
+  //
+  // An explicit instantiation (`template struct Traits<char>;`, or the `extern
+  // template` form) is dropped instead: it declares no entity, it only asks for
+  // code for one the primary template already documents. Recording it would add
+  // a second row under that name and emit a declaration the C++ domain rejects
+  // for carrying an argument list with no parameter list.
+  if (is_record(kind)) {
+    switch (specialization_form(c)) {
+      case SpecializationForm::Explicit:
+        kind = model::SymbolKind::ClassTemplate;
+        break;
+      case SpecializationForm::Instantiation:
+        return CXChildVisit_Continue;
+      case SpecializationForm::None:
+        break;
+    }
+  }
 
   // Compiler builtins and command-line macros are not part of the documented
   // surface; skip them so only macros written in the sources are recorded.

@@ -120,7 +120,8 @@ ParseResult result_from_module(const clangquill::model::ParsedModule& mod) {
 // failures as diagnostics.
 ParseResult parse_inputs(const std::vector<std::string>& inputs,
                          const std::string& db_path, const PyParseOptions& opt,
-                         bool replace_only) {
+                         bool replace_only,
+                         const std::vector<std::string>& dropped_candidates) {
   // Parse all inputs (batched into umbrella TUs and parallel, honouring
   // opt.jobs/opt.tu_batch) while capturing each translation unit's file set so
   // the cache can attribute every dependency to the input that pulled it in.
@@ -143,7 +144,8 @@ ParseResult parse_inputs(const std::vector<std::string>& inputs,
 
   clangquill::store::SqliteStore store(db_path);
   if (replace_only) {
-    store.write_tus(mod, clangquill::store::Meta::current(), inputs);
+    store.write_tus(mod, clangquill::store::Meta::current(), inputs,
+                    dropped_candidates);
   } else {
     store.write(mod, clangquill::store::Meta::current());
   }
@@ -170,7 +172,7 @@ ParseResult parse_to_sqlite(const std::vector<std::string>& inputs,
   throw std::runtime_error(
       "clangquill._core was built without libclang; cannot parse");
 #else
-  return parse_inputs(inputs, db_path, opt, /*replace_only=*/false);
+  return parse_inputs(inputs, db_path, opt, /*replace_only=*/false, {});
 #endif
 }
 
@@ -178,25 +180,34 @@ ParseResult parse_to_sqlite(const std::vector<std::string>& inputs,
 // translation units' rows in one transaction. The caller picks which inputs are
 // stale (via the cache) and runs this once for the whole stale set instead of
 // rebuilding the whole module.
-ParseResult parse_tus_to_sqlite(const std::vector<std::string>& inputs,
-                                const std::string& db_path,
-                                const PyParseOptions& opt) {
+//
+// `dropped_candidates` names the files the previous parse attributed only to
+// these inputs; any the re-parse no longer reaches is removed from the IR, so a
+// header that falls out of an include closure does not linger until the next
+// full rebuild.
+ParseResult parse_tus_to_sqlite(
+    const std::vector<std::string>& inputs, const std::string& db_path,
+    const PyParseOptions& opt,
+    const std::vector<std::string>& dropped_candidates) {
 #if !defined(CLANGQUILL_HAVE_LIBCLANG)
   (void)inputs;
   (void)db_path;
   (void)opt;
+  (void)dropped_candidates;
   throw std::runtime_error(
       "clangquill._core was built without libclang; cannot parse");
 #else
-  return parse_inputs(inputs, db_path, opt, /*replace_only=*/true);
+  return parse_inputs(inputs, db_path, opt, /*replace_only=*/true,
+                      dropped_candidates);
 #endif
 }
 
 // Single-input convenience form of parse_tus_to_sqlite.
-ParseResult parse_tu_to_sqlite(const std::string& input,
-                               const std::string& db_path,
-                               const PyParseOptions& opt) {
-  return parse_tus_to_sqlite({input}, db_path, opt);
+ParseResult parse_tu_to_sqlite(
+    const std::string& input, const std::string& db_path,
+    const PyParseOptions& opt,
+    const std::vector<std::string>& dropped_candidates) {
+  return parse_tus_to_sqlite({input}, db_path, opt, dropped_candidates);
 }
 
 }  // namespace
@@ -257,12 +268,16 @@ NB_MODULE(_core, m) {
 
   m.def("parse_tus_to_sqlite", &parse_tus_to_sqlite, nb::arg("inputs"),
         nb::arg("db_path"), nb::arg("options") = PyParseOptions{},
+        nb::arg("dropped_candidates") = std::vector<std::string>{},
         nb::call_guard<nb::gil_scoped_release>(),
         "Re-parse the given inputs into an existing SQLite IR (in parallel, in "
-        "one transaction), replacing only those translation units' rows.");
+        "one transaction), replacing only those translation units' rows. "
+        "dropped_candidates names files the previous parse attributed only to "
+        "these inputs; those this parse no longer reaches are removed.");
 
   m.def("parse_tu_to_sqlite", &parse_tu_to_sqlite, nb::arg("input"),
         nb::arg("db_path"), nb::arg("options") = PyParseOptions{},
+        nb::arg("dropped_candidates") = std::vector<std::string>{},
         nb::call_guard<nb::gil_scoped_release>(),
         "Re-parse one input into an existing SQLite IR, replacing only that "
         "translation unit's rows.");

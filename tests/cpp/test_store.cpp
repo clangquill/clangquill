@@ -2,8 +2,10 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <random>
+#include <stdexcept>
 #include <string>
-#include <unistd.h>
 
 #include "store/sqlite_store.hpp"
 
@@ -11,11 +13,21 @@ using namespace clangquill;
 
 namespace {
 
+// A unique path in the platform's temp directory. std::filesystem rather than
+// mkstemp(3), which lives in <unistd.h> and does not exist under MSVC (nor
+// does /tmp). CTest runs each Catch2 case in its own process, so the name has
+// to be unique across processes and not merely within one; sqlite creates the
+// file on open, so it does not need to exist up front.
 std::string temp_db_path() {
-  char tmpl[] = "/tmp/clangquill_test_XXXXXX";
-  int fd = mkstemp(tmpl);
-  if (fd != -1) close(fd);
-  return std::string(tmpl);
+  namespace fs = std::filesystem;
+  std::random_device entropy;
+  for (int attempt = 0; attempt < 64; ++attempt) {
+    const fs::path candidate =
+        fs::temp_directory_path() /
+        ("clangquill_test_" + std::to_string(entropy()) + ".sqlite");
+    if (!fs::exists(candidate)) return candidate.string();
+  }
+  throw std::runtime_error("could not find an unused temporary database path");
 }
 
 model::ParsedModule make_module() {
@@ -87,6 +99,45 @@ model::ParsedModule make_module() {
   c.text = "/// A widget.";
   m.comments.push_back(c);
 
+  return m;
+}
+
+// A minimal function symbol anchored to `file`, for the group tests below.
+model::Symbol group_symbol(const std::string& usr, const std::string& file) {
+  model::Symbol s;
+  s.usr = usr;
+  s.kind = model::SymbolKind::Function;
+  s.spelling = usr;
+  s.qualified_name = usr;
+  s.display_name = usr;
+  s.location.file_path = file;
+  return s;
+}
+
+// A `\defgroup`-backed group row: a real title plus prose.
+model::Group titled_group() {
+  model::Group g;
+  g.id = "geometry";
+  g.title = "Geometry helpers";
+  g.brief = "Points and vectors.";
+  g.detail = "The long version.";
+  return g;
+}
+
+// The placeholder `ensure_group` emits for an `\ingroup` reference whose
+// `\defgroup` block was not in any file this parse read: title == id, and no
+// brief, detail or parent.
+model::Group stub_group() {
+  model::Group g;
+  g.id = "geometry";
+  g.title = "geometry";
+  return g;
+}
+
+model::GroupMember membership(const std::string& usr) {
+  model::GroupMember m;
+  m.group_id = "geometry";
+  m.member_usr = usr;
   return m;
 }
 
@@ -297,6 +348,194 @@ TEST_CASE("SqliteStore tolerates a symbol seen in multiple translation units",
   CHECK(got.parameters[0].name == "value");
   REQUIRE(got.template_parameters.size() == 1);
   CHECK(got.template_parameters[0].name == "T");
+
+  std::remove(path.c_str());
+}
+
+TEST_CASE("SqliteStore write_tus keeps other units' group memberships",
+          "[store]") {
+  // Two files contribute a member to the same group, and the `\defgroup`
+  // block itself lives in a third place the incremental re-parse never reads.
+  model::ParsedModule original;
+
+  model::SourceFile a;
+  a.path = "/tmp/ga.hpp";
+  a.sha256 = std::string(64, 'a');
+  original.files.push_back(a);
+
+  model::SourceFile b;
+  b.path = "/tmp/gb.hpp";
+  b.sha256 = std::string(64, 'b');
+  original.files.push_back(b);
+
+  original.symbols.push_back(group_symbol("c:@F@ga", "/tmp/ga.hpp"));
+  original.symbols.push_back(group_symbol("c:@F@gb", "/tmp/gb.hpp"));
+  original.groups.push_back(titled_group());
+  original.group_members.push_back(membership("c:@F@ga"));
+  original.group_members.push_back(membership("c:@F@gb"));
+
+  std::string path = temp_db_path();
+  {
+    store::SqliteStore writer(path);
+    writer.write(original, store::Meta::current());
+  }
+
+  // Re-parse ga.hpp alone. Its symbol only *references* the group, so the
+  // module carries a stub row — which must neither cascade gb.hpp's membership
+  // away nor overwrite the captured title and prose.
+  model::ParsedModule reparse;
+  model::SourceFile a2;
+  a2.path = "/tmp/ga.hpp";
+  a2.sha256 = std::string(64, 'c');
+  reparse.files.push_back(a2);
+  reparse.symbols.push_back(group_symbol("c:@F@ga", "/tmp/ga.hpp"));
+  reparse.groups.push_back(stub_group());
+  reparse.group_members.push_back(membership("c:@F@ga"));
+
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(
+        writer.write_tus(reparse, store::Meta::current(), {"/tmp/ga.hpp"}));
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  bool has_ga = false;
+  bool has_gb = false;
+  for (const auto& m : got.group_members) {
+    if (m.member_usr == "c:@F@ga") has_ga = true;
+    if (m.member_usr == "c:@F@gb") has_gb = true;
+  }
+  CHECK(has_ga);  // re-inserted by this write
+  CHECK(has_gb);  // contributed by a unit this write never touched
+  CHECK(got.group_members.size() == 2);
+
+  REQUIRE(got.groups.size() == 1);
+  CHECK(got.groups[0].title == "Geometry helpers");
+  CHECK(got.groups[0].brief == "Points and vectors.");
+  CHECK(got.groups[0].detail == "The long version.");
+
+  std::remove(path.c_str());
+}
+
+TEST_CASE("SqliteStore never downgrades a group row to a stub", "[store]") {
+  // Both orders have to survive: within one write the module's group list is
+  // the concatenation of per-batch lists, so a stub can precede or follow the
+  // titled row depending on which batch parsed the `\defgroup` block.
+  for (bool stub_first : {true, false}) {
+    INFO("stub_first = " << stub_first);
+
+    model::ParsedModule m;
+    model::SourceFile f;
+    f.path = "/tmp/gc.hpp";
+    f.sha256 = std::string(64, 'a');
+    m.files.push_back(f);
+    m.symbols.push_back(group_symbol("c:@F@gc", "/tmp/gc.hpp"));
+    if (stub_first) {
+      m.groups.push_back(stub_group());
+      m.groups.push_back(titled_group());
+    } else {
+      m.groups.push_back(titled_group());
+      m.groups.push_back(stub_group());
+    }
+    m.group_members.push_back(membership("c:@F@gc"));
+
+    std::string path = temp_db_path();
+    {
+      store::SqliteStore writer(path);
+      REQUIRE_NOTHROW(writer.write(m, store::Meta::current()));
+    }
+
+    {
+      store::SqliteStore reader(path);
+      model::ParsedModule got = reader.read();
+
+      REQUIRE(got.groups.size() == 1);
+      CHECK(got.groups[0].title == "Geometry helpers");
+      CHECK(got.groups[0].brief == "Points and vectors.");
+      REQUIRE(got.group_members.size() == 1);
+      CHECK(got.group_members[0].member_usr == "c:@F@gc");
+    }
+
+    std::remove(path.c_str());
+  }
+}
+
+TEST_CASE("SqliteStore write_tus drops dependencies that left the closure",
+          "[store]") {
+  // ha.hpp is an input; hdep.hpp is a header it #includes (and carries symbols
+  // for, as it would when both sit in the same umbrella batch).
+  model::ParsedModule original;
+
+  model::SourceFile a;
+  a.path = "/tmp/ha.hpp";
+  a.sha256 = std::string(64, 'a');
+  original.files.push_back(a);
+
+  model::SourceFile dep;
+  dep.path = "/tmp/hdep.hpp";
+  dep.sha256 = std::string(64, 'd');
+  original.files.push_back(dep);
+
+  model::SourceFile other;
+  other.path = "/tmp/hother.hpp";
+  other.sha256 = std::string(64, 'o');
+  original.files.push_back(other);
+
+  original.symbols.push_back(group_symbol("c:@F@ha", "/tmp/ha.hpp"));
+  original.symbols.push_back(group_symbol("c:@F@hdep", "/tmp/hdep.hpp"));
+  original.symbols.push_back(group_symbol("c:@F@hother", "/tmp/hother.hpp"));
+
+  std::string path = temp_db_path();
+  {
+    store::SqliteStore writer(path);
+    writer.write(original, store::Meta::current());
+  }
+
+  // ha.hpp is re-parsed and no longer includes hdep.hpp. The caller knows
+  // hdep.hpp was reached only through ha.hpp, so it is offered as a candidate;
+  // hother.hpp belongs to a unit this write does not touch and is not offered.
+  model::ParsedModule reparse;
+  model::SourceFile a2;
+  a2.path = "/tmp/ha.hpp";
+  a2.sha256 = std::string(64, 'c');
+  reparse.files.push_back(a2);
+  reparse.symbols.push_back(group_symbol("c:@F@ha", "/tmp/ha.hpp"));
+
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(writer.write_tus(reparse, store::Meta::current(),
+                                     {"/tmp/ha.hpp"},
+                                     {"/tmp/ha.hpp", "/tmp/hdep.hpp"}));
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  bool has_a = false;
+  bool has_dep = false;
+  bool has_other = false;
+  for (const auto& f : got.files) {
+    if (f.path == "/tmp/ha.hpp") has_a = true;
+    if (f.path == "/tmp/hdep.hpp") has_dep = true;
+    if (f.path == "/tmp/hother.hpp") has_other = true;
+  }
+  CHECK(has_a);          // still reached by the fresh parse
+  CHECK_FALSE(has_dep);  // dropped out of every closure -> gone
+  CHECK(has_other);      // never offered; belongs to another unit
+
+  bool sym_a = false;
+  bool sym_dep = false;
+  bool sym_other = false;
+  for (const auto& s : got.symbols) {
+    if (s.usr == "c:@F@ha") sym_a = true;
+    if (s.usr == "c:@F@hdep") sym_dep = true;
+    if (s.usr == "c:@F@hother") sym_other = true;
+  }
+  CHECK(sym_a);
+  CHECK_FALSE(sym_dep);
+  CHECK(sym_other);
 
   std::remove(path.c_str());
 }

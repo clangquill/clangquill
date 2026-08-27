@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from pathlib import PurePath
 from typing import TYPE_CHECKING
 
 import pytest
@@ -298,7 +299,7 @@ def test_forward_declaration_does_not_displace_the_definition(tmp_path: Path) ->
         with Store.open(db) as store:
             paths = {f.id: f.path for f in store.files()}
             return [
-                (s.qualified_name, s.is_documented, paths[s.file_id].rsplit("/", 1)[-1])
+                (s.qualified_name, s.is_documented, PurePath(paths[s.file_id]).name)
                 for s in store.symbols()
                 if s.qualified_name == "Opaque"
             ]
