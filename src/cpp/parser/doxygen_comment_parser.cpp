@@ -707,7 +707,18 @@ model::CommentModel parse_parsed_comment(CXComment full) {
 // marker from the text (`/// foo`, ` * foo`) is removed. A line holding nothing
 // but markers and whitespace comes back empty, which is the paragraph break
 // parse_raw looks for.
-std::string strip_line_markers(std::string line) {
+// Reports whether `line`, from `k` on, opens with a Javadoc continuation `*`.
+//
+// Only a lone `*` followed by whitespace or the end of the line is a marker.
+// Markdown reaching the same position is content: `* item` is a bullet whose
+// own `*` must survive, `**bold**` and `*emphasis*` glue the `*` to the word
+// they decorate.
+bool is_continuation_marker(const std::string& line, std::size_t k) {
+  if (k >= line.size() || line[k] != '*') return false;
+  return k + 1 == line.size() || line[k + 1] == ' ' || line[k + 1] == '\t';
+}
+
+std::string strip_line_markers(std::string line, bool block_style) {
   auto rtrim = [](std::string& s) {
     std::size_t b = s.find_last_not_of(" \t\r");
     s.erase(b == std::string::npos ? 0 : b + 1);
@@ -736,11 +747,14 @@ std::string strip_line_markers(std::string line) {
     stripped = false;
   }
 
-  // A leading '*' is a Javadoc continuation marker, not content.
-  std::size_t c = line.find_first_not_of(" \t", k);
-  if (c != std::string::npos && line[c] == '*') {
-    k = c + 1;
-    stripped = true;
+  // A leading '*' continues a `/* ... */` block, so it is a marker only there
+  // and only on a line that did not carry an opening marker of its own.
+  if (block_style && !stripped) {
+    std::size_t c = line.find_first_not_of(" \t", k);
+    if (c != std::string::npos && is_continuation_marker(line, c)) {
+      k = c + 1;
+      stripped = true;
+    }
   }
   if (stripped && k < line.size() && line[k] == ' ') ++k;
   if (k >= line.size()) return {};
@@ -752,12 +766,15 @@ std::string strip_line_markers(std::string line) {
 // Removes Doxygen/C++ comment markers, returning the documentation lines. Used
 // only as a fallback when libclang produced no parsed comment.
 std::vector<std::string> strip_markers(const std::string& raw) {
+  std::size_t start = raw.find_first_not_of(" \t\r\n");
+  bool block_style =
+      start != std::string::npos && raw.compare(start, 2, "/*") == 0;
   std::vector<std::string> lines;
   std::string cur;
   std::size_t i = 0;
   while (i <= raw.size()) {
     if (i == raw.size() || raw[i] == '\n') {
-      lines.push_back(strip_line_markers(cur));
+      lines.push_back(strip_line_markers(cur, block_style));
       cur.clear();
       ++i;
       continue;

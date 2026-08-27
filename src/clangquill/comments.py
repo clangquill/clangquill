@@ -327,6 +327,17 @@ _TUPLE_APPEND: dict[str, tuple[str, type]] = {
 _PARAM_CMDS = frozenset({"param", "tparam"})
 
 
+def _is_continuation_marker(head: str) -> bool:
+    """Report whether ``head`` opens with a Javadoc continuation ``*``.
+
+    Only a lone ``*`` followed by whitespace or the end of the line is a marker.
+    Markdown reaching the same position is content: ``* item`` is a bullet whose
+    own ``*`` must survive, ``**bold**`` and ``*emphasis*`` glue the ``*`` to the
+    word they decorate.
+    """
+    return head.startswith("*") and (len(head) == 1 or head[1] in " \t")
+
+
 def _strip_markers(raw: str) -> list[str]:
     """Strip comment markers, returning the documentation lines.
 
@@ -335,6 +346,9 @@ def _strip_markers(raw: str) -> list[str]:
     conventionally separates the marker from the text is removed, and a line
     holding nothing but markers comes back empty.
     """
+    # A continuation `*` only exists inside a `/* ... */` block; in a `///` or
+    # `//!` block every line carries its own marker, so a `*` there is content.
+    block_style = raw.lstrip().startswith("/*")
     out: list[str] = []
     for original in raw.splitlines():
         line = original.rstrip().removesuffix("*/").rstrip()
@@ -344,11 +358,10 @@ def _strip_markers(raw: str) -> list[str]:
             stripped = True
         else:
             stripped = False
-        # A leading '*' is a Javadoc continuation marker, not content.
-        head = line.lstrip()
-        if head.startswith("*"):
-            line = head[1:]
-            stripped = True
+            head = line.lstrip()
+            if block_style and _is_continuation_marker(head):
+                line = head[1:]
+                stripped = True
         if stripped:
             line = line.removeprefix(" ")
         out.append(line.rstrip() if line.strip() else "")

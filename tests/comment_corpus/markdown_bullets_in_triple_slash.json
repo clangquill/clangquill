@@ -1,0 +1,23 @@
+{
+    "description": "A `///` block has no continuation marker, so a bullet's `*` is content (issue #209).",
+    "raw": "/// Brief line.\n///\n/// * item one\n/// * item two\n",
+    "expected": {
+        "brief": "Brief line.",
+        "detail": [
+            "* item one * item two"
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {}
+    }
+}

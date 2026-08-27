@@ -1,0 +1,23 @@
+{
+    "description": "A lone `*` continuing a `/* ... */` block is a marker, not content.",
+    "raw": "/**\n * Brief line.\n *\n * Detail paragraph.\n */\n",
+    "expected": {
+        "brief": "Brief line.",
+        "detail": [
+            "Detail paragraph."
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {}
+    }
+}

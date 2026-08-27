@@ -1,0 +1,23 @@
+{
+    "description": "A Markdown bullet inside a `/* ... */` block keeps its own `*`: only the continuation marker in front of it is stripped (issue #209).",
+    "raw": "/**\n * Brief line.\n *\n * * item one\n * * item two\n */\n",
+    "expected": {
+        "brief": "Brief line.",
+        "detail": [
+            "* item one * item two"
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {}
+    }
+}
