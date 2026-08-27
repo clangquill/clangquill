@@ -36,8 +36,10 @@ void SqliteStore::write(const model::ParsedModule& module, const Meta& meta) {
   tx.commit();
 }
 
-void SqliteStore::write_tus(const model::ParsedModule& module, const Meta& meta,
-                            const std::vector<std::string>& replaced_files) {
+void SqliteStore::write_tus(
+    const model::ParsedModule& module, const Meta& meta,
+    const std::vector<std::string>& replaced_files,
+    const std::vector<std::string>& dropped_candidates) {
   Transaction tx(db_);
   put_meta(meta);
   // Upsert so files shared with other TUs keep their id (and the symbols other
@@ -47,6 +49,11 @@ void SqliteStore::write_tus(const model::ParsedModule& module, const Meta& meta,
   // appear in the module because a re-parsed unit #includes them — those may be
   // other inputs whose symbols are not part of this partial module at all.
   delete_files_rows(replaced_ids(module, replaced_files, file_ids));
+  // Nothing above ever removes a `files` row, so a header that fell out of a
+  // re-parsed unit's include closure would otherwise linger — with its symbols
+  // — until the next full rebuild. The caller names the files only the replaced
+  // units used to reach; the ones this parse no longer reaches go now.
+  drop_vanished_files(dropped_candidates, file_ids);
   insert_rows(module, file_ids);
   tx.commit();
 }
@@ -139,6 +146,32 @@ void SqliteStore::delete_files_rows(const FileIds& file_ids) {
     ds.reset();
     ds.bind(1, id);
     ds.step();
+  }
+}
+
+void SqliteStore::drop_vanished_files(
+    const std::vector<std::string>& candidates, const FileIds& fresh) {
+  FileIds doomed;
+  Stmt lookup(db_, "SELECT id FROM files WHERE path = ?;");
+  for (const auto& path : candidates) {
+    // Still reached by this parse, already handled, or never in the DB: keep.
+    if (path.empty() || fresh.count(path) != 0 || doomed.count(path) != 0) {
+      continue;
+    }
+    lookup.reset();
+    lookup.bind(1, path);
+    if (lookup.step()) doomed.emplace(path, lookup.column_int64(0));
+  }
+  if (doomed.empty()) return;
+  // `symbols.file_id` has no ON DELETE CASCADE (deliberately: a file row is
+  // never dropped on the ordinary paths), so its rows have to go first or the
+  // foreign key would reject the delete.
+  delete_files_rows(doomed);
+  Stmt df(db_, "DELETE FROM files WHERE id = ?;");
+  for (const auto& [path, id] : doomed) {
+    df.reset();
+    df.bind(1, id);
+    df.step();
   }
 }
 

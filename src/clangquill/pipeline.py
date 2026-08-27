@@ -712,7 +712,12 @@ def _incremental_build(
             # Only some inputs are stale: re-parse just those translation units
             # into the existing IR, leaving every other TU's rows in place.
             stale = [inp for inp in inputs if inp in status.stale_inputs]
-            partial_deps, diagnostics, records = _parse_tus_into(stale, ir_path, options)
+            # Files only these units reached last time. Whichever of them the
+            # re-parse no longer pulls in has left the build for good, and the
+            # writer drops its IR rows — otherwise a header removed from an
+            # include closure keeps rendering until the next full rebuild.
+            dropped = cache.deps_only_from(stale)
+            partial_deps, diagnostics, records = _parse_tus_into(stale, ir_path, options, dropped)
             reparsed = len(stale)
         # Only when libclang actually ran: a render-only rebuild (parse cached,
         # templates or output changed) has no diagnostics of its own, and
@@ -831,6 +836,7 @@ def _parse_tus_into(
     stale: list[str],
     ir_path: Path,
     options: _core.ParseOptions,
+    dropped_candidates: list[str] | None = None,
 ) -> tuple[dict[str, list[str]], list[str], list[Diagnostic]]:
     """Re-parse the stale inputs, replacing only their rows, atomically.
 
@@ -843,6 +849,10 @@ def _parse_tus_into(
     rebuild next run. Returns the fresh dependency map, the error-severity
     diagnostics and the full diagnostic records — the latter two covering the
     re-parsed units only, since nothing else was parsed.
+
+    ``dropped_candidates`` lists the files the previous parse attributed only to
+    ``stale`` (see :meth:`BuildCache.deps_only_from`); those the fresh parse no
+    longer reaches are deleted from the IR by the same transaction.
     """
     if options.tu_batch == 0:
         # Auto batching: stale sets are usually far smaller than a cold build's
@@ -855,7 +865,7 @@ def _parse_tus_into(
     staged = _new_temp_db(ir_path.parent)
     try:
         shutil.copyfile(ir_path, staged)
-        result = _core.parse_tus_to_sqlite(stale, str(staged), options)
+        result = _core.parse_tus_to_sqlite(stale, str(staged), options, dropped_candidates or [])
     except BaseException:
         staged.unlink(missing_ok=True)
         raise

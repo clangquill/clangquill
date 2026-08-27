@@ -399,9 +399,9 @@ def test_incremental_reparses_only_the_changed_translation_unit(
         full_calls += 1
         return real_full(inputs, db, opt)
 
-    def spy_tus(inputs: list[str], db: str, opt: object) -> object:
+    def spy_tus(inputs: list[str], db: str, opt: object, dropped: list[str]) -> object:
         tu_calls.append([Path(inp).name for inp in inputs])
-        return real_tus(inputs, db, opt)
+        return real_tus(inputs, db, opt, dropped)
 
     monkeypatch.setattr(_core, "parse_to_sqlite", spy_full)
     monkeypatch.setattr(_core, "parse_tus_to_sqlite", spy_tus)
@@ -438,9 +438,9 @@ def test_incremental_shared_header_change_reparses_every_dependent(
         full_calls += 1
         return real_full(inputs, db, opt)
 
-    def spy_tus(inputs: list[str], db: str, opt: object) -> object:
+    def spy_tus(inputs: list[str], db: str, opt: object, dropped: list[str]) -> object:
         tu_calls.append([Path(inp).name for inp in inputs])
-        return real_tus(inputs, db, opt)
+        return real_tus(inputs, db, opt, dropped)
 
     monkeypatch.setattr(_core, "parse_to_sqlite", spy_full)
     monkeypatch.setattr(_core, "parse_tus_to_sqlite", spy_tus)
@@ -483,9 +483,9 @@ def test_incremental_reparse_uses_smaller_auto_batch(
     tu_batches: list[int] = []
     real_tus = _core.parse_tus_to_sqlite
 
-    def spy_tus(inputs: list[str], db: str, opt: _core.ParseOptions) -> object:
+    def spy_tus(inputs: list[str], db: str, opt: _core.ParseOptions, dropped: list[str]) -> object:
         tu_batches.append(opt.tu_batch)
-        return real_tus(inputs, db, opt)
+        return real_tus(inputs, db, opt, dropped)
 
     monkeypatch.setattr(_core, "parse_tus_to_sqlite", spy_tus)
 
@@ -775,6 +775,40 @@ def test_incremental_reparses_when_included_header_changes(project: Path) -> Non
     # Touching the *included* header invalidates the cached parse.
     (project / "detail.hpp").write_text("#pragma once\nusing Width = unsigned;\n")
     assert build(config, base_dir=project).parsed
+
+
+@requires_libclang
+def test_incremental_prunes_a_dependency_that_left_the_closure(project: Path) -> None:
+    # private.hpp is reached only through alpha.hpp; shared.hpp through both.
+    (project / "private.hpp").write_text("#pragma once\nusing Priv = int;\n")
+    (project / "shared.hpp").write_text("#pragma once\nusing Id = unsigned;\n")
+    (project / "alpha.hpp").write_text(
+        '#include "private.hpp"\n#include "shared.hpp"\n/// alpha ns\nnamespace alpha { /// f\nPriv f(); }\n',
+    )
+    (project / "beta.hpp").write_text('#include "shared.hpp"\n/// beta ns\nnamespace beta { /// g\nId g(); }\n')
+    config = Config(input=["alpha.hpp", "beta.hpp"], output_dir="api", cache_dir=".cache")
+
+    build(config, base_dir=project)
+    ir = project / ".cache" / "clangquill.sqlite"
+    with Store.open(ir) as store:
+        tracked = {Path(f.path).name for f in store.files()}
+    assert {"alpha.hpp", "beta.hpp", "private.hpp", "shared.hpp"} <= tracked
+
+    # alpha.hpp drops both includes. shared.hpp survives because beta.hpp still
+    # pulls it in; private.hpp is reached by nothing and must leave the IR.
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    with Store.open(ir) as store:
+        tracked = {Path(f.path).name for f in store.files()}
+    assert "private.hpp" not in tracked
+    assert {"alpha.hpp", "beta.hpp", "shared.hpp"} <= tracked
+    # The reported file count matches what is actually still in the build.
+    assert result.file_count == len(tracked)
+
+    # beta.hpp's page is untouched and still renders from the surviving rows.
+    assert sorted(p.name for p in (project / "api").glob("*.md")) == ["alpha.md", "beta.md", "index.md"]
 
 
 @requires_libclang

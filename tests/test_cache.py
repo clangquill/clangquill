@@ -179,6 +179,34 @@ def test_record_partial_parse_updates_map_and_prunes_orphans(tmp_path: Path) -> 
         assert cache.parse_fingerprint == "fp"
 
 
+def test_deps_only_from_names_files_no_surviving_unit_reaches(tmp_path: Path) -> None:
+    a = tmp_path / "a.hpp"
+    b = tmp_path / "b.hpp"
+    private = tmp_path / "private.hpp"
+    shared = tmp_path / "shared.hpp"
+    for p in (a, b, private, shared):
+        p.write_text(p.name, encoding="utf-8")
+    files = {str(p): _entry(p) for p in (a, b, private, shared)}
+
+    with BuildCache.open(tmp_path / "cache") as cache:
+        cache.record_parse(
+            "fp",
+            files,
+            {
+                str(a): [str(a), str(private), str(shared)],
+                str(b): [str(b), str(shared)],
+            },
+        )
+
+        # Re-parsing a.hpp alone: only a.hpp itself and its private header are
+        # candidates. shared.hpp is still reached by b.hpp and must not be
+        # offered for deletion; b.hpp is another unit's input entirely.
+        assert cache.deps_only_from([str(a)]) == sorted([str(a), str(private)])
+        # Re-parsing both units puts every tracked file in reach.
+        assert cache.deps_only_from([str(a), str(b)]) == sorted(str(p) for p in (a, b, private, shared))
+        assert cache.deps_only_from([]) == []
+
+
 def test_outputs_round_trip_and_replacement(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     with BuildCache.open(cache_dir) as cache:
