@@ -2,8 +2,10 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <random>
+#include <stdexcept>
 #include <string>
-#include <unistd.h>
 
 #include "store/sqlite_store.hpp"
 
@@ -11,11 +13,21 @@ using namespace clangquill;
 
 namespace {
 
+// A unique path in the platform's temp directory. std::filesystem rather than
+// mkstemp(3), which lives in <unistd.h> and does not exist under MSVC (nor
+// does /tmp). CTest runs each Catch2 case in its own process, so the name has
+// to be unique across processes and not merely within one; sqlite creates the
+// file on open, so it does not need to exist up front.
 std::string temp_db_path() {
-  char tmpl[] = "/tmp/clangquill_test_XXXXXX";
-  int fd = mkstemp(tmpl);
-  if (fd != -1) close(fd);
-  return std::string(tmpl);
+  namespace fs = std::filesystem;
+  std::random_device entropy;
+  for (int attempt = 0; attempt < 64; ++attempt) {
+    const fs::path candidate =
+        fs::temp_directory_path() /
+        ("clangquill_test_" + std::to_string(entropy()) + ".sqlite");
+    if (!fs::exists(candidate)) return candidate.string();
+  }
+  throw std::runtime_error("could not find an unused temporary database path");
 }
 
 model::ParsedModule make_module() {
