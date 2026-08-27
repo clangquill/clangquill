@@ -183,6 +183,16 @@ TEST_CASE("a group command takes its line, not the paragraph below it",
   const Field* brief = field(fields_of(m, fn->usr), "brief");
   REQUIRE(brief != nullptr);
   CAPTURE(brief->value);
+  // TEMP DIAGNOSTIC for clangquill/clangquill#266: dump everything upstream of
+  // `brief` so a failing Windows run pins down where the divergence actually
+  // is, rather than only that it happened. Remove once the root cause lands.
+  for (const auto& c : m.comments) {
+    if (c.symbol_usr == fn->usr) {
+      CAPTURE(c.text.size());
+      CAPTURE(c.text);
+      CAPTURE(c.fields_json);
+    }
+  }
   CHECK(brief->value.find("documents the") != std::string::npos);
 }
 
