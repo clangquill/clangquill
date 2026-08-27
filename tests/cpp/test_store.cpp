@@ -609,8 +609,11 @@ TEST_CASE("SqliteStore::write refreshes a stale schema version in meta",
     writer.write(make_module(), stale);
   }
   {
+    // write() assumes an empty `files` table (insert_files, not upsert_files),
+    // so a second write against the same database goes through write_tus --
+    // the incremental path a real upgrade-and-rerun actually takes.
     store::SqliteStore writer(path);
-    writer.write(make_module(), store::Meta::current());
+    writer.write_tus(make_module(), store::Meta::current(), {"/tmp/example.hpp"});
   }
 
   store::Db db(path);
