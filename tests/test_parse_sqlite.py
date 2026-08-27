@@ -86,6 +86,14 @@ def test_parse_to_sqlite_parallel_matches_serial(tmp_path: Path, jobs: int) -> N
     assert parallel == serial
 
 
+def _tu_deps(result: _core.ParseResult) -> dict[str, set[str]]:
+    """Rebuild ``{input: {dependency, ...}}`` from the interned per-TU file map."""
+    paths = result.tu_dep_paths
+    return {
+        input_path: {paths[i] for i in ids} for input_path, ids in zip(result.tu_inputs, result.tu_dep_ids, strict=True)
+    }
+
+
 @pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
 def test_parse_to_sqlite_reports_per_tu_files(tmp_path: Path) -> None:
     detail = tmp_path / "detail.hpp"
@@ -98,10 +106,33 @@ def test_parse_to_sqlite_reports_per_tu_files(tmp_path: Path) -> None:
 
     result = _core.parse_to_sqlite([str(a), str(b)], str(db), _core.ParseOptions())
 
-    deps = {tu.input: set(tu.files) for tu in result.translation_units}
+    deps = _tu_deps(result)
     # Each input reports its own file set: a pulls in detail.hpp, b does not.
     assert deps[str(a)] == {str(a), str(detail)}
     assert deps[str(b)] == {str(b)}
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_per_tu_files_are_interned_across_inputs(tmp_path: Path) -> None:
+    """A header two inputs share crosses the binding once, not once per input."""
+    shared = tmp_path / "shared.hpp"
+    shared.write_text("#pragma once\nusing Width = int;\n")
+    inputs = []
+    for name in ("a", "b", "c"):
+        header = tmp_path / f"{name}.hpp"
+        header.write_text(f'#include "shared.hpp"\n/// ns {name}\nnamespace {name} {{ /// f\nWidth f(); }}\n')
+        inputs.append(str(header))
+    db = tmp_path / "out.sqlite"
+
+    result = _core.parse_to_sqlite(inputs, str(db), _core.ParseOptions())
+
+    paths = result.tu_dep_paths
+    assert paths.count(str(shared)) == 1
+    assert len(paths) == len(set(paths))
+    # The interning is only a transport detail: every input still reports the
+    # shared header among its dependencies.
+    deps = _tu_deps(result)
+    assert all(str(shared) in deps[inp] for inp in inputs)
 
 
 @pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
@@ -116,7 +147,7 @@ def test_parse_tu_to_sqlite_replaces_only_that_unit(tmp_path: Path) -> None:
     # Edit a.hpp: drop f, add h. Re-parse only that translation unit.
     a.write_text("/// ns a\nnamespace a { /// h\nint h(); }\n")
     result = _core.parse_tu_to_sqlite(str(a), str(db), _core.ParseOptions())
-    assert [tu.input for tu in result.translation_units] == [str(a)]
+    assert result.tu_inputs == [str(a)]
 
     with Store.open(db) as store:
         names = {s.qualified_name for s in store.symbols()}
@@ -156,7 +187,7 @@ def test_parse_tus_to_sqlite_replaces_multiple_units_atomically(tmp_path: Path) 
     # Re-parse both stale units in one call; an untouched third input joins in.
     a.write_text("/// ns a\nnamespace a { /// h\nint h(); }\n")
     result = _core.parse_tus_to_sqlite([str(a), str(c)], str(db), _core.ParseOptions())
-    assert [tu.input for tu in result.translation_units] == [str(a), str(c)]
+    assert result.tu_inputs == [str(a), str(c)]
 
     with Store.open(db) as store:
         names = {s.qualified_name for s in store.symbols()}

@@ -9,7 +9,9 @@
 #include <nanobind/stl/vector.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
+#include <unordered_map>
 
 #include "core/version.hpp"
 #include "model/diagnostic.hpp"
@@ -59,15 +61,6 @@ struct PyParseOptions {
   int tu_batch = 0;
 };
 
-// One input translation unit and the full set of files it pulled in (the input
-// itself plus every transitive `#include`). Lets the Python cache attribute each
-// dependency to the input that needs it, so a header edit re-parses only the
-// translation units that include it.
-struct TuFiles {
-  std::string input;
-  std::vector<std::string> files;
-};
-
 struct ParseResult {
   int symbol_count = 0;
   int reference_count = 0;
@@ -79,7 +72,22 @@ struct ParseResult {
   // Everything that was captured, in parse order, notes flattened behind their
   // parent via Diagnostic::depth. Errors-only unless the parse asked for more.
   std::vector<clangquill::model::Diagnostic> diagnostic_records;
-  std::vector<TuFiles> translation_units;
+
+  // The set of files each input translation unit pulled in (the input itself
+  // plus every transitive `#include`), in interned form: input `tu_inputs[i]`
+  // depends on `tu_dep_paths[j]` for every j in `tu_dep_ids[i]`. Lets the
+  // Python cache attribute each dependency to the input that needs it, so a
+  // header edit re-parses only the translation units that include it.
+  //
+  // Interned rather than one string list per input: inputs sharing a header
+  // (which, for the STL and a project's own core headers, means nearly every
+  // input) would otherwise send that path across the binding once per input --
+  // inputs x closure strings, millions of them on a large project, all
+  // materialised as distinct Python objects. Here each distinct path crosses
+  // once and the per-input lists are plain integers.
+  std::vector<std::string> tu_inputs;
+  std::vector<std::string> tu_dep_paths;
+  std::vector<std::vector<std::int32_t>> tu_dep_ids;
 };
 
 #if defined(CLANGQUILL_HAVE_LIBCLANG)
@@ -149,12 +157,20 @@ ParseResult parse_inputs(const std::vector<std::string>& inputs,
   }
 
   ParseResult res = result_from_module(mod);
-  res.translation_units.reserve(inputs.size());
+  res.tu_inputs = inputs;
+  res.tu_dep_ids.resize(inputs.size());
+  // Shared closures are interned here rather than copied per input: one map
+  // entry (and one Python string, later) per distinct path.
+  std::unordered_map<std::string, std::int32_t> dep_ids;
   for (std::size_t i = 0; i < inputs.size(); ++i) {
-    TuFiles tu;
-    tu.input = inputs[i];
-    tu.files = std::move(tu_files[i]);
-    res.translation_units.push_back(std::move(tu));
+    auto& ids = res.tu_dep_ids[i];
+    ids.reserve(tu_files[i].size());
+    for (const auto& file : tu_files[i]) {
+      auto [it, inserted] = dep_ids.emplace(
+          file, static_cast<std::int32_t>(res.tu_dep_paths.size()));
+      if (inserted) res.tu_dep_paths.push_back(file);
+      ids.push_back(it->second);
+    }
   }
   return res;
 }
@@ -231,17 +247,18 @@ NB_MODULE(_core, m) {
       .def_ro("line", &clangquill::model::Diagnostic::line)
       .def_ro("column", &clangquill::model::Diagnostic::column);
 
-  nb::class_<TuFiles>(m, "TuFiles")
-      .def_ro("input", &TuFiles::input)
-      .def_ro("files", &TuFiles::files);
-
+  // Every access to one of the vector attributes below converts the whole C++
+  // vector into a fresh Python list -- there is no view type, so `res.diagnostics`
+  // twice is two copies. Callers read each attribute once and bind the result.
   nb::class_<ParseResult>(m, "ParseResult")
       .def_ro("symbol_count", &ParseResult::symbol_count)
       .def_ro("reference_count", &ParseResult::reference_count)
       .def_ro("file_count", &ParseResult::file_count)
       .def_ro("diagnostics", &ParseResult::diagnostics)
       .def_ro("diagnostic_records", &ParseResult::diagnostic_records)
-      .def_ro("translation_units", &ParseResult::translation_units);
+      .def_ro("tu_inputs", &ParseResult::tu_inputs)
+      .def_ro("tu_dep_paths", &ParseResult::tu_dep_paths)
+      .def_ro("tu_dep_ids", &ParseResult::tu_dep_ids);
 
   // The three parse entry points run for minutes on a large project and touch
   // no Python objects between argument conversion and return, so each releases

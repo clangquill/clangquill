@@ -112,6 +112,10 @@ CREATE TABLE IF NOT EXISTS comment_fields (
   ordinal    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_comment_fields_sym ON comment_fields(symbol_usr);
+-- Store.related_by_name() selects every `\relates` field in the database by
+-- name; without this it full-scans comment_fields (every documented symbol's
+-- every field) once per build.
+CREATE INDEX IF NOT EXISTS idx_comment_fields_name ON comment_fields(name);
 
 CREATE TABLE IF NOT EXISTS outputs (
   id           INTEGER PRIMARY KEY,
@@ -135,6 +139,10 @@ CREATE TABLE IF NOT EXISTS group_members (
   ordinal    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id);
+-- An incremental re-parse deletes the group memberships of the symbols it is
+-- about to replace (`member_usr IN (...)`, once per replaced file); without
+-- this each of those deletes full-scans group_members.
+CREATE INDEX IF NOT EXISTS idx_group_members_member ON group_members(member_usr);
 )SQL";
 
 }  // namespace clangquill::store

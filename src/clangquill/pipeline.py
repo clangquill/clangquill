@@ -640,7 +640,7 @@ def _full_build(config: Config, base: Path, inputs: list[str], output_dir: Path)
         symbol_count=result.symbol_count,
         reference_count=result.reference_count,
         file_count=result.file_count,
-        diagnostics=list(result.diagnostics),
+        diagnostics=result.diagnostics,
         diagnostic_records=records,
         diagnostic_counts=severity_counts(records),
         diagnostics_log=log_path,
@@ -706,7 +706,7 @@ def _incremental_build(
         if not status.current and status.stale_inputs is None:
             # Configuration changed or no per-TU map: rebuild the whole IR.
             counts = _parse_into(inputs, ir_path, options)
-            diagnostics = list(counts.diagnostics)
+            diagnostics = counts.diagnostics
             records = _records(counts)
         elif not status.current:
             # Only some inputs are stale: re-parse just those translation units
@@ -821,10 +821,22 @@ def _parse_into(inputs: list[str], ir_path: Path, options: _core.ParseOptions) -
 
 
 def _tu_deps(result: _core.ParseResult | None) -> dict[str, list[str]]:
-    """Extract the ``{input: [dependency, ...]}`` map from a parse result."""
+    """Extract the ``{input: [dependency, ...]}`` map from a parse result.
+
+    The core hands the map over interned — a list of distinct dependency paths
+    plus per-input index lists — because inputs share most of their include
+    closure. Rebuilding it here keeps that sharing: every input's list holds
+    references to the same path strings instead of a private copy each.
+
+    Each ``result`` attribute is read exactly once: every access converts the
+    whole underlying C++ vector into a fresh Python list.
+    """
     if result is None:
         return {}
-    return {tu.input: list(tu.files) for tu in result.translation_units}
+    paths = result.tu_dep_paths
+    return {
+        input_path: [paths[i] for i in ids] for input_path, ids in zip(result.tu_inputs, result.tu_dep_ids, strict=True)
+    }
 
 
 def _parse_tus_into(
@@ -860,7 +872,7 @@ def _parse_tus_into(
         staged.unlink(missing_ok=True)
         raise
     staged.replace(ir_path)
-    return _tu_deps(result), list(result.diagnostics), _records(result)
+    return _tu_deps(result), result.diagnostics, _records(result)
 
 
 def _stat_pair(path: Path) -> tuple[int | None, int | None]:
