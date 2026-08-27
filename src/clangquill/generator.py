@@ -158,6 +158,7 @@ _CONST_LEAF_KINDS = frozenset(
 
 _SLUG_RE = re.compile(r"[^0-9A-Za-z]+")
 _BLANKS_RE = re.compile(r"\n{3,}")
+_BACKTICK_RUN_RE = re.compile(r"`+")
 # Free-form ``@see``/``@sa`` text classification: a leading URL scheme is turned
 # into a link, and trailing call/punctuation noise (``foo().``) is stripped so
 # the cleaned name stays a parseable C++ cross-reference.
@@ -609,6 +610,19 @@ class Generator:
     def label(self, symbol: Symbol) -> str:
         """Return the human-readable kind label used in headings."""
         return _LABEL_FOR.get(symbol.kind, "Symbol")
+
+    def fence(self, *content: str) -> str:
+        """Return a backtick fence long enough to safely wrap ``content``.
+
+        MyST, like CommonMark, closes a fenced block at the first line whose
+        backtick run is at least as long as the opening fence. Doxygen prose
+        can legitimately contain fenced code blocks of its own, so a fixed
+        3-backtick fence would end early on such content; sizing the fence to
+        one longer than the longest backtick run in ``content`` keeps it from
+        colliding with anything nested inside.
+        """
+        longest = max((len(run) for text in content for run in _BACKTICK_RUN_RE.findall(text)), default=0)
+        return "`" * max(3, longest + 1)
 
     def _relpath(self, path: str) -> str:
         """Re-root an absolute file path under ``path_base`` for display.

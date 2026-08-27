@@ -17,10 +17,12 @@
 **Related functions** {% for fn in related %}{{ xref(fn) }}{{ ", " if not loop.last }}{% endfor %}.
 
 {% endif %}
-```{{ "{" ~ gen.directive(symbol) ~ "}" }} {{ sig.directive_argument(symbol) }}
+{% set body = render_comment(comment) %}
+{% set fence = gen.fence(body) %}
+{{ fence }}{{ "{" ~ gen.directive(symbol) ~ "}" }} {{ sig.directive_argument(symbol) }}
 
-{{ render_comment(comment) }}
-```
+{{ body }}
+{{ fence }}
 {% for child in gen.children(symbol) %}
 
 {{ gen.render_symbol(child, level=level + 1) }}

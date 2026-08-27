@@ -1,18 +1,22 @@
 {% import "partials/signature.md.jinja" as sig %}
 {% set comment = gen.comment(symbol) %}
+{% set body = render_comment(comment) %}
+{% set fence = gen.fence(body) %}
 {{ level | heading }} {{ gen.label(symbol) }} `{{ symbol.qualified_name }}`
 
-```{{ "{" ~ gen.directive(symbol) ~ "}" }} {{ sig.directive_argument(symbol) }}
+{{ fence }}{{ "{" ~ gen.directive(symbol) ~ "}" }} {{ sig.directive_argument(symbol) }}
 
-{{ render_comment(comment) }}
-```
+{{ body }}
+{{ fence }}
 {% for enumerator in gen.enumerators(symbol) %}
 {% set ec = gen.enumerator_comment(enumerator) %}
+{% set ec_body = render_comment(ec) if ec else "" %}
+{% set ec_fence = gen.fence(ec_body) %}
 
-```{cpp:enumerator} {{ symbol.qualified_name }}::{{ enumerator.name }}
+{{ ec_fence }}{cpp:enumerator} {{ symbol.qualified_name }}::{{ enumerator.name }}
 {% if ec %}
 
-{{ render_comment(ec) }}
+{{ ec_body }}
 {% endif %}
-```
+{{ ec_fence }}
 {% endfor %}

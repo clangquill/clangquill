@@ -52,6 +52,35 @@ def test_namespace_golden(gen: Generator, store: Store) -> None:
     _assert_golden("geo.md", rendered)
 
 
+def test_fence_widens_past_the_longest_backtick_run_in_content() -> None:
+    assert Generator.fence(None, "plain text") == "```"
+    assert Generator.fence(None, "has a ``` fence inside") == "````"
+    assert Generator.fence(None, "brief has none", "but ```` fields do") == "`````"
+
+
+def test_class_directive_widens_its_fence_around_an_embedded_code_block(gen: Generator, store: Store) -> None:
+    # Regression for #205: a comment containing its own fenced code block used
+    # to terminate the outer ```{cpp:class} ... ``` directive early, leaking
+    # the rest of the comment out as top-level Markdown.
+    shape = _symbol(store, "geo::Shape")
+    fenced = CommentModel(brief="Example.", detail=["```\ncode inside\n```"])
+    original_comment = gen.comment
+    gen.comment = lambda symbol, fenced=fenced, shape=shape, original=original_comment: (
+        fenced if symbol.usr == shape.usr else original(symbol)
+    )
+    try:
+        rendered = gen.render_symbol(shape, level=1)
+    finally:
+        gen.comment = original_comment
+
+    lines = rendered.splitlines()
+    open_line = next(line for line in lines if "{cpp:class}" in line)
+    assert open_line.startswith("````{cpp:class}")
+    assert lines[-1] == "````"
+    # The embedded fence itself must survive unescaped and unwidened.
+    assert "```\ncode inside\n```" in rendered
+
+
 def test_generate_writes_pages_and_index(gen: Generator, tmp_path: Path) -> None:
     out = tmp_path / "api"
     pages = gen.generate(out)
