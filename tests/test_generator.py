@@ -486,7 +486,7 @@ def test_group_by_file_pages_every_file_of_a_spanning_namespace(multifile_db: Pa
         out = tmp_path / "api"
         pages = Generator(store).generate(out, group_by="file")
 
-    assert pages == ["alpha_hpp", "beta_hpp"]
+    assert sorted(pages) == ["alpha_hpp", "beta_hpp"]
     alpha = (out / "alpha_hpp.md").read_text()
     beta = (out / "beta_hpp.md").read_text()
     # Each file lists only the class it declares, even though both share the
@@ -577,6 +577,74 @@ def test_related_block_lists_functions_relates_points_at(gen: Generator, store: 
 def test_related_block_absent_without_relates(gen: Generator, store: Store) -> None:
     # Shape has no related functions, so the section must not appear at all.
     assert "**Related functions**" not in gen.render_symbol(_symbol(store, "geo::Shape"))
+
+
+def test_related_block_keeps_documented_cross_file_relates_when_hiding_undocumented(
+    multifile_db: Path,
+    tmp_path: Path,
+) -> None:
+    # A file-scoped page still renders a class's documented related functions
+    # even when those functions are declared in another file.
+    con = sqlite3.connect(multifile_db)
+    con.execute(
+        "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, display_name, "
+        "signature, type_repr, access, is_definition, is_documented, content_hash, file_id, line) "
+        "VALUES(?, 'c:@N@app', 5, ?, ?, ?, ?, ?, 0, 1, 1, ?, 2, 0)",
+        (
+            "c:@N@app@F@link_to_alpha",
+            "link_to_alpha",
+            "app::link_to_alpha",
+            "app::link_to_alpha",
+            "void link_to_alpha()",
+            "void ()",
+            "hash-link-to-alpha",
+        ),
+    )
+    con.execute(
+        "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+        ("c:@N@app@F@link_to_alpha",),
+    )
+    con.executemany(
+        "INSERT INTO comment_fields(symbol_usr, name, arg, value, ordinal) VALUES(?, ?, '', ?, ?)",
+        [
+            ("c:@N@app@F@link_to_alpha", "brief", "Docs for link_to_alpha.", 0),
+            ("c:@N@app@F@link_to_alpha", "relates", "Alpha", 1),
+        ],
+    )
+    con.execute(
+        "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, display_name, "
+        "signature, type_repr, access, is_definition, is_documented, content_hash, file_id, line) "
+        "VALUES(?, 'c:@N@app', 5, ?, ?, ?, ?, ?, 0, 1, 0, ?, 2, 0)",
+        (
+            "c:@N@app@F@hidden_link",
+            "hidden_link",
+            "app::hidden_link",
+            "app::hidden_link",
+            "void hidden_link()",
+            "void ()",
+            "hash-hidden-link",
+        ),
+    )
+    con.execute(
+        "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+        ("c:@N@app@F@hidden_link",),
+    )
+    con.execute(
+        "INSERT INTO comment_fields(symbol_usr, name, arg, value, ordinal) VALUES(?, 'relates', '', 'Alpha', 0)",
+        ("c:@N@app@F@hidden_link",),
+    )
+    con.commit()
+    con.close()
+
+    with Store.open(multifile_db) as store:
+        assert _symbol(store, "app::link_to_alpha").is_documented
+        assert not _symbol(store, "app::hidden_link").is_documented
+        pages = Generator(store, include_undocumented=False).generate(tmp_path / "api", group_by="file")
+
+    assert sorted(pages) == ["alpha_hpp", "beta_hpp"]
+    alpha = (tmp_path / "api" / "alpha_hpp.md").read_text()
+    assert "{cpp:any}`app::link_to_alpha`" in alpha
+    assert "{cpp:any}`app::hidden_link`" not in alpha
 
 
 def test_related_functions_bust_the_class_page_fingerprint(fixture_db: Path) -> None:
