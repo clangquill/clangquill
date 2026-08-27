@@ -29,6 +29,10 @@ class Db {
       db_ = nullptr;
       throw std::runtime_error("sqlite3_open: " + msg);
     }
+    // Without a busy timeout, any statement that meets another connection's
+    // lock fails instantly with "database is locked" instead of waiting for
+    // it to clear.
+    sqlite3_busy_timeout(db_, kBusyTimeoutMs);
     // The destructor will not run if the constructor throws, so close the
     // handle ourselves on any pragma failure to avoid leaking it.
     try {
@@ -62,6 +66,9 @@ class Db {
   }
 
  private:
+  /// Milliseconds sqlite3_busy_timeout waits for a lock before giving up.
+  static constexpr int kBusyTimeoutMs = 5000;
+
   sqlite3* db_ = nullptr;
 };
 
@@ -149,9 +156,13 @@ class Stmt {
 /// @brief RAII transaction: @ref commit on success; rolls back if destroyed uncommitted.
 class Transaction {
  public:
-  /// @brief Begins a transaction on @p db.
+  /// @brief Begins a write transaction on @p db.
+  ///
+  /// Uses `BEGIN IMMEDIATE` rather than a deferred `BEGIN` so the write lock
+  /// is acquired up front — and thus waits on the busy timeout — instead of
+  /// risking `SQLITE_BUSY` mid-transaction at the first write statement.
   /// @param db The connection to run the transaction on.
-  explicit Transaction(Db& db) : db_(db) { db_.exec("BEGIN;"); }
+  explicit Transaction(Db& db) : db_(db) { db_.exec("BEGIN IMMEDIATE;"); }
   ~Transaction() {
     if (!done_) {
       try {
