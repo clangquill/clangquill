@@ -1599,7 +1599,7 @@ class Generator:
 
 
 def write_if_changed(path: Path, text: str) -> bool:
-    """Write ``text`` to ``path`` unless the file already holds exactly that.
+    r"""Write ``text`` to ``path`` unless the file already holds exactly that.
 
     Rewriting a file with identical content still bumps its mtime, and that is
     not free for anything generated into a Sphinx source directory: Sphinx
@@ -1611,19 +1611,23 @@ def write_if_changed(path: Path, text: str) -> bool:
     out-of-the-box Sphinx configuration, which has no ``cache_dir`` -- and the
     page manifest to the same rule.
 
-    The comparison is on decoded text rather than raw bytes so that the
-    platform newline translation :meth:`~pathlib.Path.write_text` applies on the
-    way out is undone on the way in, and an unchanged page still compares equal
-    on Windows. A missing or unreadable file simply gets written.
+    Both sides of the comparison are raw UTF-8 bytes, and the write goes out as
+    those bytes rather than through :meth:`~pathlib.Path.write_text`: the cached
+    path pins ``newline="\n"`` for its own reasons (see ``_apply_outputs``), so
+    letting this one translate newlines would make the two paths write different
+    files for the same page on Windows -- and a page written with CRLF would
+    never compare equal to the text it was rendered from. A missing or
+    unreadable file simply gets written.
 
     Returns whether ``path`` was written.
     """
+    data = text.encode("utf-8")
     try:
-        if path.read_text(encoding="utf-8") == text:
+        if path.read_bytes() == data:
             return False
-    except (OSError, UnicodeDecodeError):
+    except OSError:
         pass
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(data)
     return True
 
 
