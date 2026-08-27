@@ -6,14 +6,20 @@
 # hooks up vcpkg by itself, so callers (CI, developers) need no `git clone` +
 # bootstrap step and no distro packages.
 
-if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
-    # Catch2 sits behind the `tests` feature of vcpkg.json; ask for it when the
-    # tests are being built (CLANGQUILL_BUILD_TESTS is declared after project(),
-    # but a -D on the command line is already in the cache here).
-    if(CLANGQUILL_BUILD_TESTS)
-        list(APPEND VCPKG_MANIFEST_FEATURES tests)
-    endif()
+# Catch2 sits behind the `tests` feature of vcpkg.json; ask for it when the
+# tests are being built (CLANGQUILL_BUILD_TESTS is declared after project(), but
+# a -D on the command line is already in the cache here).
+#
+# This is a manifest-mode setting read by the vcpkg toolchain at project() time,
+# not a bootstrap concern, so it must be set unconditionally: the toolchain
+# selection below is skipped on every re-configure (CMAKE_TOOLCHAIN_FILE is
+# cached) and whenever the caller brings their own toolchain file, and gating the
+# feature on it would leave `-DCLANGQUILL_BUILD_TESTS=ON` without Catch2.
+if(CLANGQUILL_BUILD_TESTS)
+    list(APPEND VCPKG_MANIFEST_FEATURES tests)
+endif()
 
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     # VCPKG_ROOT in the environment means "use this existing installation".
     if(DEFINED ENV{VCPKG_ROOT})
         set(VCPKG_ROOT $ENV{VCPKG_ROOT})

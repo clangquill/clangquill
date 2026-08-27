@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "hash/content_hash.hpp"
 #include "model/module.hpp"
 
 #if defined(CLANGQUILL_HAVE_LIBCLANG)
@@ -1484,6 +1485,60 @@ TEST_CASE("a batch member libclang never opened is reported", "[parser]") {
   CHECK(find(mod, "a_value") != nullptr);
 
   fs::remove_all(dir);
+}
+
+TEST_CASE("parser records parameter default arguments", "[parser]") {
+  auto m = parse_fixture("param_defaults.hpp");
+
+  const auto* draw = find(m, "defaults::draw");
+  REQUIRE(draw != nullptr);
+
+  std::vector<model::FunctionParameter> params;
+  for (const auto& p : m.parameters) {
+    if (p.function_usr == draw->usr) params.push_back(p);
+  }
+  REQUIRE(params.size() == 3);
+  CHECK(params[0].default_value == "80");
+  CHECK(params[1].default_value == "\"shape\"");
+  // The type of this one closes two argument lists with a single `>>` token,
+  // which used to hide the `=` that follows it.
+  CHECK(params[2].name == "bounds");
+  CHECK_FALSE(params[2].default_value.empty());
+
+  const auto* resize = find(m, "defaults::Widget::resize");
+  REQUIRE(resize != nullptr);
+  for (const auto& p : m.parameters) {
+    if (p.function_usr != resize->usr) continue;
+    CHECK(p.default_value == (p.index == 1 ? "24" : ""));
+  }
+}
+
+TEST_CASE("parameter defaults reach the content hash", "[parser]") {
+  auto m = parse_fixture("param_defaults.hpp");
+  const auto* value_or = find(m, "defaults::value_or");
+  REQUIRE(value_or != nullptr);
+
+  // A function template's parameters arrive as child cursors rather than
+  // through clang_Cursor_getNumArguments; both paths must carry the default.
+  bool found = false;
+  for (const auto& p : m.parameters) {
+    if (p.function_usr == value_or->usr && p.index == 1) {
+      found = true;
+      CHECK(p.default_value.find("T") != std::string::npos);
+    }
+  }
+  CHECK(found);
+
+  // The hash folds in the parameters, so editing only a default value
+  // invalidates the cached page -- which it could not do while every
+  // default_value was empty.
+  std::vector<model::FunctionParameter> params;
+  for (const auto& p : m.parameters) {
+    if (p.function_usr == value_or->usr) params.push_back(p);
+  }
+  const std::string with_default = hash::content_hash(*value_or, params, "");
+  params[1].default_value = "T{42}";
+  CHECK(hash::content_hash(*value_or, params, "") != with_default);
 }
 
 #else  // !CLANGQUILL_HAVE_LIBCLANG

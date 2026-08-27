@@ -99,6 +99,9 @@ void add_parameter(VisitCtx& ctx, const std::string& usr, int index,
   p.index = index;
   p.name = spelling(arg);
   p.type_repr = to_string(clang_getTypeSpelling(clang_getCursorType(arg)));
+  // Recovered from the declaration tokens: libclang exposes the default
+  // argument only as a child expression cursor, with no API for its text.
+  p.default_value = param_default(arg);
   (*ctx.params_by_func)[usr].push_back(p);
   ctx.mod->parameters.push_back(p);
 
