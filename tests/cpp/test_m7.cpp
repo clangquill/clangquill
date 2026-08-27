@@ -129,6 +129,55 @@ TEST_CASE("parser assembles Doxygen groups and members", "[m7]") {
   CHECK(add_in_math);
 }
 
+TEST_CASE("parser extracts parameters and references for function templates",
+         "[m7]") {
+  auto m = parse_m7();
+
+  const auto* max_value = find(m, "m7::max_value");
+  REQUIRE(max_value != nullptr);
+  CHECK(max_value->kind == model::SymbolKind::FunctionTemplate);
+
+  std::vector<model::FunctionParameter> mv_params;
+  for (const auto& p : m.parameters) {
+    if (p.function_usr == max_value->usr) mv_params.push_back(p);
+  }
+  REQUIRE(mv_params.size() == 2);
+  CHECK(mv_params[0].name == "a");
+  CHECK(mv_params[0].index == 0);
+  CHECK(mv_params[1].name == "b");
+  CHECK(mv_params[1].index == 1);
+
+  int mv_param_refs = 0;
+  for (const auto& r : m.references) {
+    if (r.from_usr == max_value->usr && r.kind == model::RefKind::ParamType) {
+      ++mv_param_refs;
+    }
+  }
+  CHECK(mv_param_refs == 2);
+
+  const auto* make_vec = find(m, "m7::make_vec");
+  REQUIRE(make_vec != nullptr);
+  CHECK(make_vec->kind == model::SymbolKind::FunctionTemplate);
+
+  std::vector<model::FunctionParameter> mkv_params;
+  for (const auto& p : m.parameters) {
+    if (p.function_usr == make_vec->usr) mkv_params.push_back(p);
+  }
+  REQUIRE(mkv_params.size() == 2);
+  CHECK(mkv_params[0].name == "x");
+  CHECK(mkv_params[1].name == "y");
+
+  bool found_return_ref = false;
+  for (const auto& r : m.references) {
+    if (r.from_usr == make_vec->usr && r.kind == model::RefKind::ReturnType) {
+      found_return_ref = true;
+      CHECK(r.to_spelling.find("Vec") != std::string::npos);
+      CHECK(r.is_resolved);
+    }
+  }
+  CHECK(found_return_ref);
+}
+
 #else  // !CLANGQUILL_HAVE_LIBCLANG
 
 TEST_CASE("m7 parser tests skipped without libclang", "[m7][!mayfail]") {

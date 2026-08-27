@@ -52,6 +52,10 @@ struct Vec {
 /// Adds two vectors component-wise.
 Vec operator+(const Vec& a, const Vec& b);
 
+/// Builds a vector from two components of any convertible type.
+template <typename T>
+Vec make_vec(T x, T y);
+
 /// Adds two integers.
 /// \ingroup math
 int add(int a, int b);

@@ -90,32 +90,64 @@ void fill_location(CXCursor c, model::Symbol& sym) {
   sym.location.column = column;
 }
 
+// Records parameter @p arg at @p index of @p usr: its FunctionParameter row
+// and its ParamType reference.
+void add_parameter(VisitCtx& ctx, const std::string& usr, int index,
+                   CXCursor arg) {
+  model::FunctionParameter p;
+  p.function_usr = usr;
+  p.index = index;
+  p.name = spelling(arg);
+  p.type_repr = to_string(clang_getTypeSpelling(clang_getCursorType(arg)));
+  (*ctx.params_by_func)[usr].push_back(p);
+  ctx.mod->parameters.push_back(p);
+
+  ctx.mod->references.push_back(make_type_ref(
+      usr, model::RefKind::ParamType, clang_getCursorType(arg), index));
+}
+
 // Extracts function parameters and type references for a function-like cursor.
 void extract_function_details(CXCursor c, const std::string& usr,
                               VisitCtx& ctx) {
-  CXType fn_type = clang_getCursorType(c);
-  // Return type reference (skip for constructors/destructors which have none
-  // meaningful).
-  CXType result = clang_getResultType(fn_type);
+  // clang_getCursorResultType resolves the return type directly from the
+  // cursor and, unlike clang_getResultType(clang_getCursorType(c)), works for
+  // CXCursor_FunctionTemplate too (a function template's clang_getCursorType
+  // does not describe a function type). Skip for constructors/destructors,
+  // which report void and have no meaningful return type.
+  CXType result = clang_getCursorResultType(c);
   if (result.kind != CXType_Invalid && result.kind != CXType_Void) {
     ctx.mod->references.push_back(
         make_type_ref(usr, model::RefKind::ReturnType, result, -1));
   }
 
   int n = clang_Cursor_getNumArguments(c);
-  for (int i = 0; i < n; ++i) {
-    CXCursor arg = clang_Cursor_getArgument(c, i);
-    model::FunctionParameter p;
-    p.function_usr = usr;
-    p.index = i;
-    p.name = spelling(arg);
-    p.type_repr = to_string(clang_getTypeSpelling(clang_getCursorType(arg)));
-    (*ctx.params_by_func)[usr].push_back(p);
-    ctx.mod->parameters.push_back(p);
-
-    ctx.mod->references.push_back(make_type_ref(
-        usr, model::RefKind::ParamType, clang_getCursorType(arg), i));
+  if (n >= 0) {
+    for (int i = 0; i < n; ++i) {
+      add_parameter(ctx, usr, i, clang_Cursor_getArgument(c, i));
+    }
+    return;
   }
+
+  // clang_Cursor_getNumArguments only answers for FunctionDecl/CXXMethod/
+  // constructor/destructor cursors; it returns -1 for CXCursor_FunctionTemplate,
+  // whose parameters are still exposed as CXCursor_ParmDecl children.
+  struct ParamCtx {
+    VisitCtx* ctx;
+    const std::string* usr;
+    int index;
+  } pctx{&ctx, &usr, 0};
+
+  clang_visitChildren(
+      c,
+      [](CXCursor child, CXCursor, CXClientData data) {
+        auto& p = *static_cast<ParamCtx*>(data);
+        if (clang_getCursorKind(child) != CXCursor_ParmDecl) {
+          return CXChildVisit_Continue;
+        }
+        add_parameter(*p.ctx, *p.usr, p.index++, child);
+        return CXChildVisit_Continue;
+      },
+      &pctx);
 }
 
 void extract_enum(CXCursor enum_cursor, const std::string& enum_usr,
