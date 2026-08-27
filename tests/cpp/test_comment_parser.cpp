@@ -387,22 +387,38 @@ TEST_CASE("doxygen parser routes prose and section commands", "[comments]") {
   }
 }
 
-TEST_CASE("an unresolved copy command is reported, not swallowed",
-          "[comments]") {
-  // Nothing in the pipeline resolves `\copydoc`, so the documentation it
-  // promises is absent from the page. That has to be said out loud.
+TEST_CASE("a copy command degrades to a cross-reference", "[comments]") {
+  // Nothing performs the copy. Left in `custom` the command renders as nothing
+  // at all, so a comment that is only a `\copydoc` -- which is how Eigen
+  // documents several members -- would publish an empty description. The
+  // entity it names is at least where the reader was being sent.
   auto m = parse_fixture("doxygen.hpp");
 
-  bool reported = false;
+  const auto* again = find(m, "doc::sort_again");
+  REQUIRE(again != nullptr);
+  auto fs = fields_of(m, again->usr);
+  REQUIRE(fs.size() == 1);
+  CHECK(fs[0].name == "see");
+  // Reduced to the name: the argument's parameter list cannot be pointed at.
+  CHECK(fs[0].value == "doc::sort_range");
+}
+
+TEST_CASE("an unperformed copy command is reported, not swallowed",
+          "[comments]") {
+  // A cross-reference is not the documentation the author asked for, so the
+  // gap has to be a known one rather than a silent one.
+  auto m = parse_fixture("doxygen.hpp");
+
+  int reported = 0;
   for (const auto& d : m.diagnostics) {
     if (d.text.find("copydoc") == std::string::npos) continue;
-    reported = true;
+    ++reported;
     CHECK(d.severity == model::kSeverityNote);
     CHECK(d.text.find("sort_range") != std::string::npos);
     CHECK(d.file.find("doxygen.hpp") != std::string::npos);
     CHECK(d.line > 0);
   }
-  CHECK(reported);
+  CHECK(reported == 2);
 }
 
 TEST_CASE("doxygen parser handles /// brief and tparam", "[comments]") {

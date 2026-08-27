@@ -291,6 +291,28 @@ _LIST_APPEND = {
 # @par [title] text a paragraph of it. Neither is an unrecognized command.
 _DETAIL_CMDS = frozenset({"details", "par"})
 
+# Doxygen's copy commands, which name an entity whose documentation should be
+# pulled in here. Nothing in this pipeline performs the copy, and a command left
+# in ``custom`` renders as nothing at all -- so a comment that is only a
+# ``@copydoc`` would publish an empty description. They degrade to a
+# cross-reference to the entity whose documentation was asked for: true,
+# navigable, and where the reader was being sent. The parse reports the
+# unperformed copy separately (see ``ast_visitor.cpp``).
+_COPY_CMDS = frozenset({"copydoc", "copybrief", "copydetails"})
+
+# Everything a copy command's argument can carry beyond the name: Doxygen
+# accepts a whole declaration, so ``DenseCoeffsBase<Derived>::coeff(Index) const``
+# has to come down to ``DenseCoeffsBase::coeff`` -- the only shape that can be
+# pointed at, and the only one the C++ domain resolves.
+_COPY_ARGS_RE = re.compile(r"<[^<>]*>|\(.*")
+
+
+def _copy_target(text: str) -> str:
+    """Reduce a copy command's argument to the qualified name it points at."""
+    name = _COPY_ARGS_RE.sub("", text).split(maxsplit=1)
+    return name[0].removeprefix("::") if name else ""
+
+
 # Commands whose text is "<arg> <description>"; mapped to (attribute, dataclass).
 _TUPLE_APPEND: dict[str, tuple[str, type]] = {
     "param": ("params", CommentParam),
@@ -350,6 +372,10 @@ def _route(model: CommentModel, name: str, text: str, direction: str = "") -> No
     elif name in _DETAIL_CMDS:
         if text:
             model.detail.append(text)
+    elif name in _COPY_CMDS:
+        target = _copy_target(text)
+        if target:
+            model.see.append(target)
     elif name in _LIST_APPEND:
         getattr(model, _LIST_APPEND[name]).append(text)
     else:

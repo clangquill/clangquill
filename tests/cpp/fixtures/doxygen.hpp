@@ -84,4 +84,7 @@ void sort_range(int* first, int* last);
  */
 void sort_copy(const int* first, const int* last, int* out);
 
+/** @copydoc doc::sort_range(int*, int*) */
+void sort_again(int* first, int* last);
+
 }  // namespace doc

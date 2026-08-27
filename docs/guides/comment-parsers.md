@@ -61,15 +61,21 @@ The `custom` bucket is the graceful-degradation seam: a command the parser does
 not recognize is never dropped — it lands in `custom["<name>"]` so a template can
 still render it.
 
-### Commands that are not resolved
+### Commands that are not performed
 
 `@copydoc`, `@copybrief` and `@copydetails` name another entity whose
-documentation should be pulled in. Nothing in the pipeline resolves them, so
-the text they promise is not in the rendered page: the command reaches
-`custom["copydoc"]` and the parse records a **note**-severity diagnostic
-naming the file, the line and the target. Notes never fail a
-`warnings_as_errors` build — that setting is about the C++ libclang saw — but
-they are counted, and `clangquill_diagnostics_log` writes them out.
+documentation should be pulled in here. Nothing in the pipeline performs that
+copy. Rather than publish an empty description for a symbol whose whole comment
+is one of these commands, the parser degrades it to a **cross-reference** to the
+entity it names: the argument is reduced to a qualified name — Doxygen accepts a
+whole declaration, so `DenseCoeffsBase<Derived>::coeff(Index,Index) const`
+becomes `DenseCoeffsBase::coeff` — and joins `see`.
+
+That is a link, not the documentation the author asked for, so the parse also
+records a **note**-severity diagnostic naming the file, the line and the target.
+Notes never fail a `warnings_as_errors` build — that setting is about the C++
+libclang saw — but they are counted, and `clangquill_diagnostics_log` writes
+them out.
 
 Doxygen's `ALIASES` are likewise unsupported: an aliased command reaches
 `custom` under the alias's own name, so a template can still render it.

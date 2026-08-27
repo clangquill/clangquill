@@ -429,9 +429,9 @@ bool raw_has_unroutable_command(const std::string& raw) {
       "copybrief", "copydetails"};
   // The copy commands are here for a third reason: libclang's tree models
   // `\copydoc other::f` as *inline* markup, so the command disappears and the
-  // entity name it names is left sitting in the middle of the prose ("Sorts a
-  // range into a new buffer. sort_range"). The raw path routes it into
-  // `custom`, where it is intact, reportable, and out of the description.
+  // entity it names is left sitting in the middle of the prose ("Sorts a range
+  // into a new buffer. sort_range"). Only the raw path sees the command as one,
+  // and so can route it to the cross-reference it degrades to.
   //
   // Deliberately not `code`/`endcode`: nothing about a verbatim block needs the
   // raw path. Both paths now render one as a fenced block with its lines
@@ -471,6 +471,40 @@ std::string block_text(CXComment bc) {
 // Routes one command (lowercased name, normalized text) into the model. The
 // brief/detail lead paragraphs are handled by the caller; everything else flows
 // through here so the CXComment and raw-scanning passes stay consistent.
+// True for Doxygen's copy commands, which name an entity whose documentation
+// should be pulled in here.
+bool is_copy_command(const std::string& name) {
+  return name == "copydoc" || name == "copybrief" || name == "copydetails";
+}
+
+// The entity a copy command names, reduced to a qualified name.
+//
+// Doxygen accepts a whole declaration after `\copydoc`, so the argument can
+// carry template arguments, a parameter list and trailing qualifiers --
+// `DenseCoeffsBase<Derived,ReadOnlyAccessors>::coeff(Index,Index) const`. Only
+// a plain name can be pointed at, and only a plain name is a cross-reference
+// the C++ domain resolves.
+std::string copy_target(const std::string& text) {
+  std::string head = text.substr(0, text.find('('));
+  std::string out;
+  int depth = 0;
+  for (char ch : head) {
+    if (ch == '<') {
+      ++depth;
+    } else if (ch == '>') {
+      if (depth > 0) --depth;
+    } else if (depth == 0) {
+      out += ch;
+    }
+  }
+  std::size_t a = out.find_first_not_of(" \t\r\n");
+  if (a == std::string::npos) return {};
+  std::size_t b = out.find_first_of(" \t\r\n", a);
+  out = out.substr(a, b == std::string::npos ? std::string::npos : b - a);
+  if (out.rfind("::", 0) == 0) out.erase(0, 2);
+  return out;
+}
+
 void route_command(model::CommentModel& m, const std::string& name,
                    const std::string& text,
                    const std::string& direction = {}) {
@@ -503,6 +537,16 @@ void route_command(model::CommentModel& m, const std::string& name,
     m.throws.push_back(model::CommentThrow{n, d});
   } else if (name == "see" || name == "sa") {
     m.see.push_back(text);
+  } else if (is_copy_command(name)) {
+    // Nothing in this pipeline performs the copy, and a command left in
+    // `custom` renders as nothing at all -- so a comment that is only a
+    // `\copydoc` would publish an empty description. Degrade to a
+    // cross-reference to the entity whose documentation was asked for: it is
+    // true, it is navigable, and it is where the reader was being sent.
+    // ast_visitor reports the unperformed copy separately.
+    if (std::string target = copy_target(text); !target.empty()) {
+      m.see.push_back(target);
+    }
   } else if (name == "since") {
     m.since.push_back(text);
   } else if (name == "deprecated") {

@@ -35,7 +35,8 @@ DOXYGEN = """
  * @deprecated use divide2
  * @see multiply
  * @author Ada
- * @copydoc other::divide
+ * @copydoc other::divide(int, int)
+ * @myalias an aliased command nothing defines
  */
 """
 
@@ -59,11 +60,13 @@ def test_doxygen_parse_covers_commands() -> None:
     assert model.warning == ["undefined for INT_MIN"]
     assert model.since == ["1.2"]
     assert model.deprecated == ["use divide2"]
-    assert model.see == ["multiply"]
+    # A copy command nothing performs degrades to a cross-reference to the
+    # entity it names, reduced to the name the C++ domain can resolve.
+    assert model.see == ["multiply", "other::divide"]
     assert model.author == ["Ada"]
-    # Unknown command falls into the custom bucket keyed by its name. `@copydoc`
-    # is one: nothing resolves it, so it is reported rather than rendered.
-    assert model.custom == {"copydoc": ["other::divide"]}
+    # Unknown command falls into the custom bucket keyed by its name -- which is
+    # where a Doxygen ALIASES command lands, since nothing here defines one.
+    assert model.custom == {"myalias": ["an aliased command nothing defines"]}
 
 
 def test_doxygen_parse_triple_slash_brief() -> None:
@@ -105,6 +108,15 @@ def test_doxygen_parse_routes_prose_and_section_commands() -> None:
     assert model.author == ["Ada"]
     assert model.version == ["2.1"]
     assert model.date == ["2026-08-01"]
+    assert model.custom == {}
+
+
+def test_copy_commands_degrade_to_a_cross_reference() -> None:
+    """A @copydoc-only comment must render *something*: where it points."""
+    model = doxygen_parse(
+        "/** @copydoc DenseCoeffsBase<Derived,ReadOnlyAccessors>::coeff(Index,Index) const */",
+    )
+    assert model.see == ["DenseCoeffsBase::coeff"]
     assert model.custom == {}
 
 
@@ -298,7 +310,7 @@ def test_model_from_fields_round_trips() -> None:
         ("note", "", "a note"),
         ("author", "", "Ada"),
         ("todo", "", "handle the empty case"),
-        ("copydoc", "", "other::f"),
+        ("myalias", "", "an aliased command"),
     ]
     model = model_from_fields(rows)
     assert model.brief == "A brief."
@@ -311,7 +323,7 @@ def test_model_from_fields_round_trips() -> None:
     assert model.author == ["Ada"]
     assert model.todo == ["handle the empty case"]
     # Only a command the model does not name lands in the custom bucket.
-    assert model.custom == {"copydoc": ["other::f"]}
+    assert model.custom == {"myalias": ["an aliased command"]}
 
 
 def test_registry_default_and_registration() -> None:
