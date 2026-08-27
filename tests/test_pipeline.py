@@ -407,6 +407,25 @@ def test_incremental_template_edit_busts_noop_skip(project: Path) -> None:
 
 
 @requires_libclang
+def test_incremental_comment_parser_env_override_busts_noop_skip(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    first = build(config, base_dir=project)
+    assert first.parsed
+    assert "A documented namespace." in (project / "api" / "demo.md").read_text()
+
+    # The env override changes every parsed comment (IR untouched), so the
+    # render fingerprint must notice it rather than replaying the cached page.
+    monkeypatch.setenv("CLANGQUILL_COMMENT_PARSER", "tests.test_comments.shouting_parser")
+    result = build(config, base_dir=project)
+    assert not result.parsed
+    assert "demo.md" in result.pages_written
+    assert "A DOCUMENTED NAMESPACE." in (project / "api" / "demo.md").read_text()
+
+
+@requires_libclang
 def test_incremental_touch_header_regenerates_only_affected(project: Path) -> None:
     (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
     (project / "beta.hpp").write_text("/// beta ns\nnamespace beta { /// g\nint g(); }\n")
