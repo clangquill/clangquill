@@ -669,6 +669,29 @@ def test_build_skips_directories_matched_by_glob(project: Path) -> None:
     assert not result.diagnostics
 
 
+def test_resolve_inputs_prefers_literal_path_over_glob_metacharacters(tmp_path: Path) -> None:
+    # ``foo[1].h`` is a valid filename, but ``[1]`` is also a glob character
+    # class matching the literal ``1``. If a same-named-minus-brackets file
+    # happens to exist, a glob-first resolution would silently substitute it;
+    # the literal on-disk file must win instead.
+    literal = tmp_path / "foo[1].h"
+    literal.write_text("// literal\n")
+    (tmp_path / "foo1.h").write_text("// wrong match\n")
+
+    resolved = pipeline._resolve_inputs(["foo[1].h"], tmp_path)  # noqa: SLF001
+
+    assert resolved == [str(literal.resolve())]
+
+
+def test_resolve_inputs_still_globs_when_no_literal_file_exists(tmp_path: Path) -> None:
+    (tmp_path / "a.h").write_text("// a\n")
+    (tmp_path / "b.h").write_text("// b\n")
+
+    resolved = pipeline._resolve_inputs(["*.h"], tmp_path)  # noqa: SLF001
+
+    assert resolved == sorted(str(p.resolve()) for p in [tmp_path / "a.h", tmp_path / "b.h"])
+
+
 @requires_libclang
 def test_temp_db_cleaned_up_when_generation_fails(
     project: Path,

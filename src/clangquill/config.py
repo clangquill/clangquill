@@ -14,6 +14,7 @@ iterating the dataclass rather than repeating each name.
 from __future__ import annotations
 
 from dataclasses import MISSING, dataclass, field, fields
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -182,9 +183,7 @@ class Config:
             choices = ", ".join(GROUP_BY_CHOICES)
             msg = f"{CONFIG_PREFIX}group_by must be one of {{{choices}}}, got {self.group_by!r}"
             raise ConfigError(msg)
-        if not self.output_dir:
-            msg = f"{CONFIG_PREFIX}output_dir must be a non-empty directory name"
-            raise ConfigError(msg)
+        self._validate_output_paths()
         if self.diagnostics_log is not None and not self.diagnostics_log:
             msg = f"{CONFIG_PREFIX}diagnostics_log must be a non-empty path, or None to disable"
             raise ConfigError(msg)
@@ -198,6 +197,35 @@ class Config:
             msg = f"{CONFIG_PREFIX}tu_batch must be >= 0 (0 = auto, 1 = one TU per input), got {self.tu_batch}"
             raise ConfigError(msg)
         return self
+
+    def _validate_output_paths(self) -> None:
+        """Reject an :attr:`output_dir` / :attr:`root_document` that could write outside ``output_dir``.
+
+        ``output_dir`` is resolved against the Sphinx srcdir / CWD (see
+        ``pipeline.build``), so an absolute value or one containing ``..``
+        segments could escape that base directory. ``root_document`` names a
+        page written as ``output_dir / f"{root_document}.md"`` (see
+        ``Generator.generate``), so a value containing a path separator could
+        likewise escape ``output_dir`` (e.g. ``root_document="../foo"``).
+        """
+        if not self.output_dir:
+            msg = f"{CONFIG_PREFIX}output_dir must be a non-empty directory name"
+            raise ConfigError(msg)
+        if Path(self.output_dir).is_absolute() or ".." in Path(self.output_dir).parts:
+            msg = (
+                f"{CONFIG_PREFIX}output_dir must be a relative path without '..' segments "
+                f"(it is resolved against the Sphinx srcdir / CWD), got {self.output_dir!r}"
+            )
+            raise ConfigError(msg)
+        if not self.root_document:
+            msg = f"{CONFIG_PREFIX}root_document must be a non-empty document name"
+            raise ConfigError(msg)
+        if "/" in self.root_document or "\\" in self.root_document:
+            msg = (
+                f"{CONFIG_PREFIX}root_document must be a bare document name, not a path "
+                f"(it names a page written under output_dir), got {self.root_document!r}"
+            )
+            raise ConfigError(msg)
 
     def _validate_types(self) -> None:
         """Reject wrong-typed field values with a field-named :class:`ConfigError`.

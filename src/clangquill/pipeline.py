@@ -183,11 +183,15 @@ def _resolve_inputs(patterns: list[str], base_dir: Path) -> list[str]:
         candidate = Path(pattern)
         if not candidate.is_absolute():
             candidate = base_dir / candidate
-        matches = sorted(glob.glob(str(candidate), recursive=True))  # noqa: PTH207
-        if not matches:
-            if candidate.exists():
-                matches = [str(candidate)]
-            else:
+        # A literal path that exists on disk always wins over glob expansion,
+        # so a name containing glob metacharacters (e.g. ``foo[1].h``) resolves
+        # to itself rather than silently matching an unrelated file the glob
+        # happens to expand to (e.g. ``foo1.h``).
+        if candidate.exists():
+            matches = [str(candidate)]
+        else:
+            matches = sorted(glob.glob(str(candidate), recursive=True))  # noqa: PTH207
+            if not matches:
                 msg = f"clangquill input matched no files: {pattern!r} (under {base_dir})"
                 raise FileNotFoundError(msg)
         # A glob can match directories (e.g. ``include/*``); only files can be
