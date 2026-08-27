@@ -55,14 +55,36 @@ std::string canonical_usr(CXCursor c) {
   return usr(clang_getCanonicalCursor(c));
 }
 
+namespace {
+
+// The name a scope contributes to a qualified name.
+//
+// An anonymous namespace has no spelling of its own, and eliding it would name
+// its contents after the *enclosing* scope -- publishing an internal-linkage
+// entity as though it were ordinary API of that namespace. So the scope is
+// named `@anonymous`: the Sphinx C++ domain spells an anonymous entity with a
+// leading `@`, and every qualified name here ends up in a domain directive, so
+// clang's own `(anonymous namespace)` would be rejected as a declaration.
+// Other unnamed entities (an anonymous struct, union or enum) keep the empty
+// spelling the caller already skips.
+std::string name_segment(CXCursor c) {
+  std::string s = spelling(c);
+  if (s.empty() && clang_getCursorKind(c) == CXCursor_Namespace) {
+    return "@anonymous";
+  }
+  return s;
+}
+
+}  // namespace
+
 std::string qualified_name(CXCursor c) {
   std::vector<std::string> parts;
-  parts.push_back(spelling(c));
+  parts.push_back(name_segment(c));
   CXCursor parent = clang_getCursorSemanticParent(c);
   while (!clang_Cursor_isNull(parent)) {
     CXCursorKind pk = clang_getCursorKind(parent);
     if (pk == CXCursor_TranslationUnit || pk == CXCursor_InvalidFile) break;
-    std::string s = spelling(parent);
+    std::string s = name_segment(parent);
     if (!s.empty()) parts.push_back(s);
     parent = clang_getCursorSemanticParent(parent);
   }

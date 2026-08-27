@@ -285,6 +285,7 @@ def _parse_options(config: Config, base_dir: Path) -> _core.ParseOptions:
     opt.extra_args = extra
     opt.jobs = config.jobs
     opt.tu_batch = config.tu_batch
+    opt.extract_anonymous_namespaces = config.extract_anonymous_namespaces
     # Two knobs ask the core to capture more than errors: writing them all to a
     # log, and judging the build on them. Nothing else consumes the extra
     # records, so capturing them for a run that does neither would be pure cost.
@@ -326,6 +327,9 @@ def _parse_fingerprint(config: Config, base_dir: Path, inputs: list[str]) -> str
             "defines": list(config.defines),
             "compile_args": list(config.compile_args),
             "tu_batch": config.tu_batch,
+            # Changes which symbols the parse extracts at all, so a cached IR
+            # built with the other setting must not be reused.
+            "extract_anonymous_namespaces": config.extract_anonymous_namespaces,
             # The IR is identical either way, but the *diagnostics* are not:
             # without this, switching the log on for an already-cached project
             # would give a no-op build and an empty log. The derived boolean,
