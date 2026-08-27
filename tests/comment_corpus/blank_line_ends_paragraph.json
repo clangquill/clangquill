@@ -1,30 +1,30 @@
 {
-  "description": "A blank line ends the running @brief/@param paragraph; the prose after it documents the entity as detail instead.",
-  "raw": "\n/**\n * @brief A blank line ends the brief.\n *\n * This paragraph is the detailed description.\n *\n * @param a the input value\n *\n * A closing paragraph documents the function.\n */\n",
-  "expected": {
-    "brief": "A blank line ends the brief.",
-    "detail": [
-      "This paragraph is the detailed description.",
-      "A closing paragraph documents the function."
-    ],
-    "params": [
-      {
-        "name": "a",
-        "description": "the input value",
-        "direction": ""
-      }
-    ],
-    "tparams": [],
-    "returns": "",
-    "retvals": [],
-    "throws": [],
-    "see": [],
-    "since": [],
-    "deprecated": [],
-    "note": [],
-    "warning": [],
-    "pre": [],
-    "post": [],
-    "custom": {}
-  }
+    "description": "A blank line ends the running @brief/@param paragraph; the prose after it documents the entity as detail instead.",
+    "raw": "\n/**\n * @brief A blank line ends the brief.\n *\n * This paragraph is the detailed description.\n *\n * @param a the input value\n *\n * A closing paragraph documents the function.\n */\n",
+    "expected": {
+        "brief": "A blank line ends the brief.",
+        "detail": [
+            "This paragraph is the detailed description.",
+            "A closing paragraph documents the function."
+        ],
+        "params": [
+            {
+                "name": "a",
+                "description": "the input value",
+                "direction": ""
+            }
+        ],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {}
+    }
 }

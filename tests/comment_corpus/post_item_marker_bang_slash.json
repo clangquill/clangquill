@@ -1,21 +1,21 @@
 {
-  "description": "The `//!<` post-item marker must not leak its '<' into the text.",
-  "raw": "//!< trailing member doc",
-  "expected": {
-    "brief": "trailing member doc",
-    "detail": [],
-    "params": [],
-    "tparams": [],
-    "returns": "",
-    "retvals": [],
-    "throws": [],
-    "see": [],
-    "since": [],
-    "deprecated": [],
-    "note": [],
-    "warning": [],
-    "pre": [],
-    "post": [],
-    "custom": {}
-  }
+    "description": "The `//!<` post-item marker must not leak its '<' into the text.",
+    "raw": "//!< trailing member doc",
+    "expected": {
+        "brief": "trailing member doc",
+        "detail": [],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {}
+    }
 }

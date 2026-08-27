@@ -1,52 +1,52 @@
 {
-  "description": "@param/@tparam direction attributes ([in], [out], [in,out]), an undirected parameter, and an unrelated bracket suffix that must stay glued to its command name.",
-  "raw": "\n/**\n * @brief Fills a buffer.\n * @param[out] result where the answer is written\n * @param[in] value the input value\n * @param[in,out] scratch reused working storage\n * @param plain no direction attribute\n * @tparam[in] T symmetric with param\n * @unknown[bracket] keeps its full spelling\n */\n",
-  "expected": {
-    "brief": "Fills a buffer.",
-    "detail": [],
-    "params": [
-      {
-        "name": "result",
-        "description": "where the answer is written",
-        "direction": "out"
-      },
-      {
-        "name": "value",
-        "description": "the input value",
-        "direction": "in"
-      },
-      {
-        "name": "scratch",
-        "description": "reused working storage",
-        "direction": "in,out"
-      },
-      {
-        "name": "plain",
-        "description": "no direction attribute",
-        "direction": ""
-      }
-    ],
-    "tparams": [
-      {
-        "name": "T",
-        "description": "symmetric with param",
-        "direction": "in"
-      }
-    ],
-    "returns": "",
-    "retvals": [],
-    "throws": [],
-    "see": [],
-    "since": [],
-    "deprecated": [],
-    "note": [],
-    "warning": [],
-    "pre": [],
-    "post": [],
-    "custom": {
-      "unknown[bracket]": [
-        "keeps its full spelling"
-      ]
+    "description": "@param/@tparam direction attributes ([in], [out], [in,out]), an undirected parameter, and an unrelated bracket suffix that must stay glued to its command name.",
+    "raw": "\n/**\n * @brief Fills a buffer.\n * @param[out] result where the answer is written\n * @param[in] value the input value\n * @param[in,out] scratch reused working storage\n * @param plain no direction attribute\n * @tparam[in] T symmetric with param\n * @unknown[bracket] keeps its full spelling\n */\n",
+    "expected": {
+        "brief": "Fills a buffer.",
+        "detail": [],
+        "params": [
+            {
+                "name": "result",
+                "description": "where the answer is written",
+                "direction": "out"
+            },
+            {
+                "name": "value",
+                "description": "the input value",
+                "direction": "in"
+            },
+            {
+                "name": "scratch",
+                "description": "reused working storage",
+                "direction": "in,out"
+            },
+            {
+                "name": "plain",
+                "description": "no direction attribute",
+                "direction": ""
+            }
+        ],
+        "tparams": [
+            {
+                "name": "T",
+                "description": "symmetric with param",
+                "direction": "in"
+            }
+        ],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {
+            "unknown[bracket]": [
+                "keeps its full spelling"
+            ]
+        }
     }
-  }
 }

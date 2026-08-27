@@ -1,23 +1,23 @@
 {
-  "description": "A code fence must be longer than any backtick run it encloses.",
-  "raw": "/// @code\n/// ``` not the end\n/// @endcode\n",
-  "expected": {
-    "brief": "",
-    "detail": [
-      "````cpp\n``` not the end\n````"
-    ],
-    "params": [],
-    "tparams": [],
-    "returns": "",
-    "retvals": [],
-    "throws": [],
-    "see": [],
-    "since": [],
-    "deprecated": [],
-    "note": [],
-    "warning": [],
-    "pre": [],
-    "post": [],
-    "custom": {}
-  }
+    "description": "A code fence must be longer than any backtick run it encloses.",
+    "raw": "/// @code\n/// ``` not the end\n/// @endcode\n",
+    "expected": {
+        "brief": "",
+        "detail": [
+            "````cpp\n``` not the end\n````"
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {}
+    }
 }

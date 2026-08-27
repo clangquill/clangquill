@@ -1,23 +1,23 @@
 {
-  "description": "Trailing sentence punctuation stays outside inline markup, and an @ref target that is not a plain C++ name degrades to a code span.",
-  "raw": "/// @brief Punctuation stays outside the markup.\n///\n/// The input set (see @ref parse_files) is fixed, as are @p paths) and @p usr:.\n/// A target that is not a C++ name, like @ref some-page, is not a role at all.\n",
-  "expected": {
-    "brief": "Punctuation stays outside the markup.",
-    "detail": [
-      "The input set (see {cpp:any}`parse_files`) is fixed, as are `paths`) and `usr`:. A target that is not a C++ name, like `some-page`, is not a role at all."
-    ],
-    "params": [],
-    "tparams": [],
-    "returns": "",
-    "retvals": [],
-    "throws": [],
-    "see": [],
-    "since": [],
-    "deprecated": [],
-    "note": [],
-    "warning": [],
-    "pre": [],
-    "post": [],
-    "custom": {}
-  }
+    "description": "Trailing sentence punctuation stays outside inline markup, and an @ref target that is not a plain C++ name degrades to a code span.",
+    "raw": "/// @brief Punctuation stays outside the markup.\n///\n/// The input set (see @ref parse_files) is fixed, as are @p paths) and @p usr:.\n/// A target that is not a C++ name, like @ref some-page, is not a role at all.\n",
+    "expected": {
+        "brief": "Punctuation stays outside the markup.",
+        "detail": [
+            "The input set (see {cpp:any}`parse_files`) is fixed, as are `paths`) and `usr`:. A target that is not a C++ name, like `some-page`, is not a role at all."
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {}
+    }
 }

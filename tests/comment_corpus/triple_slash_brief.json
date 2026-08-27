@@ -1,27 +1,27 @@
 {
-  "description": "Triple-slash comment lines with an explicit @brief and a @param.",
-  "raw": "/// @brief Multiplies two values.\n/// @param a first factor\n",
-  "expected": {
-    "brief": "Multiplies two values.",
-    "detail": [],
-    "params": [
-      {
-        "name": "a",
-        "description": "first factor",
-        "direction": ""
-      }
-    ],
-    "tparams": [],
-    "returns": "",
-    "retvals": [],
-    "throws": [],
-    "see": [],
-    "since": [],
-    "deprecated": [],
-    "note": [],
-    "warning": [],
-    "pre": [],
-    "post": [],
-    "custom": {}
-  }
+    "description": "Triple-slash comment lines with an explicit @brief and a @param.",
+    "raw": "/// @brief Multiplies two values.\n/// @param a first factor\n",
+    "expected": {
+        "brief": "Multiplies two values.",
+        "detail": [],
+        "params": [
+            {
+                "name": "a",
+                "description": "first factor",
+                "direction": ""
+            }
+        ],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {}
+    }
 }

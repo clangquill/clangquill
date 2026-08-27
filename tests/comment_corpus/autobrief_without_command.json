@@ -1,21 +1,21 @@
 {
-  "description": "A comment with no @brief command promotes its first prose line.",
-  "raw": "/// A short summary line.",
-  "expected": {
-    "brief": "A short summary line.",
-    "detail": [],
-    "params": [],
-    "tparams": [],
-    "returns": "",
-    "retvals": [],
-    "throws": [],
-    "see": [],
-    "since": [],
-    "deprecated": [],
-    "note": [],
-    "warning": [],
-    "pre": [],
-    "post": [],
-    "custom": {}
-  }
+    "description": "A comment with no @brief command promotes its first prose line.",
+    "raw": "/// A short summary line.",
+    "expected": {
+        "brief": "A short summary line.",
+        "detail": [],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {}
+    }
 }
