@@ -1,0 +1,25 @@
+{
+    "description": "@code/@endcode and @verbatim/@endverbatim blocks keep their line structure and stay positioned among the surrounding prose.",
+    "raw": "\n/**\n * Squares a value.\n * @code{.py}\n *   y = square(3)\n *   if y:\n *       print(y)\n * @endcode\n * Prose written after the block stays after it.\n * @verbatim\n *   +---+\n *   | x |\n *   +---+\n * @endverbatim\n */\n",
+    "expected": {
+        "brief": "Squares a value.",
+        "detail": [
+            "```py\ny = square(3)\nif y:\n    print(y)\n```",
+            "Prose written after the block stays after it.",
+            "```\n+---+\n| x |\n+---+\n```"
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {}
+    }
+}
