@@ -25,9 +25,9 @@ jobs:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v7.0.1
-            # Only the build tools and libclang come from apt: sqlite3,
-            # nlohmann-json and catch2 are provided by vcpkg, which the CMake
-            # build bootstraps itself (cmake/VcpkgBootStrap.cmake).
+            # Only the build tools and libclang come from apt: sqlite3 and
+            # catch2 are provided by vcpkg, which the CMake build bootstraps
+            # itself (cmake/VcpkgBootStrap.cmake).
       - name: Install dependencies
         run: |
           sudo apt-get update

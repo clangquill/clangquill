@@ -10,7 +10,7 @@ namespace clangquill::store {
 /// @brief On-disk schema version.
 ///
 /// Bump when the DDL below changes in a backward-incompatible way.
-inline constexpr int kSchemaVersion = 2;
+inline constexpr int kSchemaVersion = 3;
 
 /// @brief Full schema for the intermediate SQLite artifact.
 ///
@@ -96,11 +96,13 @@ CREATE TABLE IF NOT EXISTS references_ (
 CREATE INDEX IF NOT EXISTS idx_refs_from ON references_(from_usr);
 CREATE INDEX IF NOT EXISTS idx_refs_to   ON references_(to_usr);
 
+-- The structured parse lives in `comment_fields` alone: a second, serialized
+-- copy of the same model was written on every documented symbol and read by
+-- nothing.
 CREATE TABLE IF NOT EXISTS comments (
-  symbol_usr  TEXT PRIMARY KEY REFERENCES symbols(usr) ON DELETE CASCADE,
-  raw_text    TEXT NOT NULL,
-  format      TEXT NOT NULL DEFAULT 'doxygen-raw',
-  fields_json TEXT
+  symbol_usr TEXT PRIMARY KEY REFERENCES symbols(usr) ON DELETE CASCADE,
+  raw_text   TEXT NOT NULL,
+  format     TEXT NOT NULL DEFAULT 'doxygen-raw'
 );
 
 CREATE TABLE IF NOT EXISTS comment_fields (
@@ -116,13 +118,6 @@ CREATE INDEX IF NOT EXISTS idx_comment_fields_sym ON comment_fields(symbol_usr);
 -- name; without this it full-scans comment_fields (every documented symbol's
 -- every field) once per build.
 CREATE INDEX IF NOT EXISTS idx_comment_fields_name ON comment_fields(name);
-
-CREATE TABLE IF NOT EXISTS outputs (
-  id           INTEGER PRIMARY KEY,
-  symbol_usr   TEXT REFERENCES symbols(usr) ON DELETE CASCADE,
-  output_path  TEXT NOT NULL,
-  content_hash TEXT NOT NULL DEFAULT ''
-);
 
 CREATE TABLE IF NOT EXISTS groups (
   id              TEXT PRIMARY KEY,

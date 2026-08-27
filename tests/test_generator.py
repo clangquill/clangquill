@@ -230,7 +230,7 @@ def test_enumerator_comment_honours_comment_parser_override(fixture_db: Path) ->
     con = sqlite3.connect(fixture_db)
     try:
         con.execute(
-            "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, ?, 'doxygen', '')",
+            "INSERT INTO comments(symbol_usr, raw_text, format) VALUES(?, ?, 'doxygen')",
             ("c:@N@geo@E@Color@Red", "/// Warm."),
         )
         con.commit()
@@ -751,7 +751,7 @@ def test_related_block_keeps_documented_cross_file_relates_when_hiding_undocumen
         ),
     )
     con.execute(
-        "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+        "INSERT INTO comments(symbol_usr, raw_text, format) VALUES(?, '/// fixture', 'doxygen')",
         ("c:@N@app@F@link_to_alpha",),
     )
     con.executemany(
@@ -776,7 +776,7 @@ def test_related_block_keeps_documented_cross_file_relates_when_hiding_undocumen
         ),
     )
     con.execute(
-        "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+        "INSERT INTO comments(symbol_usr, raw_text, format) VALUES(?, '/// fixture', 'doxygen')",
         ("c:@N@app@F@hidden_link",),
     )
     con.execute(

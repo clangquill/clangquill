@@ -5,8 +5,8 @@
 # Why this exists: when the manylinux wheels are built in CI, vcpkg has to
 # download the sqlite3 amalgamation from sqlite.org. sqlite.org serves HTTP 403
 # to vcpkg's built-in downloader (it rejects non-browser User-Agents and some
-# cloud egress IPs), which fails the whole wheel build right after the (fast)
-# nlohmann-json build. Fetching the same artifact with a normal browser
+# cloud egress IPs), which fails the whole wheel build. Fetching the same
+# artifact with a normal browser
 # User-Agent — and a couple of byte-identical mirrors as a backup — gets past
 # that block. vcpkg verifies the SHA512 of whatever we produce, so a wrong or
 # corrupt file is rejected and vcpkg falls back to the authoritative URL.

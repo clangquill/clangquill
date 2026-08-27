@@ -39,8 +39,8 @@ jobs:
               # manylinux-tagged wheels PyPI accepts.
         uses: pypa/cibuildwheel@v4.2.0
         env:
-                  # The core links sqlite3 + nlohmann-json, sourced via vcpkg
-                  # inside the manylinux image (apt is unavailable there).
+                  # The core links sqlite3, sourced via vcpkg inside the
+                  # manylinux image (apt is unavailable there).
                   # The CMake build fetches and bootstraps vcpkg itself
                   # (cmake/VcpkgBootStrap.cmake), into a .vcpkg-checkout
                   # reused by every build in the container.
@@ -95,8 +95,8 @@ jobs:
         env:
                   # Mirrors the Linux job above: same libclang (fetched by the
                   # Windows counterpart of fetch-libclang.sh, see docs
-                  # ADR-0001) and the same vcpkg-sourced sqlite3 +
-                  # nlohmann-json. A single cp313 build covers 3.13+: `_core`
+                  # ADR-0001) and the same vcpkg-sourced sqlite3. A single
+                  # cp313 build covers 3.13+: `_core`
                   # is built with nanobind STABLE_ABI, which pins
                   # Py_LIMITED_API to 3.12 regardless of build interpreter, so
                   # the wheel tag is cp312-abi3 and installs unchanged on
@@ -115,10 +115,10 @@ jobs:
             powershell -NoProfile -ExecutionPolicy Bypass
             -File {project}\tools\ci\wheel-setup-windows.ps1
                   # vcpkg's default triplet on Windows would build sqlite3 as a
-                  # shared DLL; the *-static-md triplet keeps it (and
-                  # nlohmann-json) statically linked while still using the
-                  # dynamic CRT that Python extensions require, so libclang.dll
-                  # is the only third-party DLL the wheel needs to vendor.
+                  # shared DLL; the *-static-md triplet keeps it statically
+                  # linked while still using the dynamic CRT that Python
+                  # extensions require, so libclang.dll is the only third-party
+                  # DLL the wheel needs to vendor.
           CIBW_ENVIRONMENT_WINDOWS: >-
             VCPKG_TARGET_TRIPLET="x64-windows-static-md"
             PATH="C:\\libclang\\bin;$PATH"

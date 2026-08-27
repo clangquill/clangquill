@@ -35,7 +35,6 @@ find_package(nanobind CONFIG REQUIRED)
 
 # --- C++ dependencies (always from vcpkg, see cmake/VcpkgBootStrap.cmake) ----
 find_package(SQLite3 REQUIRED)
-find_package(nlohmann_json CONFIG REQUIRED)
 
 # --- Optional libclang -------------------------------------------------------
 # CLANGQUILL_WITH_LIBCLANG: ON | OFF | AUTO (default). When ON/AUTO and libclang
@@ -66,8 +65,7 @@ add_library(clangquill_core STATIC ${CLANGQUILL_CORE_SOURCES})
 target_include_directories(clangquill_core PUBLIC src/cpp)
 target_compile_features(clangquill_core PUBLIC cxx_std_20)
 set_target_properties(clangquill_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(clangquill_core
-                      PUBLIC SQLite::SQLite3 nlohmann_json::nlohmann_json)
+target_link_libraries(clangquill_core PUBLIC SQLite::SQLite3)
 
 if(CLANGQUILL_LIBCLANG_FOUND)
   target_link_libraries(clangquill_core PUBLIC clangquill::libclang)

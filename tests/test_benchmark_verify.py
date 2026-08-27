@@ -32,7 +32,7 @@ def _insert_symbol_with_ingroup(ir_path: Path, *, usr: str, qname: str, ingroup_
         (usr, qname.rsplit("::", 1)[-1], qname, qname, "hash-" + usr),
     )
     con.execute(
-        "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+        "INSERT INTO comments(symbol_usr, raw_text, format) VALUES(?, '/// fixture', 'doxygen')",
         (usr,),
     )
     con.execute(

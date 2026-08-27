@@ -1,8 +1,8 @@
 # vcpkg bootstrap, included from the top-level CMakeLists *before* project() so
 # the toolchain file it selects actually takes effect.
 #
-# vcpkg is the only supported source for the C++ dependencies (sqlite3,
-# nlohmann-json and -- for the tests -- catch2): CMake fetches, bootstraps and
+# vcpkg is the only supported source for the C++ dependencies (sqlite3 and --
+# for the tests -- catch2): CMake fetches, bootstraps and
 # hooks up vcpkg by itself, so callers (CI, developers) need no `git clone` +
 # bootstrap step and no distro packages.
 

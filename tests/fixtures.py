@@ -147,7 +147,7 @@ def _build_fixture_db(path: Path) -> None:
 
         def comment(usr: str, fields: list[tuple[str, str, str]]) -> None:
             con.execute(
-                "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, ?, 'doxygen', '')",
+                "INSERT INTO comments(symbol_usr, raw_text, format) VALUES(?, ?, 'doxygen')",
                 (usr, "/// generated fixture comment"),
             )
             con.executemany(
@@ -272,7 +272,7 @@ def _build_m7_db(path: Path) -> None:
             (helper, "A helper."),
         ):
             con.execute(
-                "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+                "INSERT INTO comments(symbol_usr, raw_text, format) VALUES(?, '/// fixture', 'doxygen')",
                 (usr,),
             )
             con.execute(
@@ -323,7 +323,7 @@ def _build_multifile_db(path: Path) -> None:
 
         for usr in (ns, alpha, alpha_run, beta):
             con.execute(
-                "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+                "INSERT INTO comments(symbol_usr, raw_text, format) VALUES(?, '/// fixture', 'doxygen')",
                 (usr,),
             )
             con.execute(
@@ -405,7 +405,7 @@ def _build_ns_db(path: Path) -> None:
             (limit, "A limit."),
         ):
             con.execute(
-                "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+                "INSERT INTO comments(symbol_usr, raw_text, format) VALUES(?, '/// fixture', 'doxygen')",
                 (usr,),
             )
             con.execute(
@@ -604,7 +604,7 @@ def _build_spec_db(path: Path) -> None:
             (helper_ctor, "Construct an adaptation helper."),
         ):
             con.execute(
-                "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+                "INSERT INTO comments(symbol_usr, raw_text, format) VALUES(?, '/// fixture', 'doxygen')",
                 (usr,),
             )
             con.execute(

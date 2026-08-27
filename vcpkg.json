@@ -5,8 +5,7 @@
     "description": "C++ dependencies for the clangquill native core",
     "builtin-baseline": "f9ffbaa46ad8e284b2b74919f7e0ba259564d424",
     "dependencies": [
-        "sqlite3",
-        "nlohmann-json"
+        "sqlite3"
     ],
     "features": {
         "tests": {

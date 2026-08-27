@@ -160,8 +160,8 @@ stream-extractable the way `fetch-libclang.sh` unpacks the Linux archive), so
 only `bin/libclang.dll`, `lib/libclang.lib` (the import library `FindLibClang.cmake`
 links against), and the `clang-c` headers.
 
-`sqlite3` and `nlohmann-json` come from vcpkg on Windows too, using the
-`x64-windows-static-md` triplet so both are statically linked against the
+`sqlite3` comes from vcpkg on Windows too, using the
+`x64-windows-static-md` triplet so it is statically linked against the
 dynamic CRT (the same one Python's own DLLs use) — `libclang.dll` ends up the
 only third-party DLL cibuildwheel needs to vendor into the wheel, which it
 does via `delvewheel` (cibuildwheel 4's default Windows repair tool, analogous

@@ -226,7 +226,6 @@ void record_comment(VisitCtx& ctx, const std::string& usr,
   comment.symbol_usr = usr;
   comment.text = raw;
   comment.format = ctx.comment_parser->format();
-  comment.fields_json = to_fields_json(parsed);
   ctx.mod->comments.push_back(std::move(comment));
 
   auto fields = to_comment_fields(usr, parsed);

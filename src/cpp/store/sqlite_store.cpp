@@ -285,18 +285,13 @@ void SqliteStore::insert_rows(const model::ParsedModule& module,
 
   {
     Stmt c(db_,
-           "INSERT OR REPLACE INTO comments(symbol_usr, raw_text, format, "
-           "fields_json) VALUES(?,?,?,?);");
+           "INSERT OR REPLACE INTO comments(symbol_usr, raw_text, format) "
+           "VALUES(?,?,?);");
     for (const auto& cm : module.comments) {
       c.reset();
       c.bind(1, cm.symbol_usr);
       c.bind(2, cm.text);
       c.bind(3, cm.format);
-      if (cm.fields_json.empty()) {
-        c.bind_null(4);
-      } else {
-        c.bind(4, cm.fields_json);
-      }
       c.step();
     }
   }
@@ -484,14 +479,13 @@ model::ParsedModule SqliteStore::read() {
 
   {
     Stmt c(db_,
-           "SELECT symbol_usr, raw_text, format, fields_json FROM comments "
+           "SELECT symbol_usr, raw_text, format FROM comments "
            "ORDER BY symbol_usr;");
     while (c.step()) {
       model::RawComment cm;
       cm.symbol_usr = c.column_text(0);
       cm.text = c.column_text(1);
       cm.format = c.column_text(2);
-      cm.fields_json = c.column_text(3);
       m.comments.push_back(std::move(cm));
     }
   }
