@@ -1,6 +1,7 @@
 """Tests for `clangquill` package."""
 
 import contextlib
+import importlib
 import re
 from pathlib import Path
 
@@ -37,7 +38,18 @@ def test_version():
 
 
 def test_import():
-    pass
+    """Every top-level submodule imports cleanly.
+
+    ``clangquill/__init__.py`` imports none of them, so ``test_version`` alone
+    would miss a circular import or other module-load-time error anywhere in
+    the package. ``sphinx_ext`` needs the optional ``docs`` extra (it imports
+    ``sphinx`` at module level) and gets its own import-or-skip, same as
+    test_sphinx_ext.py.
+    """
+    for name in ("cache", "cli", "comments", "config", "generator", "pipeline", "store"):
+        importlib.import_module(f"clangquill.{name}")
+    pytest.importorskip("sphinx")
+    importlib.import_module("clangquill.sphinx_ext")
 
 
 def test_command_line_interface():
@@ -134,3 +146,89 @@ def test_diagnostics_log_option_writes_the_file(tmp_path: Path):
     assert result.exit_code == 0
     assert "on its way out" in log.read_text()
     assert str(log) in _streams(result)
+
+
+@requires_libclang
+def test_build_plumbs_every_cli_option(tmp_path: Path):
+    """One build exercising every option that only ever reached ``Config`` directly in a test.
+
+    ``--jobs``, ``--tu-batch``, ``--std``, ``-I``, ``-D``, ``--cache-dir``,
+    ``--group-by``, ``--include-undocumented``, ``--comment-parser``,
+    ``--compile-arg`` and ``--clang-resource-dir`` were never passed through the
+    typer CLI anywhere, so a mistyped option name or a bad callback could ship
+    unnoticed.
+    """
+    extra_dir = tmp_path / "extra"
+    extra_dir.mkdir()
+    (extra_dir / "dep.hpp").write_text("inline int dep_value() { return 7; }\n")
+
+    ns_dir = tmp_path / "ns"
+    ns_dir.mkdir()
+    (ns_dir / "thing.hpp").write_text(
+        "/// Widget helpers.\n"
+        "namespace widgets {\n"
+        "/// Documented.\n"
+        "inline int widget_thing() { return 1; }\n"
+        "inline int hidden_thing() { return 2; }\n"  # deliberately undocumented
+        "}\n",
+    )
+
+    (tmp_path / "demo.hpp").write_text(
+        "#include <dep.hpp>\n"
+        "/// A demo namespace.\n"
+        "namespace demo {\n"
+        "#ifdef DEMO_DEFINE\n"
+        "/// Present only when -D plumbs DEMO_DEFINE through.\n"
+        "inline int demo_defined() { return dep_value(); }\n"
+        "#endif\n"
+        "#ifdef COMPILE_ARG_FLAG\n"
+        "/// Present only when --compile-arg plumbs COMPILE_ARG_FLAG through.\n"
+        "inline int compile_arg_present() { return 1; }\n"
+        "#endif\n"
+        "}\n",
+    )
+
+    cache_dir = tmp_path / "cache"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        [
+            "build",
+            str(tmp_path / "demo.hpp"),
+            str(ns_dir / "thing.hpp"),
+            "-o",
+            str(tmp_path / "api"),
+            "--std",
+            "c++20",
+            "-I",
+            str(extra_dir),
+            "-D",
+            "DEMO_DEFINE",
+            "--compile-arg",
+            "-DCOMPILE_ARG_FLAG=1",
+            # Never resolved (no standard header is included), so the exact
+            # value can't matter -- only that the option reaches the parse.
+            "--clang-resource-dir",
+            str(tmp_path / "not-a-real-resource-dir"),
+            "--cache-dir",
+            str(cache_dir),
+            "--group-by",
+            "namespace",
+            "--no-undocumented",
+            "--comment-parser",
+            "doxygen",
+            "--jobs",
+            "2",
+            "--tu-batch",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, _streams(result)
+
+    pages = "\n".join(p.read_text() for p in (tmp_path / "api").glob("*.md"))
+    assert "demo_defined" in pages  # -I found dep.hpp; -D guarded the symbol in
+    assert "compile_arg_present" in pages  # --compile-arg guarded the symbol in
+    assert "widget_thing" in pages
+    assert "hidden_thing" not in pages  # --no-undocumented left it out
+    assert (cache_dir / "clangquill.sqlite").is_file()

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from clangquill import _core
+from clangquill.store import AccessKind, RefKind, SymbolKind
 
 _SCHEMA_HPP = Path(__file__).resolve().parents[1] / "src" / "cpp" / "store" / "schema.hpp"
 
@@ -41,13 +42,13 @@ def _build_fixture_db(path: Path) -> None:
         def sym(  # noqa: PLR0913
             usr: str,
             parent: str,
-            kind: int,
+            kind: SymbolKind,
             spelling: str,
             qname: str,
             *,
             signature: str = "",
             type_repr: str = "",
-            access: int = 0,
+            access: AccessKind = AccessKind.NONE,
             documented: bool = True,
             line: int = 0,
         ) -> None:
@@ -83,38 +84,47 @@ def _build_fixture_db(path: Path) -> None:
         pi = "c:@N@geo@pi"
         mystery = "c:@N@geo@F@mystery"
 
-        sym(ns, "", 1, "geo", "geo", line=1)
-        sym(shape, ns, 2, "Shape", "geo::Shape", line=3)
-        sym(circle, ns, 2, "Circle", "geo::Circle", line=10)
+        sym(ns, "", SymbolKind.NAMESPACE, "geo", "geo", line=1)
+        sym(shape, ns, SymbolKind.CLASS, "Shape", "geo::Shape", line=3)
+        sym(circle, ns, SymbolKind.CLASS, "Circle", "geo::Circle", line=10)
         sym(
             area,
             circle,
-            6,
+            SymbolKind.METHOD,
             "area",
             "geo::Circle::area",
             signature="double area() const",
             type_repr="double () const",
-            access=1,
+            access=AccessKind.PUBLIC,
             line=14,
         )
-        sym(radius, circle, 9, "radius", "geo::Circle::radius", type_repr="double", access=2, line=18)
+        sym(
+            radius,
+            circle,
+            SymbolKind.FIELD,
+            "radius",
+            "geo::Circle::radius",
+            type_repr="double",
+            access=AccessKind.PROTECTED,
+            line=18,
+        )
         sym(
             scale,
             ns,
-            5,
+            SymbolKind.FUNCTION,
             "scale",
             "geo::scale",
             signature="Circle scale(const Circle &c, double factor)",
             type_repr="Circle (const Circle &, double)",
             line=22,
         )
-        sym(color, ns, 11, "Color", "geo::Color", line=30)
-        sym(distance, ns, 13, "Distance", "geo::Distance", type_repr="double", line=36)
-        sym(pi, ns, 10, "pi", "geo::pi", type_repr="const double", line=38)
+        sym(color, ns, SymbolKind.ENUM, "Color", "geo::Color", line=30)
+        sym(distance, ns, SymbolKind.TYPEDEF, "Distance", "geo::Distance", type_repr="double", line=36)
+        sym(pi, ns, SymbolKind.VARIABLE, "pi", "geo::pi", type_repr="const double", line=38)
         sym(
             mystery,
             ns,
-            5,
+            SymbolKind.FUNCTION,
             "mystery",
             "geo::mystery",
             signature="void mystery()",
@@ -135,14 +145,14 @@ def _build_fixture_db(path: Path) -> None:
         # Circle : public Shape  (a resolved base-class reference)
         con.execute(
             "INSERT INTO references_(from_usr, ref_kind, to_usr, to_spelling, is_resolved, access, ordinal) "
-            "VALUES(?, 0, ?, 'Shape', 1, 1, 0)",
-            (circle, shape),
+            "VALUES(?, ?, ?, 'Shape', 1, ?, 0)",
+            (circle, RefKind.BASE_CLASS, shape, AccessKind.PUBLIC),
         )
         # typedef Distance -> double  (an unresolved underlying-type reference)
         con.execute(
             "INSERT INTO references_(from_usr, ref_kind, to_usr, to_spelling, is_resolved, access, ordinal) "
-            "VALUES(?, 5, '', 'double', 0, 0, 0)",
-            (distance,),
+            "VALUES(?, ?, '', 'double', 0, ?, 0)",
+            (distance, RefKind.UNDERLYING_TYPE, AccessKind.NONE),
         )
 
         def comment(usr: str, fields: list[tuple[str, str, str]]) -> None:
@@ -204,7 +214,7 @@ def _build_m7_db(path: Path) -> None:
         def sym(  # noqa: PLR0913
             usr: str,
             parent: str,
-            kind: int,
+            kind: SymbolKind,
             spelling: str,
             qname: str,
             *,
@@ -227,21 +237,22 @@ def _build_m7_db(path: Path) -> None:
         pt = "c:@N@nn@S@Pt"
         helper = "c:@N@nn@F@helper"
 
-        sym(ns, "", 1, "nn", "nn")
-        sym(box, ns, 16, "Box", "nn::Box", signature="template<typename T, int N = 4>")
-        sym(addable, ns, 17, "Addable", "nn::Addable", signature="template<typename T>")
-        sym(pi, "", 18, "PI", "PI", signature="PI")
-        sym(maxm, "", 18, "MAXM", "MAXM", signature="MAXM(a, b)")
-        sym(pt, ns, 3, "Pt", "nn::Pt")
-        sym(helper, ns, 5, "helper", "nn::helper", signature="void helper()", type_repr="void ()")
+        sym(ns, "", SymbolKind.NAMESPACE, "nn", "nn")
+        sym(box, ns, SymbolKind.CLASS_TEMPLATE, "Box", "nn::Box", signature="template<typename T, int N = 4>")
+        sym(addable, ns, SymbolKind.CONCEPT, "Addable", "nn::Addable", signature="template<typename T>")
+        sym(pi, "", SymbolKind.MACRO, "PI", "PI", signature="PI")
+        sym(maxm, "", SymbolKind.MACRO, "MAXM", "MAXM", signature="MAXM(a, b)")
+        sym(pt, ns, SymbolKind.STRUCT, "Pt", "nn::Pt")
+        sym(helper, ns, SymbolKind.FUNCTION, "helper", "nn::helper", signature="void helper()", type_repr="void ()")
 
         # Friends: one points at a documented symbol (nn::helper), one is an
         # out-of-TU entity that must degrade to inline code.
         con.executemany(
-            "INSERT INTO references_(from_usr, ref_kind, to_usr, to_spelling, is_resolved, access, ordinal) VALUES(?, 7, ?, ?, ?, 0, ?)",
+            "INSERT INTO references_(from_usr, ref_kind, to_usr, to_spelling, is_resolved, access, ordinal) "
+            "VALUES(?, ?, ?, ?, ?, 0, ?)",
             [
-                (pt, helper, "nn::helper", 1, 0),
-                (pt, "", "Outsider", 0, 1),
+                (pt, RefKind.FRIEND, helper, "nn::helper", 1, 0),
+                (pt, RefKind.FRIEND, "", "Outsider", 0, 1),
             ],
         )
 
@@ -270,6 +281,63 @@ def _build_m7_db(path: Path) -> None:
             (maxm, "Max macro."),
             (pt, "A point."),
             (helper, "A helper."),
+        ):
+            con.execute(
+                "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+                (usr,),
+            )
+            con.execute(
+                "INSERT INTO comment_fields(symbol_usr, name, arg, value, ordinal) VALUES(?, 'brief', '', ?, 0)",
+                (usr, brief),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+
+def _build_uncommon_kinds_db(path: Path) -> None:
+    """Populate ``path`` with the ``SymbolKind`` members no other fixture exercises.
+
+    ``UNION``, ``TYPE_ALIAS`` and ``FUNCTION_TEMPLATE`` are all covered on the
+    C++ side (``tests/cpp/fixtures/m7.hpp``), but nothing on the Python side
+    ever inserts one -- so a drift in the hand-maintained mirror of this enum
+    (see ``SymbolKind`` in ``store.py``) would keep passing here.
+    """
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(_schema_ddl())
+        con.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(_core.SCHEMA_VERSION),))
+        con.execute("INSERT INTO files(id, path, sha256, size_bytes) VALUES(1, 'uncommon.hpp', 'unc', 64)")
+
+        def sym(usr: str, kind: SymbolKind, spelling: str, *, signature: str = "", type_repr: str = "") -> None:
+            con.execute(
+                "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, "
+                "display_name, signature, type_repr, access, is_definition, "
+                "is_documented, content_hash, file_id, line) "
+                "VALUES(?, '', ?, ?, ?, ?, ?, ?, 0, 1, 1, ?, 1, 0)",
+                (usr, kind, spelling, spelling, spelling, signature, type_repr, "hash-" + usr),
+            )
+
+        variant = "c:@U@Variant"
+        handle = "c:@T@Handle"
+        make = "c:@FT@>1#Tmake"
+
+        sym(variant, SymbolKind.UNION, "Variant")
+        sym(handle, SymbolKind.TYPE_ALIAS, "Handle", type_repr="int")
+        sym(make, SymbolKind.FUNCTION_TEMPLATE, "make", signature="template<typename T> T make()", type_repr="T ()")
+
+        # using Handle = int;  (an unresolved underlying-type reference, same
+        # shape as geo::Distance in _build_fixture_db)
+        con.execute(
+            "INSERT INTO references_(from_usr, ref_kind, to_usr, to_spelling, is_resolved, access, ordinal) "
+            "VALUES(?, ?, '', 'int', 0, ?, 0)",
+            (handle, RefKind.UNDERLYING_TYPE, AccessKind.NONE),
+        )
+
+        for usr, brief in (
+            (variant, "A union of shape payloads."),
+            (handle, "An integer handle."),
+            (make, "Make a default-constructed T."),
         ):
             con.execute(
                 "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
@@ -765,4 +833,12 @@ def m7_db(tmp_path: Path) -> Path:
     """Return the path to a fixture IR database exercising the M7 kinds."""
     path = tmp_path / "m7.sqlite"
     _build_m7_db(path)
+    return path
+
+
+@pytest.fixture
+def uncommon_kinds_db(tmp_path: Path) -> Path:
+    """Return an IR database covering ``SymbolKind`` members no other fixture does."""
+    path = tmp_path / "uncommon.sqlite"
+    _build_uncommon_kinds_db(path)
     return path
