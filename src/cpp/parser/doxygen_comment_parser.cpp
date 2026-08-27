@@ -345,6 +345,10 @@ void collect_text(CXComment c, std::string& out) {
     return;
   }
   if (kind == CXComment_HTMLEndTag) {
+    // This walk puts a space after every text node, which inside a tag pair
+    // would surface as `<b>bold </b>` -- and leave the parsed path disagreeing
+    // with parse_raw, which sees the source spacing as written.
+    if (!out.empty() && out.back() == ' ') out.pop_back();
     out += "</";
     out += to_string(clang_HTMLTagComment_getTagName(c));
     out += '>';
