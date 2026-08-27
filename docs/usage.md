@@ -129,7 +129,13 @@ clangquill_cache_dir = "_clangquill_cache"   # under the Sphinx srcdir
 Re-running an unchanged build therefore regenerates nothing, touching one header
 regenerates only the affected pages, and a removed symbol's page is cleaned up.
 Without a cache directory the build is stateless: it re-parses into a throwaway
-database and rewrites every page each time.
+database and re-renders every page each time.
+
+Either way, a page is only *written* when its content actually changed — an
+unchanged page keeps its modification time. That is what keeps Sphinx from
+re-reading the whole API set on every build, and what lets
+[sphinx-autobuild](https://github.com/sphinx-doc/sphinx-autobuild) watch the
+source directory clangquill generates into without rebuilding in a loop.
 
 ## Example notebooks statistics
 

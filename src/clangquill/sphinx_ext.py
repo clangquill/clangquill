@@ -24,6 +24,7 @@ from sphinx.util import logging
 
 from clangquill import __version__, _core
 from clangquill.config import CONFIG_FIELDS, CONFIG_PREFIX, Config, ConfigError
+from clangquill.generator import write_if_changed
 from clangquill.pipeline import COMPILE_COMMANDS_NAME, build, prune_stale, warnings_or_worse
 
 if TYPE_CHECKING:
@@ -206,9 +207,9 @@ def _write_placeholder(app: Sphinx, config: Config) -> None:
     out = Path(app.srcdir) / config.output_dir
     out.mkdir(parents=True, exist_ok=True)
     root_name = f"{config.root_document}.md"
-    (out / root_name).write_text(
+    write_if_changed(
+        out / root_name,
         "# API Reference\n\nAPI generation was skipped (libclang unavailable).\n",
-        encoding="utf-8",
     )
     prune_stale(out, [root_name])
 

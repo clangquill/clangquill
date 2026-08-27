@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING
 from clangquill import _core
 from clangquill.cache import BuildCache, OutputRecord, ParseStatus, file_sha256, fingerprint, hash_text
 from clangquill.config import CONFIG_PREFIX
-from clangquill.generator import Generator
+from clangquill.generator import Generator, write_if_changed
 from clangquill.store import Store
 
 if TYPE_CHECKING:
@@ -967,8 +967,10 @@ def _apply_outputs(
 
     cache.record_outputs(new_index)
     # Keep the manifest in sync so a later switch to a stateless build prunes
-    # these pages correctly.
-    (output_dir / MANIFEST_NAME).write_text(json.dumps(sorted(new_index), indent=2), encoding="utf-8")
+    # these pages correctly. Written only when it changes: it lives inside the
+    # Sphinx source directory, so touching it on an otherwise unchanged build is
+    # enough to keep a srcdir watcher (sphinx-autobuild) rebuilding forever.
+    write_if_changed(output_dir / MANIFEST_NAME, json.dumps(sorted(new_index), indent=2))
     return sorted(written), sorted(deleted)
 
 
@@ -990,7 +992,7 @@ def prune_stale(output_dir: Path, kept: list[str]) -> list[str]:
             if name not in kept:
                 (output_dir / name).unlink(missing_ok=True)
                 deleted.append(name)
-    manifest.write_text(json.dumps(sorted(kept), indent=2), encoding="utf-8")
+    write_if_changed(manifest, json.dumps(sorted(kept), indent=2))
     return sorted(deleted)
 
 

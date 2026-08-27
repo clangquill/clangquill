@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -90,6 +91,22 @@ def test_build_generates_pages_and_index(project: Path) -> None:
     assert (api / MANIFEST_NAME).is_file()
     # The throwaway IR is reported as temporary so the caller can clean it up.
     assert result.db_is_temporary
+
+
+@requires_libclang
+def test_stateless_rebuild_touches_nothing_when_nothing_changed(project: Path) -> None:
+    # Without a cache_dir every build re-renders from scratch, but an identical
+    # render must still leave the output directory alone: Sphinx re-reads pages
+    # by mtime, and sphinx-autobuild watches the source directory it writes into.
+    config = Config(input=["demo.hpp"], output_dir="api")
+    build(config, base_dir=project)
+    api = project / "api"
+    for path in api.iterdir():
+        os.utime(path, ns=(0, 0))
+
+    build(config, base_dir=project)
+
+    assert {path.name for path in api.iterdir() if path.stat().st_mtime_ns != 0} == set()
 
 
 @requires_libclang

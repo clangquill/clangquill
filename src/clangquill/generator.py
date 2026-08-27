@@ -1068,17 +1068,22 @@ class Generator:
         ``"class"`` one page per documented class/namespace, and ``"namespace"``
         a browsable index → namespace → per-symbol hierarchy.
         ``toctree_maxdepth`` and ``root_document`` shape the generated index
-        page (written as ``<root_document>.md``). Returns the page stems written
-        (excluding the index), in toctree order.
+        page (written as ``<root_document>.md``). Returns the page stems
+        (excluding the index), in toctree order — every planned page, whether or
+        not it had to be written.
+
+        A page whose rendered content is already on disk is left alone (see
+        :func:`write_if_changed`), so a rebuild that changes nothing touches no
+        mtimes.
         """
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         pages = self.render_pages(group_by=group_by, reserved_stems=(root_document,))
         for page in pages:
-            (out / f"{page.stem}.md").write_text(page.text, encoding="utf-8")
-        (out / f"{root_document}.md").write_text(
+            write_if_changed(out / f"{page.stem}.md", page.text)
+        write_if_changed(
+            out / f"{root_document}.md",
             self.render_index(pages, toctree_maxdepth=toctree_maxdepth),
-            encoding="utf-8",
         )
         return [page.stem for page in pages]
 
@@ -1527,6 +1532,35 @@ class Generator:
         return stem
 
 
+def write_if_changed(path: Path, text: str) -> bool:
+    """Write ``text`` to ``path`` unless the file already holds exactly that.
+
+    Rewriting a file with identical content still bumps its mtime, and that is
+    not free for anything generated into a Sphinx source directory: Sphinx
+    decides which documents to re-read from source mtimes, so an unconditional
+    write makes *every* generated page outdated on *every* build, and a watcher
+    on the source directory (sphinx-autobuild) rebuilds in a loop because each
+    build touches its own inputs. The cached pipeline already compares page
+    content before writing; this is what keeps the stateless path -- the
+    out-of-the-box Sphinx configuration, which has no ``cache_dir`` -- and the
+    page manifest to the same rule.
+
+    The comparison is on decoded text rather than raw bytes so that the
+    platform newline translation :meth:`~pathlib.Path.write_text` applies on the
+    way out is undone on the way in, and an unchanged page still compares equal
+    on Windows. A missing or unreadable file simply gets written.
+
+    Returns whether ``path`` was written.
+    """
+    try:
+        if path.read_text(encoding="utf-8") == text:
+            return False
+    except (OSError, UnicodeDecodeError):
+        pass
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
 def render_symbol(store: Store, symbol: Symbol, **kwargs: object) -> str:
     """Render a single symbol with a throwaway generator (convenience wrapper)."""
     return Generator(store).render_symbol(symbol, **kwargs)  # type: ignore[arg-type]
@@ -1537,4 +1571,4 @@ def generate(store: Store, out_dir: str | Path, **kwargs: object) -> list[str]:
     return Generator(store, **kwargs).generate(out_dir)  # type: ignore[arg-type]
 
 
-__all__ = ["Generator", "PagePlan", "RenderedPage", "generate", "render_symbol"]
+__all__ = ["Generator", "PagePlan", "RenderedPage", "generate", "render_symbol", "write_if_changed"]
