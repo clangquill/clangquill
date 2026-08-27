@@ -1,5 +1,5 @@
 ---
-on: pull_request
+on: [pull_request, merge_group]
 name: Git
 # Cancel a stale run when new commits land on the same PR.
 concurrency:
@@ -10,7 +10,11 @@ jobs:
     name: Block Autosquash Commits
     runs-on: ubuntu-24.04
     steps:
+      # This action only understands pull_request events (it reads PR
+      # commits via the API); autosquash commits are already vetted
+      # before a PR enters the merge queue, so skip it on merge_group.
       - name: Block Autosquash Commits
+        if: github.event_name == 'pull_request'
         uses: xt0rted/block-autosquash-commits-action@v2
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}

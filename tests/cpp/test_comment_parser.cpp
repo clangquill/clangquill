@@ -182,6 +182,7 @@ TEST_CASE("a group command takes its line, not the paragraph below it",
 
   const Field* brief = field(fields_of(m, fn->usr), "brief");
   REQUIRE(brief != nullptr);
+  CAPTURE(brief->value);
   CHECK(brief->value.find("documents the") != std::string::npos);
 }
 

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from clangquill import _core, cli, pipeline
-from clangquill.cache import BuildCache
+from clangquill.cache import BuildCache, file_sha256, hash_text
 from clangquill.config import Config
 from clangquill.pipeline import MANIFEST_NAME, build
 from clangquill.store import Store
@@ -205,6 +206,103 @@ def test_incremental_noop_skips_rendering(project: Path, monkeypatch: pytest.Mon
 
 
 @requires_libclang
+def test_incremental_detects_an_edit_made_during_the_parse(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    header = project / "demo.hpp"
+    # Same length as the original, so the size half of the stat fast-path cannot
+    # catch the edit either — the common case for a C++ header tweak.
+    edited = FIXTURE.replace("A documented widget.", "A documented gadget.")
+    assert len(edited) == len(FIXTURE)
+
+    real_full = _core.parse_to_sqlite
+
+    def racing_parse(inputs: list[str], db: str, opt: object) -> object:
+        result = real_full(inputs, db, opt)
+        # The editor saves while libclang is still working: the hash just
+        # recorded describes the old text, the file on disk the new one.
+        header.write_text(edited)
+        return result
+
+    monkeypatch.setattr(_core, "parse_to_sqlite", racing_parse)
+    build(config, base_dir=project)
+    monkeypatch.setattr(_core, "parse_to_sqlite", real_full)
+
+    # Without the restat guard the cache would trust the post-edit stat against
+    # the pre-edit hash and noop here, hiding the edit until the file moves
+    # again. It has to re-parse and re-render instead.
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    assert "gadget" in (project / "api" / "demo.md").read_text()
+
+
+@requires_libclang
+def test_incremental_recovers_from_a_truncated_ir(project: Path) -> None:
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    build(config, base_dir=project)
+    ir = project / ".cache" / "clangquill.sqlite"
+
+    # A build killed mid-write (or a full disk) leaves a truncated IR. Nothing
+    # touches the inputs, so the cache still believes the parse is current and
+    # would otherwise open this file and raise.
+    ir.write_bytes(ir.read_bytes()[:64])
+    (project / "api" / "demo.md").unlink()
+
+    result = build(config, base_dir=project)
+
+    assert result.parsed  # recovered by re-parsing from scratch
+    assert result.symbol_count > 0
+    assert (project / "api" / "demo.md").is_file()
+    # The replacement IR is a real database again, so the next build noops.
+    with Store.open(ir) as store:
+        assert store.symbol_count() == result.symbol_count
+    assert not build(config, base_dir=project).parsed
+
+
+@requires_libclang
+def test_incremental_recovers_from_an_ir_of_a_foreign_schema(project: Path) -> None:
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    build(config, base_dir=project)
+    ir = project / ".cache" / "clangquill.sqlite"
+
+    # An IR left behind by another clangquill version: readable SQLite, wrong
+    # schema. Store.open rejects it, so the build has to discard and re-parse.
+    con = sqlite3.connect(ir)
+    con.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(_core.SCHEMA_VERSION + 1),))
+    con.commit()
+    con.close()
+
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    with Store.open(ir) as store:
+        assert store.meta("schema_version") == str(_core.SCHEMA_VERSION)
+
+
+@requires_libclang
+def test_incremental_recovers_from_a_truncated_ir_on_the_partial_path(project: Path) -> None:
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    (project / "beta.hpp").write_text("/// beta ns\nnamespace beta { /// g\nint g(); }\n")
+    config = Config(input=["alpha.hpp", "beta.hpp"], output_dir="api", cache_dir=".cache")
+    build(config, base_dir=project)
+    ir = project / ".cache" / "clangquill.sqlite"
+
+    # One input changed, so the cache would take the per-TU path and re-parse
+    # into a copy of this file — which the C++ writer cannot open either.
+    ir.write_bytes(b"not a database at all")
+    (project / "alpha.hpp").write_text("/// alpha ns edited\nnamespace alpha { /// f\nint f(); }\n")
+
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    # A full re-parse, so both units are back in the IR, not just the stale one.
+    assert sorted(p.name for p in (project / "api").glob("*.md")) == ["alpha.md", "beta.md", "index.md"]
+
+
+@requires_libclang
 def test_incremental_restores_deleted_output(project: Path) -> None:
     config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
     first = build(config, base_dir=project)
@@ -247,10 +345,26 @@ def test_incremental_touched_but_identical_output_still_noops(project: Path) -> 
 
     # Rewriting identical bytes moves the stat but not the content: the build
     # must recognise the page as intact (via the hash fallback) and still noop.
-    page.write_text(page.read_text(), encoding="utf-8")
+    # Bytes, not text: a text round-trip would translate the newlines on
+    # Windows and genuinely change the file, testing the opposite of this.
+    page.write_bytes(page.read_bytes())
     result = build(config, base_dir=project)
     assert not result.parsed
     assert result.pages_written == []
+
+
+@requires_libclang
+def test_pages_are_written_as_the_bytes_their_hash_covers(project: Path) -> None:
+    # The invariant the whole incremental path rests on: a page's record holds
+    # the hash of the rendered *text*, while _output_intact re-checks the page
+    # by hashing its *bytes*. Any newline translation on the way to disk breaks
+    # that equality — on Windows it would make every touched page read as
+    # damaged — and nothing else in the suite would notice on a POSIX runner.
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    build(config, base_dir=project)
+
+    page = project / "api" / "demo.md"
+    assert file_sha256(page) == hash_text(page.read_text(encoding="utf-8"))
 
 
 @requires_libclang
@@ -502,9 +616,9 @@ def test_incremental_reparses_only_the_changed_translation_unit(
         full_calls += 1
         return real_full(inputs, db, opt)
 
-    def spy_tus(inputs: list[str], db: str, opt: object) -> object:
+    def spy_tus(inputs: list[str], db: str, opt: object, dropped: list[str]) -> object:
         tu_calls.append([Path(inp).name for inp in inputs])
-        return real_tus(inputs, db, opt)
+        return real_tus(inputs, db, opt, dropped)
 
     monkeypatch.setattr(_core, "parse_to_sqlite", spy_full)
     monkeypatch.setattr(_core, "parse_tus_to_sqlite", spy_tus)
@@ -541,9 +655,9 @@ def test_incremental_shared_header_change_reparses_every_dependent(
         full_calls += 1
         return real_full(inputs, db, opt)
 
-    def spy_tus(inputs: list[str], db: str, opt: object) -> object:
+    def spy_tus(inputs: list[str], db: str, opt: object, dropped: list[str]) -> object:
         tu_calls.append([Path(inp).name for inp in inputs])
-        return real_tus(inputs, db, opt)
+        return real_tus(inputs, db, opt, dropped)
 
     monkeypatch.setattr(_core, "parse_to_sqlite", spy_full)
     monkeypatch.setattr(_core, "parse_tus_to_sqlite", spy_tus)
@@ -586,9 +700,9 @@ def test_incremental_reparse_uses_smaller_auto_batch(
     tu_batches: list[int] = []
     real_tus = _core.parse_tus_to_sqlite
 
-    def spy_tus(inputs: list[str], db: str, opt: _core.ParseOptions) -> object:
+    def spy_tus(inputs: list[str], db: str, opt: _core.ParseOptions, dropped: list[str]) -> object:
         tu_batches.append(opt.tu_batch)
-        return real_tus(inputs, db, opt)
+        return real_tus(inputs, db, opt, dropped)
 
     monkeypatch.setattr(_core, "parse_tus_to_sqlite", spy_tus)
 
@@ -694,6 +808,106 @@ def test_incremental_deletes_pages_for_removed_symbols(project: Path) -> None:
     assert "alpha.md" not in result.pages_written
 
 
+HIERARCHICAL_FIXTURE = """
+/// Geometry.
+namespace geo {
+/// A circle.
+struct Circle {
+  /// the area
+  double area() const;
+};
+/// A square.
+struct Square {
+  /// the side length
+  double side;
+};
+/// Scale a value.
+int scale(int f);
+}
+"""
+
+# The same header with Square removed, for the rebuild half of the tests below.
+HIERARCHICAL_FIXTURE_WITHOUT_SQUARE = HIERARCHICAL_FIXTURE.replace(
+    """/// A square.
+struct Square {
+  /// the side length
+  double side;
+};
+""",
+    "",
+)
+
+
+@requires_libclang
+def test_class_mode_pages_records_and_rewrites_the_index_on_removal(project: Path) -> None:
+    # group_by="class" had only ever been driven as a generator unit test over a
+    # hand-built fixture database. Through the pipeline it also owns page-cache
+    # keys, page deletion and index rewriting, all of which are mode-specific:
+    # here the flat root index is the toctree that has to shrink.
+    header = project / "geo.hpp"
+    header.write_text(HIERARCHICAL_FIXTURE)
+    config = Config(input=["geo.hpp"], output_dir="api", group_by="class", cache_dir=".cache")
+    api = project / "api"
+
+    first = build(config, base_dir=project)
+    assert first.pages == ["geo", "geo_Circle", "geo_Square"]
+    # Each record earns a page; the namespace page keeps only its leaf members.
+    assert "{cpp:function} int geo::scale" in (api / "geo.md").read_text()
+    assert "{cpp:struct} geo::Circle" not in (api / "geo.md").read_text()
+    assert (api / "geo_Circle.md").read_text().startswith("# Struct `geo::Circle`")
+    assert "geo_Square" in (api / "index.md").read_text()
+
+    header.write_text(HIERARCHICAL_FIXTURE_WITHOUT_SQUARE)
+    second = build(config, base_dir=project)
+
+    assert second.parsed
+    assert second.pages_deleted == ["geo_Square.md"]
+    assert not (api / "geo_Square.md").exists()
+    # Only the index changes: it lists every page in this mode, so dropping one
+    # rewrites it, while the surviving pages replay from the page cache.
+    assert second.pages_written == ["index.md"]
+    index = (api / "index.md").read_text()
+    assert "geo_Square" not in index
+    assert "geo_Circle" in index
+
+
+@requires_libclang
+def test_namespace_mode_rewrites_the_hub_toctree_on_removal(project: Path) -> None:
+    # The mode the issue calls out: removing a class must delete its page *and*
+    # rewrite the namespace hub whose toctree links it. The root index links
+    # only the hub here, so it is precisely the page that must not change.
+    header = project / "geo.hpp"
+    header.write_text(HIERARCHICAL_FIXTURE)
+    config = Config(input=["geo.hpp"], output_dir="api", group_by="namespace", cache_dir=".cache")
+    api = project / "api"
+
+    first = build(config, base_dir=project)
+    assert set(first.pages) == {"geo", "geo_Circle", "geo_Square", "geo_scale"}
+    hub = (api / "geo.md").read_text()
+    assert "```{toctree}" in hub
+    assert "Square <geo_Square>" in hub
+    # The hub links member bodies rather than inlining them.
+    assert "{cpp:struct}" not in hub
+    assert (api / "index.md").read_text().count("geo") == 1  # the hub, nothing deeper
+
+    before = _mtimes(api)
+    header.write_text(HIERARCHICAL_FIXTURE_WITHOUT_SQUARE)
+    second = build(config, base_dir=project)
+
+    assert second.parsed
+    assert second.pages_deleted == ["geo_Square.md"]
+    assert not (api / "geo_Square.md").exists()
+    # The hub is the only page whose text changed; the root index still points
+    # at the same single namespace, and the sibling pages are untouched.
+    assert second.pages_written == ["geo.md"]
+    hub = (api / "geo.md").read_text()
+    assert "Square <geo_Square>" not in hub
+    assert "Circle <geo_Circle>" in hub
+    after = _mtimes(api)
+    assert after["index.md"] == before["index.md"]
+    assert after["geo_Circle.md"] == before["geo_Circle.md"]
+
+
 def test_parse_fingerprint_tracks_compile_commands_file(tmp_path: Path) -> None:
     # ``compile_commands`` is a directory; the fingerprint must follow the JSON
     # file inside it so edits to the compile DB invalidate the cached parse.
@@ -778,6 +992,40 @@ def test_incremental_reparses_when_included_header_changes(project: Path) -> Non
     # Touching the *included* header invalidates the cached parse.
     (project / "detail.hpp").write_text("#pragma once\nusing Width = unsigned;\n")
     assert build(config, base_dir=project).parsed
+
+
+@requires_libclang
+def test_incremental_prunes_a_dependency_that_left_the_closure(project: Path) -> None:
+    # private.hpp is reached only through alpha.hpp; shared.hpp through both.
+    (project / "private.hpp").write_text("#pragma once\nusing Priv = int;\n")
+    (project / "shared.hpp").write_text("#pragma once\nusing Id = unsigned;\n")
+    (project / "alpha.hpp").write_text(
+        '#include "private.hpp"\n#include "shared.hpp"\n/// alpha ns\nnamespace alpha { /// f\nPriv f(); }\n',
+    )
+    (project / "beta.hpp").write_text('#include "shared.hpp"\n/// beta ns\nnamespace beta { /// g\nId g(); }\n')
+    config = Config(input=["alpha.hpp", "beta.hpp"], output_dir="api", cache_dir=".cache")
+
+    build(config, base_dir=project)
+    ir = project / ".cache" / "clangquill.sqlite"
+    with Store.open(ir) as store:
+        tracked = {Path(f.path).name for f in store.files()}
+    assert {"alpha.hpp", "beta.hpp", "private.hpp", "shared.hpp"} <= tracked
+
+    # alpha.hpp drops both includes. shared.hpp survives because beta.hpp still
+    # pulls it in; private.hpp is reached by nothing and must leave the IR.
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    with Store.open(ir) as store:
+        tracked = {Path(f.path).name for f in store.files()}
+    assert "private.hpp" not in tracked
+    assert {"alpha.hpp", "beta.hpp", "shared.hpp"} <= tracked
+    # The reported file count matches what is actually still in the build.
+    assert result.file_count == len(tracked)
+
+    # beta.hpp's page is untouched and still renders from the surviving rows.
+    assert sorted(p.name for p in (project / "api").glob("*.md")) == ["alpha.md", "beta.md", "index.md"]
 
 
 @requires_libclang
@@ -951,7 +1199,7 @@ def test_diagnostics_log_written_with_header(project: Path) -> None:
 
     log = project / "parse.log"
     assert result.diagnostics_log == log.resolve()
-    header = _log_header(log.read_text())
+    header = _log_header(log.read_text(encoding="utf-8"))
     assert header["parse"] == "full"
     assert header["inputs"] == "1 file(s)"
     assert "generated" in header
@@ -986,7 +1234,7 @@ def test_warnings_reach_the_log_but_not_the_console_stream(project: Path) -> Non
     result = build(config, base_dir=project)
 
     assert result.diagnostics == []
-    text = (project / "parse.log").read_text()
+    text = (project / "parse.log").read_text(encoding="utf-8")
     assert "demo is on its way out" in text
     assert "warning" in _log_header(text)["totals"]
     assert any(record.severity == 2 for record in result.diagnostic_records)
@@ -998,7 +1246,7 @@ def test_error_notes_are_logged_indented_under_their_parent(project: Path) -> No
     config = Config(input=["demo.hpp"], output_dir="api", diagnostics_log="parse.log")
     build(config, base_dir=project)
 
-    lines = (project / "parse.log").read_text().splitlines()
+    lines = (project / "parse.log").read_text(encoding="utf-8").splitlines()
     parent = next(i for i, line in enumerate(lines) if "redefinition" in line)
     note = lines[parent + 1]
     assert "previous definition" in note
@@ -1028,7 +1276,7 @@ def test_a_failed_parse_explains_itself_in_the_log(project: Path) -> None:
     )
     result = build(config, base_dir=project)
 
-    lines = (project / "parse.log").read_text().splitlines()
+    lines = (project / "parse.log").read_text(encoding="utf-8").splitlines()
     start = next(i for i, line in enumerate(lines) if line.startswith("failed to parse:"))
     # The group is self-delimiting: the failure line is unindented and every
     # note under it is indented, so it ends at the next unindented line. A fixed
@@ -1088,7 +1336,7 @@ def test_diagnostics_log_labels_a_partial_reparse(project: Path) -> None:
     result = build(config, base_dir=project)
 
     assert result.parsed
-    header = _log_header((project / "parse.log").read_text())
+    header = _log_header((project / "parse.log").read_text(encoding="utf-8"))
     assert header["parse"] == "incremental — 1 of 2 translation unit(s) re-parsed"
 
 
@@ -1312,7 +1560,7 @@ def test_write_diagnostics_log_orders_and_indents_records(tmp_path: Path) -> Non
     log = tmp_path / "parse.log"
     pipeline.write_diagnostics_log(log, records, inputs=2, partial=1)
 
-    text = log.read_text()
+    text = log.read_text(encoding="utf-8")
     header = _log_header(text)
     assert header["parse"] == "incremental — 1 of 2 translation unit(s) re-parsed"
     assert header["totals"] == "1 note(s), 1 warning(s), 1 error(s)"
@@ -1324,7 +1572,7 @@ def test_write_diagnostics_log_with_no_records(tmp_path: Path) -> None:
     log = tmp_path / "parse.log"
     pipeline.write_diagnostics_log(log, [], inputs=3)
 
-    header = _log_header(log.read_text())
+    header = _log_header(log.read_text(encoding="utf-8"))
     assert header["totals"] == "none"
     assert header["parse"] == "full"
 

@@ -40,7 +40,9 @@ from __future__ import annotations
 import glob
 import json
 import shutil
+import sqlite3
 import tempfile
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -51,7 +53,7 @@ from clangquill import _core
 from clangquill.cache import BuildCache, OutputRecord, ParseStatus, file_sha256, fingerprint, hash_text
 from clangquill.config import CONFIG_PREFIX
 from clangquill.generator import Generator, write_if_changed
-from clangquill.store import Store
+from clangquill.store import Store, StoreVersionError
 
 if TYPE_CHECKING:
     from clangquill.config import Config
@@ -698,6 +700,54 @@ def _full_build(config: Config, base: Path, inputs: list[str], output_dir: Path)
     )
 
 
+def _parse_status(
+    cache: BuildCache,
+    config: Config,
+    parse_fp: str,
+    ir_path: Path,
+    log_path: Path | None,
+) -> ParseStatus:
+    """Decide how much of the cached parse this build may reuse.
+
+    On top of the cache's own verdict this rejects reuse when something outside
+    the input contents demands a fresh parse, and discards an IR that cannot be
+    read at all. Called before any parsing, so an unusable IR is already gone by
+    the time the build picks a path.
+    """
+    # No IR on disk yet means a full parse regardless of bookkeeping.
+    status = cache.parse_status(parse_fp) if ir_path.is_file() else ParseStatus(current=False)
+    if log_path is not None and not log_path.is_file():
+        # A configured log that is not on disk — relocated to a new path,
+        # deleted, or never written — has to be materialised, and only a
+        # parse produces its contents (diagnostics live in neither the IR
+        # nor the cache). Force one rather than nooping past it and leaving
+        # the configured path empty. Costs one re-parse per relocation.
+        status = ParseStatus(current=False)
+    if config.warnings_as_errors:
+        # A strict verdict has to cover every input, and only a full parse
+        # produces diagnostics for every input. A cached build has none at
+        # all, and an incremental one reports only the translation units it
+        # re-parsed — so a warning in an untouched header would go unseen
+        # and the build would pass while the tree is dirty. Force the full
+        # parse rather than quietly narrowing what "clean" means. This is
+        # why strict mode costs a full parse every run; leave it off for
+        # the edit-rebuild loop and turn it on in CI.
+        status = ParseStatus(current=False)
+    if (status.current or status.stale_inputs is not None) and not _ir_is_readable(ir_path):
+        # Both remaining paths read the cached IR: the noop shortcut renders
+        # from it, the partial re-parse writes into a copy of it. A truncated
+        # file (killed build, full disk) or one left by an incompatible schema
+        # version would fail every later build with a raw sqlite3 traceback
+        # until the user deleted the cache directory by hand. Discard it and pay
+        # for one full parse instead — the same recovery the bookkeeping
+        # database already performs. The rest of the cache is kept: it describes
+        # the pages on disk, which are still good, so only the pages the fresh
+        # parse actually changes are rewritten.
+        ir_path.unlink(missing_ok=True)
+        status = ParseStatus(current=False)
+    return status
+
+
 def _incremental_build(
     config: Config,
     base: Path,
@@ -714,25 +764,7 @@ def _incremental_build(
     log_path = _diagnostics_log_path(config, base)
 
     with BuildCache.open(cache_dir) as cache:
-        # No IR on disk yet means a full parse regardless of bookkeeping.
-        status = cache.parse_status(parse_fp) if ir_path.is_file() else ParseStatus(current=False)
-        if log_path is not None and not log_path.is_file():
-            # A configured log that is not on disk — relocated to a new path,
-            # deleted, or never written — has to be materialised, and only a
-            # parse produces its contents (diagnostics live in neither the IR
-            # nor the cache). Force one rather than nooping past it and leaving
-            # the configured path empty. Costs one re-parse per relocation.
-            status = ParseStatus(current=False)
-        if config.warnings_as_errors:
-            # A strict verdict has to cover every input, and only a full parse
-            # produces diagnostics for every input. A cached build has none at
-            # all, and an incremental one reports only the translation units it
-            # re-parsed — so a warning in an untouched header would go unseen
-            # and the build would pass while the tree is dirty. Force the full
-            # parse rather than quietly narrowing what "clean" means. This is
-            # why strict mode costs a full parse every run; leave it off for
-            # the edit-rebuild loop and turn it on in CI.
-            status = ParseStatus(current=False)
+        status = _parse_status(cache, config, parse_fp, ir_path, log_path)
         parsed = not status.current
         # Fully unchanged build: the parse came from cache (IR identical) and the
         # render config/templates are unchanged, so the output the last run wrote
@@ -751,6 +783,10 @@ def _incremental_build(
         # those units' diagnostics exist this run, so the log has to say so.
         reparsed: int | None = None
         partial_deps: dict[str, list[str]] | None = None
+        # Read before libclang touches anything: the hashes recorded below come
+        # from the parser's read of each file, so any file written at or after
+        # this instant must not have its stat trusted as describing them.
+        parse_started_ns = time.time_ns()
         if not status.current and status.stale_inputs is None:
             # Configuration changed or no per-TU map: rebuild the whole IR.
             counts = _parse_into(inputs, ir_path, options)
@@ -760,7 +796,12 @@ def _incremental_build(
             # Only some inputs are stale: re-parse just those translation units
             # into the existing IR, leaving every other TU's rows in place.
             stale = [inp for inp in inputs if inp in status.stale_inputs]
-            partial_deps, diagnostics, records = _parse_tus_into(stale, ir_path, options)
+            # Files only these units reached last time. Whichever of them the
+            # re-parse no longer pulls in has left the build for good, and the
+            # writer drops its IR rows — otherwise a header removed from an
+            # include closure keeps rendering until the next full rebuild.
+            dropped = cache.deps_only_from(stale)
+            partial_deps, diagnostics, records = _parse_tus_into(stale, ir_path, options, dropped)
             reparsed = len(stale)
         # Only when libclang actually ran: a render-only rebuild (parse cached,
         # templates or output changed) has no diagnostics of its own, and
@@ -777,9 +818,9 @@ def _incremental_build(
             # record_render below can never let the next run noop-skip rendering
             # against this new IR; a clean render re-establishes it at the end.
             if partial_deps is not None:
-                cache.record_partial_parse(partial_deps, snapshot)
+                cache.record_partial_parse(partial_deps, snapshot, parse_started_ns=parse_started_ns)
             elif parsed:
-                cache.record_parse(parse_fp, snapshot, _tu_deps(counts))
+                cache.record_parse(parse_fp, snapshot, _tu_deps(counts), parse_started_ns=parse_started_ns)
             generator = _make_generator(config, base, store)
             rendered = _rendered_files(generator, config, base, cache=cache, render_fingerprint=render_fp)
             symbol_count = store.symbol_count()
@@ -851,6 +892,23 @@ def _noop_result(output_dir: Path, ir_path: Path, summary: dict[str, object] | N
     )
 
 
+def _ir_is_readable(ir_path: Path) -> bool:
+    """Whether the cached IR can still be opened and queried by this core.
+
+    ``False`` for a file that is not a database, is truncated, or carries a
+    schema version this build cannot read — the cases a rebuild has to recover
+    from rather than propagate. The row count is read on purpose: opening a
+    SQLite file and checking its ``meta`` table touches only the first pages, so
+    a file damaged past them would still look fine.
+    """
+    try:
+        with Store.open(ir_path) as store:
+            store.symbol_count()
+    except (sqlite3.DatabaseError, StoreVersionError, OSError):
+        return False
+    return True
+
+
 def _parse_into(inputs: list[str], ir_path: Path, options: _core.ParseOptions) -> _core.ParseResult:
     """Parse into a sibling temp DB, then atomically replace ``ir_path``.
 
@@ -891,6 +949,7 @@ def _parse_tus_into(
     stale: list[str],
     ir_path: Path,
     options: _core.ParseOptions,
+    dropped_candidates: list[str] | None = None,
 ) -> tuple[dict[str, list[str]], list[str], list[Diagnostic]]:
     """Re-parse the stale inputs, replacing only their rows, atomically.
 
@@ -903,6 +962,10 @@ def _parse_tus_into(
     rebuild next run. Returns the fresh dependency map, the error-severity
     diagnostics and the full diagnostic records — the latter two covering the
     re-parsed units only, since nothing else was parsed.
+
+    ``dropped_candidates`` lists the files the previous parse attributed only to
+    ``stale`` (see :meth:`BuildCache.deps_only_from`); those the fresh parse no
+    longer reaches are deleted from the IR by the same transaction.
     """
     if options.tu_batch == 0:
         # Auto batching: stale sets are usually far smaller than a cold build's
@@ -915,7 +978,7 @@ def _parse_tus_into(
     staged = _new_temp_db(ir_path.parent)
     try:
         shutil.copyfile(ir_path, staged)
-        result = _core.parse_tus_to_sqlite(stale, str(staged), options)
+        result = _core.parse_tus_to_sqlite(stale, str(staged), options, dropped_candidates or [])
     except BaseException:
         staged.unlink(missing_ok=True)
         raise
@@ -1003,7 +1066,12 @@ def _apply_outputs(
         target = output_dir / name
         prev = previous.get(name)
         if prev is None or prev.content_hash != content_hash or not _output_intact(target, prev):
-            target.write_text(text, encoding="utf-8")
+            # newline="\n" is load-bearing, not cosmetic: content_hash is the
+            # SHA-256 of `text`, while _output_intact re-checks a page by
+            # hashing its *bytes*. Left to translate, Windows would write CRLF
+            # and no page would ever hash back to its own record, so every
+            # touched page would read as damaged and be rewritten.
+            target.write_text(text, encoding="utf-8", newline="\n")
             written.append(name)
         new_index[name] = OutputRecord(content_hash, *_stat_pair(target))
 

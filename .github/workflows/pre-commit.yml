@@ -1,6 +1,6 @@
 ---
 name: pre-commit
-on: [pull_request]
+on: [pull_request, merge_group]
 # Cancel a stale run when new commits land on the same PR.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

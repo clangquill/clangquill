@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "hash/content_hash.hpp"
 #include "model/module.hpp"
 
 #if defined(CLANGQUILL_HAVE_LIBCLANG)
@@ -490,11 +491,14 @@ TEST_CASE("a header with no entry of its own gets a sibling .cpp's flags",
   std::ofstream(dir / "widget.cpp") << "#include \"widget.hpp\"\n";
 
   {
+    // generic_string() throughout: JSON has no \\U escape, so a native Windows
+    // path would make the database unparseable ("Unrecognized escape code").
+    // Forward slashes are valid JSON and clang accepts them on Windows too.
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string()
-       << "\", \"file\": \"" << (dir / "widget.cpp").string()
-       << "\", \"arguments\": [\"c++\", \"-I" << (dir / "extra").string()
-       << "\", \"-c\", \"" << (dir / "widget.cpp").string() << "\"]}]";
+    cc << "[{\"directory\": \"" << dir.generic_string()
+       << "\", \"file\": \"" << (dir / "widget.cpp").generic_string()
+       << "\", \"arguments\": [\"c++\", \"-I" << (dir / "extra").generic_string()
+       << "\", \"-c\", \"" << (dir / "widget.cpp").generic_string() << "\"]}]";
   }
 
   parser::ParseOptions opts;
@@ -529,10 +533,10 @@ TEST_CASE("an unused link-only flag is not reported even under the "
 
   {
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string()
-       << "\", \"file\": \"" << (dir / "widget.cpp").string()
+    cc << "[{\"directory\": \"" << dir.generic_string()
+       << "\", \"file\": \"" << (dir / "widget.cpp").generic_string()
        << "\", \"arguments\": [\"c++\", \"-Werror\", \"-fuse-ld=lld\", \"-c\", \""
-       << (dir / "widget.cpp").string() << "\"]}]";
+       << (dir / "widget.cpp").generic_string() << "\"]}]";
   }
 
   parser::ParseOptions opts;
@@ -562,10 +566,10 @@ TEST_CASE("a differently spelled source path is still dropped from the args",
     // "file" is relative to "directory"; the argument list spells the same file
     // a third way, with a `..` hop through the parent.
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string()
+    cc << "[{\"directory\": \"" << dir.generic_string()
        << "\", \"file\": \"sub/widget.hpp\", \"arguments\": [\"c++\", "
           "\"-std=c++20\", \"-xc++\", \"-c\", \""
-       << (dir / "sub" / ".." / "sub" / "widget.hpp").string() << "\"]}]";
+       << (dir / "sub" / ".." / "sub" / "widget.hpp").generic_string() << "\"]}]";
   }
 
   parser::ParseOptions opts;
@@ -597,7 +601,7 @@ TEST_CASE("a '--' separator in a database entry does not sink the parse",
 
   {
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string()
+    cc << "[{\"directory\": \"" << dir.generic_string()
        << "\", \"file\": \"widget.hpp\", \"arguments\": [\"c++\", "
           "\"-Wall\", \"-Werror\", \"-c\", \"-x\", \"c++-header\", "
           "\"-std=gnu++20\", \"--\", \"widget.hpp\"]}]";
@@ -633,7 +637,7 @@ TEST_CASE("an entry's own -x survives, and is supplied when it has none",
 
   {
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string()
+    cc << "[{\"directory\": \"" << dir.generic_string()
        << "\", \"file\": \"plain.h\", \"arguments\": [\"c++\", "
           "\"-std=c++20\", \"-c\", \"plain.h\"]}]";
   }
@@ -668,7 +672,7 @@ TEST_CASE("flags that describe another file are reported", "[parser]") {
 
   {
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string()
+    cc << "[{\"directory\": \"" << dir.generic_string()
        << "\", \"file\": \"tests/test_geo.cpp\", \"arguments\": [\"c++\", "
           "\"-std=c++20\", \"-DGEO_FEATURE=1\", \"-c\", "
           "\"tests/test_geo.cpp\"]}]";
@@ -709,10 +713,10 @@ TEST_CASE("a file the database really lists is not reported as borrowed",
   {
     // "file" is relative to "directory" while the lookup is by resolved path.
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string()
+    cc << "[{\"directory\": \"" << dir.generic_string()
        << "\", \"file\": \"sub/widget.hpp\", \"arguments\": [\"c++\", "
           "\"-std=c++20\", \"-c\", \"sub/widget.hpp\"]},"
-       << "{\"directory\": \"" << dir.string()
+       << "{\"directory\": \"" << dir.generic_string()
        << "\", \"file\": \"other.cpp\", \"arguments\": [\"c++\", "
           "\"-std=c++20\", \"-c\", \"other.cpp\"]}]";
   }
@@ -756,7 +760,7 @@ TEST_CASE("an entry's paths resolve against its own directory, not ours",
     // Every path relative to "directory", -I included. The test process runs
     // somewhere else entirely, which is the whole point.
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string()
+    cc << "[{\"directory\": \"" << dir.generic_string()
        << "\", \"file\": \"src/main.cpp\", \"arguments\": [\"c++\", "
           "\"-std=c++20\", \"-Iinclude\", \"-c\", \"src/main.cpp\"]}]";
   }
@@ -795,7 +799,7 @@ TEST_CASE("a header borrowing another file's flags is parsed as a header",
 
   {
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string()
+    cc << "[{\"directory\": \"" << dir.generic_string()
        << "\", \"file\": \"tests/test_widget.cpp\", \"arguments\": [\"c++\", "
           "\"-Wall\", \"-Werror\", \"-std=c++20\", \"-c\", "
           "\"tests/test_widget.cpp\"]}]";
@@ -866,12 +870,12 @@ TEST_CASE("replaying a database entry never writes the files it names",
     // Absolute output paths, because clang resolves a relative one against the
     // *process* working directory -- libclang never chdir's into the entry's
     // `directory` -- which for a real build is the Sphinx srcdir.
-    cc << "[{\"directory\": \"" << dir.string()
+    cc << "[{\"directory\": \"" << dir.generic_string()
        << "\", \"file\": \"widget.hpp\", \"arguments\": [\"c++\", "
-          "\"-std=c++20\", \"-MD\", \"-MF\", \"" << (dir / "widget.d").string()
+          "\"-std=c++20\", \"-MD\", \"-MF\", \"" << (dir / "widget.d").generic_string()
        << "\", \"-MT\", \"widget.o\", \"--serialize-diagnostics\", \""
-       << (dir / "widget.dia").string() << "\", \"-o\", \""
-       << (dir / "widget.o").string() << "\", \"-c\", \"widget.hpp\"]}]";
+       << (dir / "widget.dia").generic_string() << "\", \"-o\", \""
+       << (dir / "widget.o").generic_string() << "\", \"-c\", \"widget.hpp\"]}]";
   }
 
   parser::ParseOptions opts;
@@ -904,10 +908,10 @@ TEST_CASE("an interpolated entry's outputs are not written either", "[parser]") 
 
   {
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string()
+    cc << "[{\"directory\": \"" << dir.generic_string()
        << "\", \"file\": \"tests/test_widget.cpp\", \"arguments\": [\"c++\", "
-          "\"-std=c++20\", \"-MD\", \"-MF\", \"" << (dir / "test_widget.d").string()
-       << "\", \"-o\", \"" << (dir / "test_widget.o").string()
+          "\"-std=c++20\", \"-MD\", \"-MF\", \"" << (dir / "test_widget.d").generic_string()
+       << "\", \"-o\", \"" << (dir / "test_widget.o").generic_string()
        << "\", \"-c\", \"tests/test_widget.cpp\"]}]";
   }
 
@@ -1178,6 +1182,19 @@ namespace {
 
 // The whole `failed to parse` group: the record itself plus every note nested
 // under it, joined so a test can assert on the report as a reader sees it.
+// Renders `arg` the way the report's copy-pasteable command tail does: an
+// argument holding a backslash — every absolute path on Windows — comes back
+// shell-quoted with its backslashes escaped (see join_args in parser.cpp).
+std::string as_logged(const std::string& arg) {
+  if (arg.find_first_of(" \t\"'\\") == std::string::npos) return arg;
+  std::string quoted = "\"";
+  for (char c : arg) {
+    if (c == '"' || c == '\\') quoted += '\\';
+    quoted += c;
+  }
+  return quoted + "\"";
+}
+
 std::string failure_report(const model::ParsedModule& m) {
   std::string report;
   bool inside = false;
@@ -1212,7 +1229,8 @@ TEST_CASE("a missing input reports why libclang refused it", "[parser]") {
   CHECK(report.find("the input file does not exist") != std::string::npos);
   // The exact argv is in the log, so a wrong include path or standard is
   // visible without reproducing the run.
-  CHECK(report.find("-I" + (dir / "include").string()) != std::string::npos);
+  CHECK(report.find(as_logged("-I" + (dir / "include").string())) !=
+        std::string::npos);
   CHECK(report.find("-xc++") != std::string::npos);
 
   // Every explanatory record hangs off the failure, so error-only consumers
@@ -1242,10 +1260,10 @@ TEST_CASE("a database entry with a second input is named, and the file is "
   std::ofstream(dir / "other.cpp") << "int other() { return 1; }\n";
   {
     std::ofstream db(dir / "compile_commands.json");
-    db << "[{\"directory\": \"" << dir.string()
+    db << "[{\"directory\": \"" << dir.generic_string()
        << "\", \"file\": \"widget.hpp\", \"arguments\": [\"clang++\", "
           "\"-std=c++20\", \"-DWIDGET_FROM_DB=1\", \"-c\", \"widget.hpp\", \""
-       << (dir / "other.cpp").string() << "\"]}]";
+       << (dir / "other.cpp").generic_string() << "\"]}]";
   }
 
   parser::ParseOptions opts;
@@ -1256,7 +1274,7 @@ TEST_CASE("a database entry with a second input is named, and the file is "
 
   const std::string report = failure_report(mod);
   CHECK(report.find("names a second input file") != std::string::npos);
-  CHECK(report.find((dir / "other.cpp").string()) != std::string::npos);
+  CHECK(report.find((dir / "other.cpp").generic_string()) != std::string::npos);
   // The flags are quoted verbatim, and attributed to the database rather than
   // to clangquill's own -std/-I/-D options.
   CHECK(report.find("from the compilation database") != std::string::npos);
@@ -1288,10 +1306,10 @@ TEST_CASE("a file that parses alone blames the compile flags", "[parser]") {
   std::ofstream(dir / "other.cpp") << "int other() { return 1; }\n";
   {
     std::ofstream db(dir / "compile_commands.json");
-    db << "[{\"directory\": \"" << dir.string()
+    db << "[{\"directory\": \"" << dir.generic_string()
        << "\", \"file\": \"widget.hpp\", \"arguments\": [\"clang++\", "
           "\"-std=c++20\", \"-c\", \"widget.hpp\", \""
-       << (dir / "other.cpp").string() << "\"]}]";
+       << (dir / "other.cpp").generic_string() << "\"]}]";
   }
 
   parser::ParseOptions opts;
@@ -1336,6 +1354,60 @@ TEST_CASE("a batch member libclang never opened is reported", "[parser]") {
   CHECK(find(mod, "a_value") != nullptr);
 
   fs::remove_all(dir);
+}
+
+TEST_CASE("parser records parameter default arguments", "[parser]") {
+  auto m = parse_fixture("param_defaults.hpp");
+
+  const auto* draw = find(m, "defaults::draw");
+  REQUIRE(draw != nullptr);
+
+  std::vector<model::FunctionParameter> params;
+  for (const auto& p : m.parameters) {
+    if (p.function_usr == draw->usr) params.push_back(p);
+  }
+  REQUIRE(params.size() == 3);
+  CHECK(params[0].default_value == "80");
+  CHECK(params[1].default_value == "\"shape\"");
+  // The type of this one closes two argument lists with a single `>>` token,
+  // which used to hide the `=` that follows it.
+  CHECK(params[2].name == "bounds");
+  CHECK_FALSE(params[2].default_value.empty());
+
+  const auto* resize = find(m, "defaults::Widget::resize");
+  REQUIRE(resize != nullptr);
+  for (const auto& p : m.parameters) {
+    if (p.function_usr != resize->usr) continue;
+    CHECK(p.default_value == (p.index == 1 ? "24" : ""));
+  }
+}
+
+TEST_CASE("parameter defaults reach the content hash", "[parser]") {
+  auto m = parse_fixture("param_defaults.hpp");
+  const auto* value_or = find(m, "defaults::value_or");
+  REQUIRE(value_or != nullptr);
+
+  // A function template's parameters arrive as child cursors rather than
+  // through clang_Cursor_getNumArguments; both paths must carry the default.
+  bool found = false;
+  for (const auto& p : m.parameters) {
+    if (p.function_usr == value_or->usr && p.index == 1) {
+      found = true;
+      CHECK(p.default_value.find("T") != std::string::npos);
+    }
+  }
+  CHECK(found);
+
+  // The hash folds in the parameters, so editing only a default value
+  // invalidates the cached page -- which it could not do while every
+  // default_value was empty.
+  std::vector<model::FunctionParameter> params;
+  for (const auto& p : m.parameters) {
+    if (p.function_usr == value_or->usr) params.push_back(p);
+  }
+  const std::string with_default = hash::content_hash(*value_or, params, "");
+  params[1].default_value = "T{42}";
+  CHECK(hash::content_hash(*value_or, params, "") != with_default);
 }
 
 #else  // !CLANGQUILL_HAVE_LIBCLANG

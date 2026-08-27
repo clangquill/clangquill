@@ -113,6 +113,42 @@ def test_parse_is_current_falls_back_to_hash_when_only_mtime_changes(
         assert not cache.parse_is_current("fp-1")
 
 
+def test_edit_during_the_parse_is_not_hidden_by_the_stat_fast_path(tmp_path: Path) -> None:
+    header = tmp_path / "h.hpp"
+    header.write_text("aaaa", encoding="utf-8")
+    parsed = _entry(header)  # what the parser saw
+
+    # The file is rewritten while the parse is still running: same size, so the
+    # size check cannot catch it either. Recording the post-parse stat next to
+    # the pre-edit hash would make every later build trust metadata that
+    # describes content the hash never saw.
+    started = header.stat().st_mtime_ns
+    header.write_text("bbbb", encoding="utf-8")
+    os.utime(header, ns=(started + 1000, started + 1000))
+
+    with BuildCache.open(tmp_path / "cache") as cache:
+        cache.record_parse("fp", {str(header): parsed}, parse_started_ns=started)
+
+        row = cache._con.execute("SELECT mtime_ns FROM inputs").fetchone()  # noqa: SLF001
+        assert row["mtime_ns"] is None  # no fast path: the next build must hash
+        assert not cache.parse_is_current("fp")
+
+
+def test_untouched_file_keeps_its_fast_path_across_a_parse(tmp_path: Path) -> None:
+    header = tmp_path / "h.hpp"
+    header.write_text("aaaa", encoding="utf-8")
+    # Nothing writes the file during the parse, so its stat is trustworthy and
+    # the fast path is kept: the guard must not cost every build a re-hash.
+    started = header.stat().st_mtime_ns + 1000
+
+    with BuildCache.open(tmp_path / "cache") as cache:
+        cache.record_parse("fp", {str(header): _entry(header)}, parse_started_ns=started)
+
+        row = cache._con.execute("SELECT mtime_ns FROM inputs").fetchone()  # noqa: SLF001
+        assert row["mtime_ns"] == header.stat().st_mtime_ns
+        assert cache.parse_is_current("fp")
+
+
 def test_parse_is_current_false_without_tracked_files(tmp_path: Path) -> None:
     with BuildCache.open(tmp_path / "cache") as cache:
         cache.record_parse("fp", {})
@@ -177,6 +213,34 @@ def test_record_partial_parse_updates_map_and_prunes_orphans(tmp_path: Path) -> 
         assert cache.tu_inputs() == {str(a): {str(a)}}
         # The fingerprint is unchanged across a partial update.
         assert cache.parse_fingerprint == "fp"
+
+
+def test_deps_only_from_names_files_no_surviving_unit_reaches(tmp_path: Path) -> None:
+    a = tmp_path / "a.hpp"
+    b = tmp_path / "b.hpp"
+    private = tmp_path / "private.hpp"
+    shared = tmp_path / "shared.hpp"
+    for p in (a, b, private, shared):
+        p.write_text(p.name, encoding="utf-8")
+    files = {str(p): _entry(p) for p in (a, b, private, shared)}
+
+    with BuildCache.open(tmp_path / "cache") as cache:
+        cache.record_parse(
+            "fp",
+            files,
+            {
+                str(a): [str(a), str(private), str(shared)],
+                str(b): [str(b), str(shared)],
+            },
+        )
+
+        # Re-parsing a.hpp alone: only a.hpp itself and its private header are
+        # candidates. shared.hpp is still reached by b.hpp and must not be
+        # offered for deletion; b.hpp is another unit's input entirely.
+        assert cache.deps_only_from([str(a)]) == sorted([str(a), str(private)])
+        # Re-parsing both units puts every tracked file in reach.
+        assert cache.deps_only_from([str(a), str(b)]) == sorted(str(p) for p in (a, b, private, shared))
+        assert cache.deps_only_from([]) == []
 
 
 def test_outputs_round_trip_and_replacement(tmp_path: Path) -> None:
