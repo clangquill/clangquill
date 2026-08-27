@@ -387,6 +387,24 @@ def test_group_by_namespace_nests_subnamespaces_and_lumps_operators(ns_db: Path,
     assert "app_operators" in pages
 
 
+def test_namespace_scope_catches_unbucketed_kinds(gen: Generator) -> None:
+    # A kind matching none of the namespace/record/function/type/constant
+    # buckets (e.g. a stray FIELD or an UNKNOWN symbol reachable at namespace
+    # scope under group_by="namespace") must still surface on an "Other" page
+    # instead of silently vanishing from the output.
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from clangquill.store import SymbolKind  # noqa: PLC0415
+
+    mystery = SimpleNamespace(kind=SymbolKind.UNKNOWN, spelling="mystery", signature="")
+    plans: list = []
+    seen: set[str] = set()
+    entries = gen._emit_namespace_scope(None, [mystery], plans, seen, top_level=True)  # noqa: SLF001
+
+    assert ("other", "Other") in entries
+    assert any(p.stem == "other" for p in plans)
+
+
 def test_repair_split_operators_rejoins_eqeq() -> None:
     from clangquill.generator import _repair_split_operators  # noqa: PLC0415
 
@@ -399,6 +417,11 @@ def test_repair_split_operators_rejoins_eqeq() -> None:
     # A single `=` (a default argument / alias) must be left untouched.
     assert _repair_split_operators("template<int N = 4>") == "template<int N = 4>"
     assert _repair_split_operators("using T = int") == "using T = int"
+    # A string-literal default argument that happens to contain ` = = ` must be
+    # left verbatim rather than rewritten into `" == "`.
+    assert _repair_split_operators('const char* s = " = = "') == 'const char* s = " = = "'
+    # ... while a real split `==` outside the literal is still rejoined.
+    assert _repair_split_operators('const char* s = " = = ", int x = = 3') == 'const char* s = " = = ", int x == 3'
 
 
 def test_signature_repairs_split_eqeq_for_function(gen: Generator, store: Store) -> None:
@@ -464,6 +487,17 @@ def test_file_heading_reroots_with_path_base(store: Store) -> None:
     rendered = gen.render_file(absolute)
     assert rendered.startswith("# File `include/geo.hpp`")
     assert "/work/repo" not in rendered
+
+
+def test_heading_filter_clamps_at_h6(gen: Generator) -> None:
+    # Templates render `{{ level | heading }}`, recursing with `level + 1` for
+    # nested containers; Markdown has no heading past `######`, so deep
+    # nesting must clamp there instead of emitting a literal `#######`.
+    heading = gen.env.filters["heading"]
+    assert heading(1) == "#"
+    assert heading(6) == "######"
+    assert heading(7) == "######"
+    assert heading(20) == "######"
 
 
 def test_store_file_roots_skips_same_file_parents(multifile_db: Path) -> None:
@@ -593,6 +627,24 @@ def test_related_functions_bust_the_class_page_fingerprint(fixture_db: Path) -> 
     before = fingerprint()
     con = sqlite3.connect(fixture_db)
     con.execute("UPDATE symbols SET content_hash = 'changed' WHERE qualified_name = 'geo::scale'")
+    con.commit()
+    con.close()
+    assert fingerprint() != before
+
+
+def test_file_page_fingerprint_busts_when_path_changes(fixture_db: Path) -> None:
+    # file.md.jinja renders `file.path | relpath` straight into the heading,
+    # so a file moved to a different directory (same basename, same symbols)
+    # must still bust its cached page instead of replaying the old heading.
+    def fingerprint() -> str:
+        with Store.open(fixture_db) as opened:
+            generator = Generator(opened)
+            plan = next(p for p in generator.plan_pages(group_by="file") if p.stem == "geo_hpp")
+            return generator.page_fingerprint(plan)
+
+    before = fingerprint()
+    con = sqlite3.connect(fixture_db)
+    con.execute("UPDATE files SET path = REPLACE(path, 'geo.hpp', 'moved/geo.hpp')")
     con.commit()
     con.close()
     assert fingerprint() != before

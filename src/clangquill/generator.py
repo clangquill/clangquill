@@ -16,6 +16,7 @@ builders, and the child/relation queries.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ from typing import TYPE_CHECKING
 from jinja2 import ChoiceLoader, Environment, FileSystemLoader, PackageLoader, StrictUndefined
 
 from clangquill.store import AccessKind, RefKind, SymbolKind
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -166,11 +169,27 @@ _XREF_TRAILING_RE = re.compile(r"(?:\(\s*\)|[.,;:()\s])+$")
 # Sphinx C++ domain fails to parse the emitted directive. ``= =`` can never occur
 # in a well-formed declaration, so rejoining it to ``==`` is a safe repair.
 _SPLIT_EQEQ_RE = re.compile(r"=\s+=")
+# Quoted string/char literals, so the repair below can skip them: a default
+# argument like ``const char* s = " = = "`` must not be rewritten to
+# ``" == "``. Handles backslash-escaped quotes within the literal.
+_STRING_LITERAL_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
 
 
 def _repair_split_operators(text: str) -> str:
-    """Rejoin a ``==`` libclang's pretty-printer rendered as ``= =`` (see :data:`_SPLIT_EQEQ_RE`)."""
-    return _SPLIT_EQEQ_RE.sub("==", text)
+    """Rejoin a ``==`` libclang's pretty-printer rendered as ``= =`` (see :data:`_SPLIT_EQEQ_RE`).
+
+    Quoted string/char literals are left untouched (see :data:`_STRING_LITERAL_RE`)
+    so a literal default argument containing `` = = `` is not mistaken for the
+    split operator and rewritten.
+    """
+    pieces = _STRING_LITERAL_RE.split(text)
+    literals = _STRING_LITERAL_RE.findall(text)
+    out: list[str] = []
+    for i, piece in enumerate(pieces):
+        out.append(_SPLIT_EQEQ_RE.sub("==", piece))
+        if i < len(literals):
+            out.append(literals[i])
+    return "".join(out)
 
 
 def _spec_suffix(symbol: Symbol) -> str:
@@ -265,6 +284,19 @@ def _slug(name: str) -> str:
     return slug or "global"
 
 
+_MAX_HEADING_LEVEL = 6
+
+
+def _heading_marker(level: int) -> str:
+    """Return the ATX heading marker for ``level``, clamped to ``h6``.
+
+    Markdown only defines headings up to ``######``; nesting deep enough (e.g.
+    a class containing a class containing a class …) would otherwise emit
+    ``#######``, which renders as literal text instead of a heading.
+    """
+    return "#" * min(level, _MAX_HEADING_LEVEL)
+
+
 def _normalize(text: str) -> str:
     """Collapse runs of blank lines and guarantee a single trailing newline."""
     return _BLANKS_RE.sub("\n\n", text).strip("\n") + "\n"
@@ -317,6 +349,9 @@ class PagePlan:
     for the flat groupings; only the top namespaces for ``group_by="namespace"``).
     ``toctree`` lists the child page stems a hub page embeds in its own toctree,
     so the per-page fingerprint busts the hub when its child set changes.
+    ``file_path`` mirrors the raw path a file-grouped page renders (via the
+    ``relpath`` filter) into its heading, so the dependency walk can bust the
+    page when the file moves even though its symbols are unchanged.
     """
 
     stem: str
@@ -326,6 +361,7 @@ class PagePlan:
     shallow_seeds: tuple[Symbol, ...] = ()
     group: Group | None = None
     file_scope: int | None = field(default=None)
+    file_path: str | None = field(default=None)
     top_level: bool = True
     toctree: tuple[str, ...] = ()
 
@@ -437,6 +473,7 @@ class Generator:
         g["render_comment"] = self.render_comment
         g["field_list"] = self.field_list
         self.env.filters["relpath"] = self._relpath
+        self.env.filters["heading"] = _heading_marker
 
     # -- relation / child queries (thin pass-throughs for templates) ----------
 
@@ -1060,6 +1097,7 @@ class Generator:
                     partial(self.render_file, source_file),
                     subtree_seeds=tuple(roots),
                     file_scope=source_file.id,
+                    file_path=source_file.path,
                 ),
             )
         return plans
@@ -1160,6 +1198,18 @@ class Generator:
         functions = [m for m in members if m.kind in _FUNCTION_KINDS]
         types = [m for m in members if m.kind in _TYPE_LEAF_KINDS]
         constants = [m for m in members if m.kind in _CONST_LEAF_KINDS]
+        bucketed_kinds = _CONTAINER_KINDS | _FUNCTION_KINDS | _TYPE_LEAF_KINDS | _CONST_LEAF_KINDS
+        # Catch-all: a kind landing in none of the buckets above (e.g. a stray
+        # FIELD or an UNKNOWN symbol reachable at namespace scope) would
+        # otherwise be silently dropped from the output, unlike the flat
+        # groupings which render every symbol.
+        other = [m for m in members if m.kind not in bucketed_kinds]
+        if other:
+            _logger.debug(
+                "namespace_scope: unbucketed kinds in %s: %s",
+                scope.qualified_name if scope is not None else "(global namespace)",
+                sorted({m.kind.name for m in other}),
+            )
 
         for ns in namespaces:
             self._emit_namespace_hub(ns, plans, seen, top_level=top_level, entries=entries)
@@ -1187,6 +1237,7 @@ class Generator:
             top_level=top_level,
             entries=entries,
         )
+        self._emit_lumped_page("other", "Other", scope, other, plans, seen, top_level=top_level, entries=entries)
         return entries
 
     def _emit_namespace_hub(
@@ -1344,6 +1395,11 @@ class Generator:
         # (a class added/renamed, a function gained) must bust it even though the
         # namespace node itself is unchanged.
         tokens.extend(f"TOC{_DEP_FIELD_SEP}{stem}" for stem in plan.toctree)
+        if plan.file_path is not None:
+            # file.md.jinja renders `file.path | relpath` directly into the
+            # heading; a file moved to a different directory with the same
+            # basename and unchanged symbols must still bust the page.
+            tokens.append(f"FILEPATH{_DEP_FIELD_SEP}{plan.file_path}")
         if plan.group is not None:
             self._collect_group_tokens(plan.group, tokens)
         else:

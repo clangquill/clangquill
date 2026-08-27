@@ -548,9 +548,15 @@ def _rendered_files(
     index_text: str | None = None
     if memoize:
         # The index links the page *set*; its toctree depth/root ride in the
-        # render fingerprint, so the stem/label list is all that varies here.
+        # render fingerprint, so the stem/label/top_level list is all that
+        # varies here. top_level must be included: render_index filters on it,
+        # so a page set identical in stems/labels but differing in top_level
+        # would otherwise replay a stale index.
         index_key = hash_text(
-            render_fingerprint + fingerprint({"index": [[plan.stem, plan.label] for plan in plans]}),
+            render_fingerprint
+            + fingerprint(
+                {"index": [[plan.stem, plan.label, getattr(plan, "top_level", True)] for plan in plans]},
+            ),
         )
         index_text = cache.cached_page(index_stem, index_key)
     if index_text is None:
@@ -620,7 +626,7 @@ def _full_build(config: Config, base: Path, inputs: list[str], output_dir: Path)
             db_path.unlink(missing_ok=True)
 
     written = [f"{config.root_document}.md", *(f"{stem}.md" for stem in pages)]
-    deleted = _prune_stale(output_dir, written)
+    deleted = prune_stale(output_dir, written)
 
     return BuildResult(
         output_dir=output_dir,
@@ -950,7 +956,7 @@ def _apply_outputs(
     return sorted(written), sorted(deleted)
 
 
-def _prune_stale(output_dir: Path, kept: list[str]) -> list[str]:
+def prune_stale(output_dir: Path, kept: list[str]) -> list[str]:
     """Delete pages this run did not write, then record the new manifest.
 
     Only files listed in the *previous* manifest are removed, so hand-written
@@ -979,5 +985,6 @@ __all__ = [
     "BuildResult",
     "CompileCommandsError",
     "build",
+    "prune_stale",
     "resolve_compile_commands",
 ]

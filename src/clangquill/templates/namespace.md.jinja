@@ -1,5 +1,5 @@
 {% set comment = gen.comment(symbol) %}
-{{ "#" * level }} {{ gen.label(symbol) }} `{{ symbol.qualified_name or "(global namespace)" }}`
+{{ level | heading }} {{ gen.label(symbol) }} `{{ symbol.qualified_name or "(global namespace)" }}`
 
 {{ render_comment(comment) }}
 {% for child in gen.children(symbol) %}

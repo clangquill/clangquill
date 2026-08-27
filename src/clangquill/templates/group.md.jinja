@@ -1,6 +1,6 @@
 {% set members = gen.group_symbols(group) %}
 {% set subs = gen.subgroups(group) %}
-{{ "#" * level }} {{ group.title or group.id }}
+{{ level | heading }} {{ group.title or group.id }}
 
 {% if group.brief %}
 {{ group.brief }}

@@ -1,6 +1,6 @@
 {% import "partials/signature.md.jinja" as sig %}
 {% set comment = gen.comment(symbol) %}
-{{ "#" * level }} {{ gen.label(symbol) }} `{{ symbol.qualified_name }}`
+{{ level | heading }} {{ gen.label(symbol) }} `{{ symbol.qualified_name }}`
 
 {% set bases = gen.bases(symbol) %}
 {% if bases %}

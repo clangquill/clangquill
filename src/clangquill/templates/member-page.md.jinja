@@ -1,4 +1,4 @@
-{{ "#" * level }} {{ title }}
+{{ level | heading }} {{ title }}
 {% for sym in symbols %}
 
 {{ gen.render_symbol(sym, level=level + 1) }}
