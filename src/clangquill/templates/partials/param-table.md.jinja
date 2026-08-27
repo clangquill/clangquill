@@ -1,13 +1,18 @@
 {# Sphinx field list for a CommentModel. Rendered inside a cpp:function (or
    similar) directive body, the C++ domain turns these into the parameter,
    template-parameter, return and exception tables of the symbol. #}
+{# A `\param[out]` direction has no slot of its own in a Sphinx field list, so
+   it leads the description the way Doxygen's own output presents it. #}
+{% macro direction_prefix(param) -%}
+{% if param.direction %}**[{{ param.direction }}]** {% endif %}
+{%- endmacro %}
 {% macro fields(model) -%}
 {% if model is not none %}
 {% for tparam in model.tparams %}
-:tparam {{ tparam.name }}: {{ tparam.description }}
+:tparam {{ tparam.name }}: {{ direction_prefix(tparam) }}{{ tparam.description }}
 {% endfor %}
 {% for param in model.params %}
-:param {{ param.name }}: {{ param.description }}
+:param {{ param.name }}: {{ direction_prefix(param) }}{{ param.description }}
 {% endfor %}
 {% if model.returns %}
 :returns: {{ model.returns }}

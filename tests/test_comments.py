@@ -8,6 +8,7 @@ from clangquill import comments
 from clangquill.comments import (
     OVERRIDE_ENV,
     CommentModel,
+    CommentParam,
     available_parsers,
     doxygen_parse,
     get_parser,
@@ -112,6 +113,139 @@ def test_doxygen_parse_blank_line_ends_a_paragraph_command() -> None:
         "This paragraph is the detailed description.",
         "A closing paragraph documents the function.",
     ]
+
+
+DIRECTED = """
+/**
+ * @brief Fills a buffer.
+ * @param[out] result where the answer is written
+ * @param[in] value the input value
+ * @param[in,out] scratch reused working storage
+ * @param plain no direction attribute
+ * @tparam[in] T symmetric with param
+ * @unknown[bracket] keeps its full spelling
+ */
+"""
+
+
+def test_doxygen_parse_reads_param_directions() -> None:
+    model = doxygen_parse(DIRECTED)
+    assert [(p.name, p.direction) for p in model.params] == [
+        ("result", "out"),
+        ("value", "in"),
+        ("scratch", "in,out"),
+        ("plain", ""),
+    ]
+    assert model.params[0].description == "where the answer is written"
+    assert [(p.name, p.direction) for p in model.tparams] == [("T", "in")]
+    # A bracket suffix that is not a direction stays part of the command name.
+    assert model.custom == {"unknown[bracket]": ["keeps its full spelling"]}
+
+
+def test_model_from_fields_splits_the_direction_off_the_arg() -> None:
+    # The C++ projection has one slot for a field argument, so a directed
+    # parameter arrives as "[out] result" and is split back apart here.
+    model = model_from_fields(
+        [
+            ("param", "[out] result", "the answer"),
+            ("param", "[in,out] scratch", "working storage"),
+            ("param", "plain", "no direction"),
+            ("tparam", "[in] T", "a type"),
+        ],
+    )
+    assert [(p.name, p.direction, p.description) for p in model.params] == [
+        ("result", "out", "the answer"),
+        ("scratch", "in,out", "working storage"),
+        ("plain", "", "no direction"),
+    ]
+    assert model.tparams == [CommentParam("T", "a type", "in")]
+
+
+VERBATIM = """
+/**
+ * Squares a value.
+ * @code{.py}
+ *   y = square(3)
+ *   if y:
+ *       print(y)
+ * @endcode
+ * Prose written after the block stays after it.
+ * @verbatim
+ *   +---+
+ *   | x |
+ *   +---+
+ * @endverbatim
+ */
+"""
+
+
+def test_doxygen_parse_keeps_verbatim_blocks_intact() -> None:
+    # Since the output is Markdown, a code example's newlines and relative
+    # indentation are load-bearing; collapsing them mangles every example.
+    model = doxygen_parse(VERBATIM)
+    assert model.brief == "Squares a value."
+    assert model.detail == [
+        "```py\ny = square(3)\nif y:\n    print(y)\n```",
+        "Prose written after the block stays after it.",
+        "```\n+---+\n| x |\n+---+\n```",
+    ]
+
+
+def test_doxygen_parse_fences_around_nested_backticks() -> None:
+    model = doxygen_parse("/// @code\n/// ``` not the end\n/// @endcode\n")
+    assert model.detail == ["````cpp\n``` not the end\n````"]
+
+
+def test_doxygen_parse_leading_block_is_not_the_brief() -> None:
+    # A code example is never a one-line summary, so the brief is the first
+    # prose paragraph and the block keeps its place in the detail.
+    model = doxygen_parse("/// @code\n/// x = 1\n/// @endcode\n/// The summary.\n")
+    assert model.brief == "The summary."
+    assert model.detail == ["```cpp\nx = 1\n```"]
+
+
+INLINE = """
+/// @brief A wrapped sentence about
+/// @ref Widget stays one sentence.
+///
+/// Emphasis: @b bold, @e italic, @c code and @p x. See
+/// @ref divide "the divide function" too.
+/// An address like user@b.example is left alone, and @c foo. keeps its stop.
+"""
+
+BRACKETED = """
+/// @brief Punctuation stays outside the markup.
+///
+/// The input set (see @ref parse_files) is fixed, as are @p paths) and @p usr:.
+/// A target that is not a C++ name, like @ref some-page, is not a role at all.
+"""
+
+
+def test_doxygen_parse_renders_inline_markup() -> None:
+    model = doxygen_parse(INLINE)
+    # A wrapped line beginning with @ref is prose, not a block command: the
+    # sentence stays whole and nothing lands in custom["ref"].
+    assert model.brief == "A wrapped sentence about {cpp:any}`Widget` stays one sentence."
+    assert "ref" not in model.custom
+    expected = (
+        "Emphasis: **bold**, *italic*, `code` and `x`. "
+        "See {cpp:any}`the divide function <divide>` too. "
+        "An address like user@b.example is left alone, and `foo`. keeps its stop."
+    )
+    assert model.detail == [expected]
+
+
+def test_doxygen_parse_keeps_closing_punctuation_out_of_markup() -> None:
+    # `(see @ref parse_files)` used to carry the `)` into the role, producing an
+    # "Unparseable C++ cross-reference" that fails a warnings-as-errors docs
+    # build. A target that is not a C++ name degrades to a code span for the
+    # same reason.
+    expected = (
+        "The input set (see {cpp:any}`parse_files`) is fixed, "
+        "as are `paths`) and `usr`:. "
+        "A target that is not a C++ name, like `some-page`, is not a role at all."
+    )
+    assert doxygen_parse(BRACKETED).detail == [expected]
 
 
 def test_model_from_fields_round_trips() -> None:

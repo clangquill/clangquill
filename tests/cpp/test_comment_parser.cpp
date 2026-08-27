@@ -264,6 +264,35 @@ TEST_CASE("a blank line ends a paragraph command", "[comments]") {
   CHECK(closing);
 }
 
+TEST_CASE("a param direction survives both parse paths", "[comments]") {
+  // `comment_fields` carries the direction in the arg column, in the bracketed
+  // form Doxygen writes it. The raw path used to take `param[out]` as the whole
+  // command name, so the entry never reached `params` at all; the parsed path
+  // dropped the direction silently.
+  auto check = [](const std::vector<Field>& fs) {
+    REQUIRE(field(fs, "param", "[out] result") != nullptr);
+    CHECK(field(fs, "param", "[out] result")->value ==
+          "where the answer is written");
+    CHECK(field(fs, "param", "[in] value") != nullptr);
+    CHECK(field(fs, "param", "[in,out] scratch") != nullptr);
+    // An undirected parameter is spelled exactly as before.
+    const Field* plain = field(fs, "param", "plain");
+    REQUIRE(plain != nullptr);
+    CHECK(plain->value == "a parameter with no direction attribute");
+  };
+
+  auto parsed = parse_fixture("doxygen.hpp");
+  const auto* fill = find(parsed, "doc::fill");
+  REQUIRE(fill != nullptr);
+  check(fields_of(parsed, fill->usr));
+
+  // `\ingroup` forces the raw path for this one.
+  auto raw = parse_fixture("structural.hpp");
+  const auto* directed = find(raw, "directed_helper");
+  REQUIRE(directed != nullptr);
+  check(fields_of(raw, directed->usr));
+}
+
 TEST_CASE("doxygen parser covers the common commands", "[comments]") {
   auto m = parse_fixture("doxygen.hpp");
   const auto* divide = find(m, "doc::divide");
@@ -352,6 +381,103 @@ TEST_CASE("doxygen parser preserves verbatim block text", "[comments]") {
     }
   }
   CHECK(found_code);
+}
+
+TEST_CASE("a verbatim block keeps its lines, language and place",
+          "[comments]") {
+  // Collapsing the block through normalize_ws turned every code example into
+  // one line of mangled prose. Since the output is Markdown, its newlines and
+  // relative indentation are load-bearing.
+  auto expect_block = [](const std::vector<Field>& fs, const std::string& fence,
+                         const std::string& indented) {
+    const Field* block = nullptr;
+    int prose_after = 0;
+    for (const auto& f : fs) {
+      if (f.name != "detail") continue;
+      if (block == nullptr && f.value.rfind(fence, 0) == 0) block = &f;
+      else if (block != nullptr &&
+               f.value.find("stays after it") != std::string::npos) {
+        ++prose_after;
+      }
+    }
+    REQUIRE(block != nullptr);
+    // Line structure survives, and the marker indent is removed while the
+    // example's own indentation is kept.
+    CHECK(block->value.find('\n') != std::string::npos);
+    CHECK(block->value.find(indented) != std::string::npos);
+    CHECK(block->value.substr(block->value.size() - 3) == "```");
+    // ... and the block stays where it was written, before the closing prose.
+    CHECK(prose_after == 1);
+  };
+
+  // Parsed path: `@code` with no attribute in a C++ header.
+  auto parsed = parse_fixture("doxygen.hpp");
+  const auto* sq = find(parsed, "doc::square");
+  REQUIRE(sq != nullptr);
+  expect_block(fields_of(parsed, sq->usr), "```cpp\n", "\n  return y;");
+
+  // Raw path (forced by `\ingroup`): `\code{.py}` carries its language.
+  auto raw = parse_fixture("structural.hpp");
+  const auto* coded = find(raw, "coded_helper");
+  REQUIRE(coded != nullptr);
+  expect_block(fields_of(raw, coded->usr), "```py\n", "\n    print(y)");
+}
+
+TEST_CASE("inline markup and HTML reach the reader", "[comments]") {
+  // Inline commands used to survive as literal backslash text (and a `\ref` at
+  // the start of a wrapped line was mistaken for a block command, swallowing
+  // the rest of the paragraph); HTML tags were deleted outright, taking their
+  // list and emphasis structure with them.
+  auto prose_of = [](const std::vector<Field>& fs) {
+    std::string all;
+    for (const auto& f : fs) {
+      if (f.name == "brief" || f.name == "detail") all += f.value + '\n';
+    }
+    return all;
+  };
+  auto check_markup = [](const std::string& prose) {
+    CHECK(prose.find("**bold**") != std::string::npos);
+    CHECK(prose.find("*italic*") != std::string::npos);
+    CHECK(prose.find("`code`") != std::string::npos);
+    CHECK(prose.find("<b>tags</b>") != std::string::npos);
+    CHECK(prose.find("<li>list items") != std::string::npos);
+    // No inline command may reach the output as literal backslash text.
+    CHECK(prose.find("\\b ") == std::string::npos);
+    CHECK(prose.find("\\c ") == std::string::npos);
+  };
+
+  auto parsed = parse_fixture("doxygen.hpp");
+  const auto* emphasize = find(parsed, "doc::emphasize");
+  REQUIRE(emphasize != nullptr);
+  std::string parsed_prose = prose_of(fields_of(parsed, emphasize->usr));
+  check_markup(parsed_prose);
+  // `\ref target "a title"` becomes a role carrying that title.
+  CHECK(parsed_prose.find("{cpp:any}`the divide function <divide>`") !=
+        std::string::npos);
+
+  auto raw = parse_fixture("structural.hpp");
+  const auto* helper = find(raw, "inline_helper");
+  REQUIRE(helper != nullptr);
+  auto fs = fields_of(raw, helper->usr);
+  check_markup(prose_of(fs));
+
+  // A wrapped line beginning with `\ref` is prose, not a block command: the
+  // sentence stays whole and nothing lands in custom["ref"].
+  const Field* brief = field(fs, "brief");
+  REQUIRE(brief != nullptr);
+  CHECK(brief->value ==
+        "A wrapped sentence about {cpp:any}`Widget` stays one sentence.");
+  CHECK(field(fs, "ref") == nullptr);
+
+  // Punctuation closing the clause is not part of the decorated word. Carrying
+  // a `)` into a role makes it an "Unparseable C++ cross-reference", which a
+  // warnings-as-errors docs build turns into a hard failure -- and a target
+  // that names no C++ entity degrades to a code span for the same reason.
+  std::string prose = prose_of(fs);
+  CHECK(prose.find("(see {cpp:any}`Widget`)") != std::string::npos);
+  CHECK(prose.find("`x`:") != std::string::npos);
+  CHECK(prose.find("`some-page`") != std::string::npos);
+  CHECK(prose.find("{cpp:any}`some-page`") == std::string::npos);
 }
 
 TEST_CASE("parsed comments store a format and JSON projection", "[comments]") {
