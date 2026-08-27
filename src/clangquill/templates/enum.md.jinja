@@ -7,7 +7,7 @@
 {{ render_comment(comment) }}
 ```
 {% for enumerator in gen.enumerators(symbol) %}
-{% set ec = store.comment(enumerator.usr) %}
+{% set ec = gen.enumerator_comment(enumerator) %}
 
 ```{cpp:enumerator} {{ symbol.qualified_name }}::{{ enumerator.name }}
 {% if ec %}
