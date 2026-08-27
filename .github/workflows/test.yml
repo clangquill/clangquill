@@ -165,7 +165,7 @@ jobs:
     # Every job above builds with libclang linked, so the `not have_libclang()`
     # branches — the Sphinx extension's placeholder page, the CLI's clean-exit
     # message, the `have_libclang()`/`libclang_version()` stub — were dead code
-    # in CI (issue #226). No libclang-dev is installed here on purpose: a build
+    # in CI (issue 226). No libclang-dev is installed here on purpose: a build
     # that silently found some other libclang would defeat the point.
     runs-on: ubuntu-24.04
     name: pytest (no libclang)

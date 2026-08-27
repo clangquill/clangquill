@@ -14,16 +14,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   ctest:
-    name: C++ unit tests (libclang ${{ matrix.with_libclang }})
+    name: C++ unit tests (libclang ${{ matrix.with_libclang && 'ON' || 'OFF' }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        # ON is the real, day-to-day suite. OFF builds the same Catch2 binary
-        # with CLANGQUILL_HAVE_LIBCLANG undefined, which swaps the parser/m7/
-        # comment-parser suites for their `[!mayfail]` stub TEST_CASEs — that
-        # branch was otherwise never compiled, let alone run, in CI (issue #226).
-        with_libclang: ['ON', 'OFF']
+        # true is the real, day-to-day suite. false builds the same Catch2
+        # binary with CLANGQUILL_HAVE_LIBCLANG undefined, which swaps the
+        # parser/m7/comment-parser suites for their `[!mayfail]` stub
+        # TEST_CASEs — that branch was otherwise never compiled, let alone
+        # run, in CI (issue 226). Booleans rather than the CMake ON/OFF
+        # spelling: YAML 1.1 (which this workflow's parser follows) reads
+        # unquoted on/off as booleans anyway, and yamlfix strips a quoted
+        # 'ON'/'OFF' back down to the bare, misparsed form.
+        with_libclang: [true, false]
     env:
           # sqlite.org 403s vcpkg's default downloader, so distfiles go through
           # a browser-User-Agent script (SHA512 is still checked by vcpkg).
@@ -45,7 +49,7 @@ jobs:
             # discovered libclang there would silently turn it back into a
             # duplicate of the ON leg instead of exercising the stub backend.
       - name: Install libclang
-        if: matrix.with_libclang == 'ON'
+        if: matrix.with_libclang
         run: sudo apt-get install -y --no-install-recommends libclang-dev
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
@@ -61,7 +65,7 @@ jobs:
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
-          -DCLANGQUILL_WITH_LIBCLANG=${{ matrix.with_libclang }}
+          -DCLANGQUILL_WITH_LIBCLANG=${{ matrix.with_libclang && 'ON' || 'OFF' }}
           -DCLANGQUILL_BUILD_TESTS=ON
           -DCMAKE_BUILD_TYPE=Debug
           -DCMAKE_CXX_FLAGS=--coverage
@@ -83,7 +87,7 @@ jobs:
             # libclang-gated line as uncovered, duplicating the ON leg's
             # numbers under a less accurate build.
       - name: Collect coverage
-        if: matrix.with_libclang == 'ON'
+        if: matrix.with_libclang
         run: >-
           gcovr --root . build --filter 'src/cpp/'
           --gcov-ignore-parse-errors=negative_hits.warn_once_per_file
@@ -92,7 +96,7 @@ jobs:
             # Same token guard as the pytest workflow: no CODECOV_TOKEN on a
             # fork PR (or where the secret is unset), and codecov rejects a
             # tokenless upload.
-        if: ${{ matrix.with_libclang == 'ON' && env.CODECOV_TOKEN != '' }}
+        if: ${{ matrix.with_libclang && env.CODECOV_TOKEN != '' }}
         uses: codecov/codecov-action@v7.0.0
         with:
           files: cpp-coverage.xml
