@@ -175,22 +175,45 @@ struct InlineMarkup {
   const char* name;
   const char* prefix;
   const char* suffix;
+  bool xref;  ///< Target must be a C++ name; see is_cpp_name.
 };
 
 const InlineMarkup* inline_markup(const std::string& name) {
   static const InlineMarkup kMarkup[] = {
-      {"c", "`", "`"},         {"p", "`", "`"},
-      {"b", "**", "**"},       {"e", "*", "*"},
-      {"em", "*", "*"},        {"a", "*", "*"},
-      {"ref", "{cpp:any}`", "`"}, {"link", "{cpp:any}`", "`"},
+      {"c", "`", "`", false},          {"p", "`", "`", false},
+      {"b", "**", "**", false},        {"e", "*", "*", false},
+      {"em", "*", "*", false},         {"a", "*", "*", false},
+      {"ref", "{cpp:any}`", "`", true},
+      {"link", "{cpp:any}`", "`", true},
       // Takes no argument: a hard line break, which survives neither
       // normalize_ws nor a Sphinx field list, so it is simply dropped.
-      {"n", nullptr, nullptr},
+      {"n", nullptr, nullptr, false},
   };
   for (const InlineMarkup& m : kMarkup) {
     if (name == m.name) return &m;
   }
   return nullptr;
+}
+
+// True for a plain (optionally qualified) C++ name -- what the C++ domain can
+// actually resolve. A `{cpp:any}` role over anything else is an "Unparseable
+// C++ cross-reference", which a warnings-as-errors docs build turns into a hard
+// failure, so such a target degrades to a code span instead.
+bool is_cpp_name(const std::string& s) {
+  std::size_t i = 0;
+  while (true) {
+    if (i >= s.size() || (std::isalpha(static_cast<unsigned char>(s[i])) == 0 &&
+                          s[i] != '_')) {
+      return false;
+    }
+    while (i < s.size() && (std::isalnum(static_cast<unsigned char>(s[i])) != 0 ||
+                            s[i] == '_')) {
+      ++i;
+    }
+    if (i == s.size()) return true;
+    if (s.compare(i, 2, "::") != 0) return false;
+    i += 2;
+  }
 }
 
 bool is_inline_command(const std::string& name) {
@@ -205,7 +228,11 @@ bool is_inline_command(const std::string& name) {
 // a `\ref target "a title"` becomes a role with that title. The command has to
 // start a word, so an address like `user@b.example` is left alone.
 std::string render_inline_markup(const std::string& text) {
-  static const std::string kSentenceEnd = ".,;:!?";
+  // Punctuation that closes the sentence or the clause around the decorated
+  // word rather than belonging to it. Doxygen prose is full of
+  // `(see \ref parse_files)`, where the `)` would otherwise be carried into the
+  // markup -- and into a cross-reference target, where it does not parse.
+  static const std::string kTrailing = ".,;:!?()[]{}";
   std::string out;
   std::size_t i = 0;
   while (i < text.size()) {
@@ -229,7 +256,7 @@ std::string render_inline_markup(const std::string& text) {
     if (arg_end == std::string::npos) arg_end = text.size();
     std::string arg = text.substr(word_end + 1, arg_end - word_end - 1);
     std::string tail;
-    while (!arg.empty() && kSentenceEnd.find(arg.back()) != std::string::npos) {
+    while (!arg.empty() && kTrailing.find(arg.back()) != std::string::npos) {
       tail.insert(tail.begin(), arg.back());
       arg.pop_back();
     }
@@ -237,20 +264,25 @@ std::string render_inline_markup(const std::string& text) {
       out += text[i++];
       continue;
     }
-    // `\ref target "a title"` -- Doxygen's way of writing the link text. The
-    // role spells the same thing as ``title <target>``.
+    // A cross-reference the C++ domain could not parse fails the docs build, so
+    // one that does not name a C++ entity becomes a plain code span.
+    const bool as_xref = markup->xref && is_cpp_name(arg);
     std::size_t next = arg_end;
-    if (tail.empty() && next + 1 < text.size() && text[next] == ' ' &&
-        text[next + 1] == '"') {
-      std::size_t close = text.find('"', next + 2);
-      if (close != std::string::npos) {
-        arg = text.substr(next + 2, close - next - 2) + " <" + arg + ">";
-        next = close + 1;
+    if (as_xref) {
+      // `\ref target "a title"` -- Doxygen's way of writing the link text. The
+      // role spells the same thing as ``title <target>``.
+      if (tail.empty() && next + 1 < text.size() && text[next] == ' ' &&
+          text[next + 1] == '"') {
+        std::size_t close = text.find('"', next + 2);
+        if (close != std::string::npos) {
+          arg = text.substr(next + 2, close - next - 2) + " <" + arg + ">";
+          next = close + 1;
+        }
       }
     }
-    out += markup->prefix;
+    out += markup->xref && !as_xref ? "`" : markup->prefix;
     out += arg;
-    out += markup->suffix;
+    out += markup->xref && !as_xref ? "`" : markup->suffix;
     out += tail;
     i = next;
   }

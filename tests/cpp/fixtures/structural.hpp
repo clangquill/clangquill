@@ -155,5 +155,8 @@ int coded_helper(int x);
   *
   * Emphasis reaches the reader: \b bold, \e italic, \c code and \p x. HTML
   * such as <b>tags</b> and <ul><li>list items</li></ul> survives too.
+  *
+  * Closing punctuation stays outside the markup (see \ref Widget), as does the
+  * colon after \p x: and a target like \ref some-page that names no C++ entity.
   */
 int inline_helper(int x);

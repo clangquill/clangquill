@@ -163,17 +163,24 @@ _VERBATIM_CMDS = frozenset({"code", "verbatim"})
 # sentence rather than opening a block, mapped to the MyST that says the same
 # thing. ``@n`` (a hard line break) has no equivalent that survives whitespace
 # normalization, so it is dropped.
-_INLINE_MARKUP: dict[str, tuple[str, str]] = {
-    "c": ("`", "`"),
-    "p": ("`", "`"),
-    "b": ("**", "**"),
-    "e": ("*", "*"),
-    "em": ("*", "*"),
-    "a": ("*", "*"),
-    "ref": ("{cpp:any}`", "`"),
-    "link": ("{cpp:any}`", "`"),
-    "n": ("", ""),
+# Values are (prefix, suffix, is_cross_reference).
+_INLINE_MARKUP: dict[str, tuple[str, str, bool]] = {
+    "c": ("`", "`", False),
+    "p": ("`", "`", False),
+    "b": ("**", "**", False),
+    "e": ("*", "*", False),
+    "em": ("*", "*", False),
+    "a": ("*", "*", False),
+    "ref": ("{cpp:any}`", "`", True),
+    "link": ("{cpp:any}`", "`", True),
+    "n": ("", "", False),
 }
+
+# A plain (optionally qualified) C++ name -- what the C++ domain can actually
+# resolve. A ``{cpp:any}`` role over anything else is an "Unparseable C++
+# cross-reference", which a warnings-as-errors docs build turns into a hard
+# failure, so such a target degrades to a code span instead.
+_CPP_NAME_RE = re.compile(r"^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$")
 
 # A command and the word it decorates, where the command starts a word (so an
 # address like ``user@b.example`` is left alone). The optional quoted string is
@@ -182,8 +189,11 @@ _INLINE_RE = re.compile(
     r"""(?<![^\s(\[{"'])[@\\](?P<cmd>\w+)[ ](?P<arg>\S+)(?:[ ]"(?P<title>[^"]*)")?""",
 )
 
-# Punctuation that ends a sentence rather than belonging to the decorated word.
-_SENTENCE_END = ".,;:!?"
+# Punctuation that closes the sentence or the clause around the decorated word
+# rather than belonging to it. Doxygen prose is full of ``(see @ref target)``,
+# where the ``)`` would otherwise be carried into the markup -- and into a
+# cross-reference target, where it does not parse.
+_TRAILING = ".,;:!?()[]{}"
 
 
 def _is_inline_command(name: str) -> bool:
@@ -203,19 +213,25 @@ def _render_inline_markup(text: str) -> str:
         markup = _INLINE_MARKUP.get(match["cmd"].lower())
         if markup is None:
             return match[0]
-        prefix, suffix = markup
+        prefix, suffix, is_xref = markup
         if not prefix:
             return ""
         arg, title = match["arg"], match["title"]
         tail = ""
-        while arg and arg[-1] in _SENTENCE_END:
+        while arg and arg[-1] in _TRAILING:
             arg, tail = arg[:-1], arg[-1] + tail
         if not arg:
             return match[0]
-        if title is not None and not tail:
+        # A cross-reference the C++ domain could not parse fails the docs build,
+        # so one that does not name a C++ entity becomes a plain code span. Its
+        # quoted title, if any, stays where it was written.
+        if is_xref and not _CPP_NAME_RE.match(arg):
+            kept_title = "" if title is None else ' "' + title + '"'
+            return f"`{arg}`{tail}{kept_title}"
+        if title is not None:
+            if tail:
+                return match[0]
             arg = f"{title} <{arg}>"
-        elif title is not None:
-            return match[0]
         return f"{prefix}{arg}{suffix}{tail}"
 
     return _INLINE_RE.sub(replace, text)

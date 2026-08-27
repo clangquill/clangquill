@@ -468,6 +468,16 @@ TEST_CASE("inline markup and HTML reach the reader", "[comments]") {
   CHECK(brief->value ==
         "A wrapped sentence about {cpp:any}`Widget` stays one sentence.");
   CHECK(field(fs, "ref") == nullptr);
+
+  // Punctuation closing the clause is not part of the decorated word. Carrying
+  // a `)` into a role makes it an "Unparseable C++ cross-reference", which a
+  // warnings-as-errors docs build turns into a hard failure -- and a target
+  // that names no C++ entity degrades to a code span for the same reason.
+  std::string prose = prose_of(fs);
+  CHECK(prose.find("(see {cpp:any}`Widget`)") != std::string::npos);
+  CHECK(prose.find("`x`:") != std::string::npos);
+  CHECK(prose.find("`some-page`") != std::string::npos);
+  CHECK(prose.find("{cpp:any}`some-page`") == std::string::npos);
 }
 
 TEST_CASE("parsed comments store a format and JSON projection", "[comments]") {

@@ -213,6 +213,13 @@ INLINE = """
 /// An address like user@b.example is left alone, and @c foo. keeps its stop.
 """
 
+BRACKETED = """
+/// @brief Punctuation stays outside the markup.
+///
+/// The input set (see @ref parse_files) is fixed, as are @p paths) and @p usr:.
+/// A target that is not a C++ name, like @ref some-page, is not a role at all.
+"""
+
 
 def test_doxygen_parse_renders_inline_markup() -> None:
     model = doxygen_parse(INLINE)
@@ -226,6 +233,19 @@ def test_doxygen_parse_renders_inline_markup() -> None:
         "An address like user@b.example is left alone, and `foo`. keeps its stop."
     )
     assert model.detail == [expected]
+
+
+def test_doxygen_parse_keeps_closing_punctuation_out_of_markup() -> None:
+    # `(see @ref parse_files)` used to carry the `)` into the role, producing an
+    # "Unparseable C++ cross-reference" that fails a warnings-as-errors docs
+    # build. A target that is not a C++ name degrades to a code span for the
+    # same reason.
+    expected = (
+        "The input set (see {cpp:any}`parse_files`) is fixed, "
+        "as are `paths`) and `usr`:. "
+        "A target that is not a C++ name, like `some-page`, is not a role at all."
+    )
+    assert doxygen_parse(BRACKETED).detail == [expected]
 
 
 def test_model_from_fields_round_trips() -> None:
