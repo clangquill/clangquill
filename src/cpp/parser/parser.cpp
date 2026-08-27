@@ -149,6 +149,21 @@ std::unordered_set<std::string> seen_from(const model::ParsedModule& out) {
   return seen;
 }
 
+// A per-TU file list plus the set of paths already in it. The set is what keeps
+// appends O(1): a template-heavy single-file TU reaches thousands of transitive
+// includes, and scanning the list for each of them is quadratic in that count.
+struct TuFileSink {
+  // Seeded from the list it wraps, so the dedup holds for a caller-supplied
+  // list that already has entries as well as for the empty one every caller
+  // passes today.
+  explicit TuFileSink(std::vector<std::string>* out) : files(out) {
+    if (files != nullptr) seen.insert(files->begin(), files->end());
+  }
+
+  std::vector<std::string>* files;  // may be null
+  std::unordered_set<std::string> seen;
+};
+
 // Threaded through the inclusion visitor: the module the file rows land in, the
 // dedup set for those rows, an optional per-TU sink so a dependency can be
 // attributed to the input TU that pulled it in (single-file TUs only), and the
@@ -156,18 +171,16 @@ std::unordered_set<std::string> seen_from(const model::ParsedModule& out) {
 struct InclusionCtx {
   model::ParsedModule* out;
   std::unordered_set<std::string>* seen;
-  std::vector<std::string>* tu_files;  // may be null
-  const std::string* skip_path;        // may be null
+  TuFileSink* tu_files;          // may be null
+  const std::string* skip_path;  // may be null
 };
 
 // Appends `path` to a per-TU file list, skipping duplicates so a header included
 // many times within one TU is listed once.
-void note_tu_file(std::vector<std::string>* tu_files, const std::string& path) {
-  if (tu_files == nullptr) return;
-  for (const auto& f : *tu_files) {
-    if (f == path) return;
-  }
-  tu_files->push_back(path);
+void note_tu_file(TuFileSink* sink, const std::string& path) {
+  if (sink == nullptr || sink->files == nullptr) return;
+  if (!sink->seen.insert(path).second) return;
+  sink->files->push_back(path);
 }
 
 // libclang inclusion visitor: records every file pulled into the translation
@@ -719,10 +732,11 @@ bool Parser::parse_file(const std::string& path, model::ParsedModule& out,
 
   std::unordered_set<std::string> seen = seen_from(out);
   record_file(path, out, seen);
-  note_tu_file(tu_files, path);
+  TuFileSink sink(tu_files);
+  note_tu_file(&sink, path);
   // Track transitive #include dependencies so a header edit invalidates the
   // cached parse for every translation unit that pulled it in.
-  InclusionCtx ctx{&out, &seen, tu_files, nullptr};
+  InclusionCtx ctx{&out, &seen, &sink, nullptr};
   clang_getInclusions(tu, record_inclusion, &ctx);
   visit_translation_unit(clang_getTranslationUnitCursor(tu), path, out);
 
