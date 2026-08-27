@@ -375,6 +375,8 @@ class BuildCache:
         parse_fingerprint: str,
         files: Mapping[str, tuple[str, int]],
         tu_deps: Mapping[str, Iterable[str]] | None = None,
+        *,
+        parse_started_ns: int | None = None,
     ) -> None:
         """Persist the fingerprint, per-file snapshot and per-TU map of a parse.
 
@@ -385,6 +387,9 @@ class BuildCache:
         :meth:`parse_is_current`; a path that cannot be stat'd records ``NULL``
         mtime and always falls back to the hash comparison.
 
+        ``parse_started_ns`` is when the parse that produced ``files`` began;
+        see :meth:`_fast_path_mtime` for why it is needed.
+
         ``tu_deps`` maps each input to the files its translation unit pulled in;
         without it the per-TU map is left empty and future rebuilds fall back to
         a full re-parse on any change.
@@ -393,7 +398,7 @@ class BuildCache:
         self._con.execute("DELETE FROM inputs")
         self._con.executemany(
             "INSERT OR REPLACE INTO inputs(path, sha256, mtime_ns, size_bytes) VALUES(?, ?, ?, ?)",
-            [(path, sha, self._mtime_ns(path), size) for path, (sha, size) in files.items()],
+            [(path, sha, self._fast_path_mtime(path, parse_started_ns), size) for path, (sha, size) in files.items()],
         )
         self._con.execute("DELETE FROM tu_inputs")
         if tu_deps:
@@ -407,6 +412,8 @@ class BuildCache:
         self,
         tu_deps: Mapping[str, Iterable[str]],
         files: Mapping[str, tuple[str, int]],
+        *,
+        parse_started_ns: int | None = None,
     ) -> None:
         """Update the cache after re-parsing only some translation units.
 
@@ -416,13 +423,20 @@ class BuildCache:
         still referenced by any translation unit, so a dependency no input
         includes anymore is dropped. The parse fingerprint is unchanged (the
         input set/config did not move — only file contents did).
+
+        ``parse_started_ns`` is when the re-parse began; see
+        :meth:`_fast_path_mtime`.
         """
         self._write_tu_inputs(tu_deps)
         referenced = {row["dep_path"] for row in self._con.execute("SELECT dep_path FROM tu_inputs")}
         self._con.execute("DELETE FROM inputs")
         self._con.executemany(
             "INSERT OR REPLACE INTO inputs(path, sha256, mtime_ns, size_bytes) VALUES(?, ?, ?, ?)",
-            [(path, sha, self._mtime_ns(path), size) for path, (sha, size) in files.items() if path in referenced],
+            [
+                (path, sha, self._fast_path_mtime(path, parse_started_ns), size)
+                for path, (sha, size) in files.items()
+                if path in referenced
+            ],
         )
         # Advancing the parse invalidates the previous render in the same
         # transaction, so the noop shortcut can never trust a stale render.
@@ -486,6 +500,28 @@ class BuildCache:
             return Path(path).stat().st_mtime_ns
         except OSError:
             return None
+
+    @classmethod
+    def _fast_path_mtime(cls, path: str, parse_started_ns: int | None) -> int | None:
+        """Return the mtime to store for ``path``, or ``None`` to force re-hashing.
+
+        The hash paired with this stat was computed by the parser, which may
+        have read the file minutes ago on a large project. If the file has been
+        written since the parse began, this ``stat`` describes content the
+        stored hash never saw — and the next build's fast path would see
+        matching metadata, skip the hash, and miss the edit forever (a same-size
+        edit, common in C++ headers, defeats the size check too).
+
+        So the ``restat`` guard make and ninja use: anything touched at or after
+        the parse started records ``NULL`` metadata and is re-hashed next build.
+        The comparison assumes the filesystem's clock and :func:`time.time_ns`
+        agree; where they do not (a network mount running ahead), the cost is a
+        redundant hash, never a missed change.
+        """
+        mtime = cls._mtime_ns(path)
+        if mtime is None or parse_started_ns is None:
+            return mtime
+        return None if mtime >= parse_started_ns else mtime
 
     # -- output bookkeeping ---------------------------------------------------
 
