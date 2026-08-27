@@ -40,6 +40,7 @@ from __future__ import annotations
 import glob
 import json
 import shutil
+import sqlite3
 import tempfile
 import time
 from collections import Counter
@@ -52,7 +53,7 @@ from clangquill import _core
 from clangquill.cache import BuildCache, OutputRecord, ParseStatus, file_sha256, fingerprint, hash_text
 from clangquill.config import CONFIG_PREFIX
 from clangquill.generator import Generator
-from clangquill.store import Store
+from clangquill.store import Store, StoreVersionError
 
 if TYPE_CHECKING:
     from clangquill.config import Config
@@ -651,6 +652,54 @@ def _full_build(config: Config, base: Path, inputs: list[str], output_dir: Path)
     )
 
 
+def _parse_status(
+    cache: BuildCache,
+    config: Config,
+    parse_fp: str,
+    ir_path: Path,
+    log_path: Path | None,
+) -> ParseStatus:
+    """Decide how much of the cached parse this build may reuse.
+
+    On top of the cache's own verdict this rejects reuse when something outside
+    the input contents demands a fresh parse, and discards an IR that cannot be
+    read at all. Called before any parsing, so an unusable IR is already gone by
+    the time the build picks a path.
+    """
+    # No IR on disk yet means a full parse regardless of bookkeeping.
+    status = cache.parse_status(parse_fp) if ir_path.is_file() else ParseStatus(current=False)
+    if log_path is not None and not log_path.is_file():
+        # A configured log that is not on disk — relocated to a new path,
+        # deleted, or never written — has to be materialised, and only a
+        # parse produces its contents (diagnostics live in neither the IR
+        # nor the cache). Force one rather than nooping past it and leaving
+        # the configured path empty. Costs one re-parse per relocation.
+        status = ParseStatus(current=False)
+    if config.warnings_as_errors:
+        # A strict verdict has to cover every input, and only a full parse
+        # produces diagnostics for every input. A cached build has none at
+        # all, and an incremental one reports only the translation units it
+        # re-parsed — so a warning in an untouched header would go unseen
+        # and the build would pass while the tree is dirty. Force the full
+        # parse rather than quietly narrowing what "clean" means. This is
+        # why strict mode costs a full parse every run; leave it off for
+        # the edit-rebuild loop and turn it on in CI.
+        status = ParseStatus(current=False)
+    if (status.current or status.stale_inputs is not None) and not _ir_is_readable(ir_path):
+        # Both remaining paths read the cached IR: the noop shortcut renders
+        # from it, the partial re-parse writes into a copy of it. A truncated
+        # file (killed build, full disk) or one left by an incompatible schema
+        # version would fail every later build with a raw sqlite3 traceback
+        # until the user deleted the cache directory by hand. Discard it and pay
+        # for one full parse instead — the same recovery the bookkeeping
+        # database already performs. The rest of the cache is kept: it describes
+        # the pages on disk, which are still good, so only the pages the fresh
+        # parse actually changes are rewritten.
+        ir_path.unlink(missing_ok=True)
+        status = ParseStatus(current=False)
+    return status
+
+
 def _incremental_build(
     config: Config,
     base: Path,
@@ -667,25 +716,7 @@ def _incremental_build(
     log_path = _diagnostics_log_path(config, base)
 
     with BuildCache.open(cache_dir) as cache:
-        # No IR on disk yet means a full parse regardless of bookkeeping.
-        status = cache.parse_status(parse_fp) if ir_path.is_file() else ParseStatus(current=False)
-        if log_path is not None and not log_path.is_file():
-            # A configured log that is not on disk — relocated to a new path,
-            # deleted, or never written — has to be materialised, and only a
-            # parse produces its contents (diagnostics live in neither the IR
-            # nor the cache). Force one rather than nooping past it and leaving
-            # the configured path empty. Costs one re-parse per relocation.
-            status = ParseStatus(current=False)
-        if config.warnings_as_errors:
-            # A strict verdict has to cover every input, and only a full parse
-            # produces diagnostics for every input. A cached build has none at
-            # all, and an incremental one reports only the translation units it
-            # re-parsed — so a warning in an untouched header would go unseen
-            # and the build would pass while the tree is dirty. Force the full
-            # parse rather than quietly narrowing what "clean" means. This is
-            # why strict mode costs a full parse every run; leave it off for
-            # the edit-rebuild loop and turn it on in CI.
-            status = ParseStatus(current=False)
+        status = _parse_status(cache, config, parse_fp, ir_path, log_path)
         parsed = not status.current
         # Fully unchanged build: the parse came from cache (IR identical) and the
         # render config/templates are unchanged, so the output the last run wrote
@@ -811,6 +842,23 @@ def _noop_result(output_dir: Path, ir_path: Path, summary: dict[str, object] | N
         pages_written=[],
         pages_deleted=[],
     )
+
+
+def _ir_is_readable(ir_path: Path) -> bool:
+    """Whether the cached IR can still be opened and queried by this core.
+
+    ``False`` for a file that is not a database, is truncated, or carries a
+    schema version this build cannot read — the cases a rebuild has to recover
+    from rather than propagate. The row count is read on purpose: opening a
+    SQLite file and checking its ``meta`` table touches only the first pages, so
+    a file damaged past them would still look fine.
+    """
+    try:
+        with Store.open(ir_path) as store:
+            store.symbol_count()
+    except (sqlite3.DatabaseError, StoreVersionError, OSError):
+        return False
+    return True
 
 
 def _parse_into(inputs: list[str], ir_path: Path, options: _core.ParseOptions) -> _core.ParseResult:
