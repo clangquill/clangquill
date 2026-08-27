@@ -23,7 +23,7 @@ The field-name-to-front-end mapping is mechanical:
 | `defines` | `clangquill_defines` | `[]` | `-D` preprocessor definitions (`NAME` or `NAME=value`). |
 | `clang_resource_dir` | `clangquill_clang_resource_dir` | `None` | Clang resource directory (`-resource-dir`); `None` lets clang decide. |
 | `jobs` | `clangquill_jobs` | `0` | Number of threads used to parse translation units concurrently. `0` auto-detects the CPU count; `1` forces a serial parse. Has no effect on the generated output. |
-| `tu_batch` | `clangquill_tu_batch` | `0` | Number of input files grouped into one libclang translation unit. Grouping amortises the dominant parse cost — re-parsing the shared `#include` closure — across the batch, which makes cold builds several times faster. `0` picks a sensible batch size; `1` parses every input as its own fully isolated translation unit. Forced to `1` when `compile_commands` is set (per-file flags cannot share a unit). For self-contained headers the extracted IR is identical either way. Headers that are *not* self-contained (e.g. designed to be included only through an umbrella header) see the preprocessor state of the other files in their batch, which usually parses them *more* faithfully; which files those are is fixed by the input set — never by the order you list them in — but it does depend on this value, so set `1` if you need exact per-file isolation. |
+| `tu_batch` | `clangquill_tu_batch` | `0` | Number of input files grouped into one libclang translation unit. Grouping amortises the dominant parse cost — re-parsing the shared `#include` closure — across the batch, which makes cold builds several times faster. `0` picks a sensible batch size; `1` parses every input as its own fully isolated translation unit. With `compile_commands` set this is an upper bound rather than the batch size: a translation unit can only be given one compiler command, so inputs are grouped by the command the database answers with first — see [batching under a compile database](#batching-under-a-compile-database). For self-contained headers the extracted IR is identical either way. Headers that are *not* self-contained (e.g. designed to be included only through an umbrella header) see the preprocessor state of the other files in their batch, which usually parses them *more* faithfully; which files those are is fixed by the input set — never by the order you list them in — but it does depend on this value, so set `1` if you need exact per-file isolation. |
 
 ## Output
 
@@ -288,6 +288,33 @@ match this file.
 Generating a database that lists the headers themselves — as `docs/conf.py` in
 this repository does — is how to replace that guess with exact flags. It is an
 accuracy improvement, not a prerequisite.
+
+### Batching under a compile database
+
+Umbrella batching (`tu_batch`) parses several inputs as one translation unit so
+the shared `#include` closure is lexed once instead of once per input. One unit
+can only be handed one compiler command, so inputs are grouped by the command
+the database answers with, and only inputs that agree on it share a unit.
+
+On a CMake project the flag sets are per target, not per file, so the headers of
+one target normalise to one command and the whole target batches together — a
+handful of groups over thousands of headers. A header whose flags are genuinely
+unique is parsed on its own, exactly as `tu_batch = 1` would.
+
+The commands are compared after the adjustments described
+[below](#how-an-entrys-command-line-is-replayed) — without argv[0], without the
+source operand and without the flags that would write a file — so two headers
+that borrowed the same entry compare equal even though libclang interpolated it
+separately for each of them.
+
+Two consequences worth knowing:
+
+- Each header still gets its own "no compilation database entry" warning when it
+  borrowed its flags, whether or not it was the member the batch's command was
+  looked up for.
+- Headers that are not self-contained now see their batch-mates' preprocessor
+  state under a compile database too, the same way they already did without one.
+  `tu_batch = 1` remains the way to ask for exact per-file isolation.
 
 ### How an entry's command line is replayed
 
