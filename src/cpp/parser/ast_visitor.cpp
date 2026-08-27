@@ -1,10 +1,13 @@
 #include "parser/ast_visitor.hpp"
 
+#include <algorithm>
 #include <map>
 #include <optional>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "hash/content_hash.hpp"
 #include "parser/comment_parser.hpp"
@@ -877,13 +880,92 @@ unsigned token_line(CXTranslationUnit tu, CXToken token, bool end) {
   return line;
 }
 
+// Where a token starts, in 1-based line and column.
+struct TokenStart {
+  unsigned line = 0;
+  unsigned column = 0;
+};
+
+TokenStart token_start(CXTranslationUnit tu, CXToken token) {
+  TokenStart pos;
+  unsigned off = 0;
+  CXSourceRange extent = clang_getTokenExtent(tu, token);
+  clang_getSpellingLocation(clang_getRangeStart(extent), nullptr, &pos.line,
+                            &pos.column, &off);
+  return pos;
+}
+
+// A file's lines, for the two questions about the source text the token stream
+// cannot answer: whether a comment is the first thing on its line, and which
+// line below a comment block is the first that carries anything.
+class LineIndex {
+ public:
+  explicit LineIndex(std::string_view contents) {
+    std::size_t start = 0;
+    for (;;) {
+      std::size_t nl = contents.find('\n', start);
+      lines_.push_back(contents.substr(
+          start, nl == std::string_view::npos ? std::string_view::npos
+                                              : nl - start));
+      if (nl == std::string_view::npos) break;
+      start = nl + 1;
+    }
+  }
+
+  /// True when everything before @p column on @p line is whitespace.
+  bool starts_line(unsigned line, unsigned column) const {
+    if (column <= 1) return true;
+    std::string_view text = at(line);
+    const std::size_t upto = std::min<std::size_t>(column - 1, text.size());
+    return is_blank(text.substr(0, upto));
+  }
+
+  /// The first line at or below @p line that is not whitespace-only.
+  unsigned next_content_line(unsigned line) const {
+    while (line <= lines_.size() && is_blank(at(line))) ++line;
+    return line;
+  }
+
+ private:
+  std::string_view at(unsigned line) const {
+    return line >= 1 && line <= lines_.size() ? lines_[line - 1]
+                                              : std::string_view{};
+  }
+
+  static bool is_blank(std::string_view s) {
+    return s.find_first_not_of(" \t\r\f\v") == std::string_view::npos;
+  }
+
+  std::vector<std::string_view> lines_;
+};
+
+// True for a comment block Doxygen would read as documentation for whatever
+// follows it: one opening with a doc marker. A plain `//` or `/* */` block --
+// a `// TODO:`, a commented-out line, a license header -- documents nothing,
+// and publishing it as the documentation of the `#define` below also marks
+// that macro is_documented, which passes it through the documented-only filter
+// and onto a rendered page.
+//
+// The `<` variants (`///<`, `/**<`) are deliberately not markers here: those
+// document the *preceding* entity, so a trailing one must not be handed to the
+// next declaration down.
+bool is_doc_block(const std::string& block) {
+  for (std::string_view marker : {"///", "//!", "/**", "/*!"}) {
+    if (block.rfind(marker, 0) != 0) continue;
+    return block.size() == marker.size() || block[marker.size()] != '<';
+  }
+  return false;
+}
+
 // Tokenizes one source file and feeds free-floating comment blocks to the group
 // scanner so `\defgroup` definitions (and their following description lines)
 // become group rows. Consecutive line comments (`///`) tokenize separately, so
 // line-adjacent comment tokens are merged back into one block first.
 void scan_free_comments(CXTranslationUnit tu, CXFile file, VisitCtx& ctx) {
   std::size_t size = 0;
-  if (clang_getFileContents(tu, file, &size) == nullptr || size == 0) return;
+  const char* contents = clang_getFileContents(tu, file, &size);
+  if (contents == nullptr || size == 0) return;
+  const LineIndex lines{std::string_view(contents, size)};
   CXSourceLocation begin = clang_getLocationForOffset(tu, file, 0);
   CXSourceLocation end =
       clang_getLocationForOffset(tu, file, static_cast<unsigned>(size));
@@ -903,16 +985,26 @@ void scan_free_comments(CXTranslationUnit tu, CXFile file, VisitCtx& ctx) {
   auto flush = [&]() {
     if (block.empty()) return;
     scan_group_definitions(block, normalized_file, ctx);
-    // Record the block against the line it precedes, for macro doc lookup.
-    if (ctx.doc_above_line != nullptr) {
-      (*ctx.doc_above_line)[{file_name, last_line + 1}] = block;
+    // Record the block against the line it documents, for macro doc lookup --
+    // the first line below it that carries anything, since Doxygen attaches a
+    // block across the blank lines between it and the declaration it belongs
+    // to. Only a block written as documentation is attachable at all.
+    if (ctx.doc_above_line != nullptr && is_doc_block(block)) {
+      const unsigned documents = lines.next_content_line(last_line + 1);
+      (*ctx.doc_above_line)[{file_name, documents}] = block;
     }
     block.clear();
   };
   for (unsigned t = 0; t < count; ++t) {
     if (clang_getTokenKind(tokens[t]) != CXToken_Comment) continue;
-    unsigned start = token_line(tu, tokens[t], /*end=*/false);
-    if (!block.empty() && start > last_line + 1) flush();  // blank-line gap
+    TokenStart start = token_start(tu, tokens[t]);
+    // A block is a run of comment tokens on consecutive lines, each of them
+    // the first thing on its line. A comment trailing code (`#define A 1  //
+    // note`) is not a continuation of the block above: merging it moved the
+    // block's key past the very line it documents.
+    const bool continues = start.line <= last_line + 1 &&
+                           lines.starts_line(start.line, start.column);
+    if (!block.empty() && !continues) flush();
     if (!block.empty()) block += '\n';
     block += to_string(clang_getTokenSpelling(tu, tokens[t]));
     last_line = token_line(tu, tokens[t], /*end=*/true);

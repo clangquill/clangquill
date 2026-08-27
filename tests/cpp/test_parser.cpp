@@ -542,6 +542,68 @@ TEST_CASE("a documented forward declaration spanning lines is extracted",
   CHECK_FALSE(status->is_definition);
 }
 
+TEST_CASE("only a doc comment documents a macro", "[parser]") {
+  // libclang attaches no comment to a macro, so the token pre-scan recovers the
+  // block written above the `#define`. It used to hand over *any* comment
+  // block: a TODO, a commented-out line or a license header above a macro was
+  // published as its documentation and marked it is_documented.
+  const std::string dir = CLANGQUILL_FIXTURE_DIR;
+  const std::string header = dir + "/.macro_docs.hpp";
+  {
+    std::ofstream out(header);
+    out << "#pragma once\n"
+        << "// TODO: rethink this\n"
+        << "#define CQ_PLAIN 1\n"
+        << "\n"
+        << "/// Documented across a blank line.\n"
+        << "\n"
+        << "#define CQ_GAPPED 2\n"
+        << "\n"
+        << "/// Documented right above.\n"
+        << "#define CQ_FIRST 3  // a trailing remark\n"
+        << "#define CQ_SECOND 4\n";
+  }
+
+  parser::ParseOptions opts;
+  auto m = parser::parse_files({header}, opts);
+  std::filesystem::remove(header);
+
+  auto comment_of = [&](const std::string& name) -> std::string {
+    const auto* sym = find(m, name);
+    if (sym == nullptr) return "<missing>";
+    for (const auto& c : m.comments) {
+      if (c.symbol_usr == sym->usr) return c.text;
+    }
+    return {};
+  };
+
+  // A plain comment is not documentation, whatever it sits above.
+  const auto* plain = find(m, "CQ_PLAIN");
+  REQUIRE(plain != nullptr);
+  CHECK_FALSE(plain->is_documented);
+  CHECK(comment_of("CQ_PLAIN").empty());
+
+  // Doxygen attaches a doc block across the blank lines below it.
+  const auto* gapped = find(m, "CQ_GAPPED");
+  REQUIRE(gapped != nullptr);
+  CHECK(gapped->is_documented);
+  CHECK(comment_of("CQ_GAPPED").find("across a blank line") !=
+        std::string::npos);
+
+  // A comment trailing the `#define` is not part of the block above it: when
+  // it was merged in, the block's key moved one line down -- off CQ_FIRST and
+  // onto CQ_SECOND, which nobody documented.
+  const auto* first = find(m, "CQ_FIRST");
+  REQUIRE(first != nullptr);
+  CHECK(first->is_documented);
+  CHECK(comment_of("CQ_FIRST").find("right above") != std::string::npos);
+
+  const auto* second = find(m, "CQ_SECOND");
+  REQUIRE(second != nullptr);
+  CHECK_FALSE(second->is_documented);
+  CHECK(comment_of("CQ_SECOND").empty());
+}
+
 TEST_CASE("umbrella batching attributes dependencies per member exactly",
           "[parser]") {
   // m7.hpp is self-contained while shapes.hpp has no includes: inside one
