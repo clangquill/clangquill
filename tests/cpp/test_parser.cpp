@@ -125,6 +125,39 @@ TEST_CASE("parser reads enumerators with values", "[parser]") {
   CHECK(value_of("Blue") == 6);
 }
 
+TEST_CASE("declarations inside extern \"C\" reach the IR", "[parser]") {
+  // extern "C" { ... } is CXCursor_LinkageSpec, which map_kind has no case for
+  // and which visit() used to prune -- along with everything declared inside
+  // it -- because it is not a scope kind that drives explicit recursion.
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "clangquill-linkage-spec-test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  const fs::path header = dir / "capi.hpp";
+  std::ofstream(header) << "extern \"C\" {\n"
+                        << "/// Adds two numbers.\n"
+                        << "int c_add(int a, int b);\n"
+                        << "typedef struct c_point { int x; int y; } c_point;\n"
+                        << "}\n"
+                        << "extern \"C\" int c_single(int x);\n";
+
+  parser::ParseOptions opts;
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file(header.string(), mod));
+
+  const auto* add = find(mod, "c_add");
+  REQUIRE(add != nullptr);
+  CHECK(add->kind == model::SymbolKind::Function);
+  CHECK(add->is_documented);
+  CHECK(add->parent_usr.empty());  // declared at namespace scope, not nested
+
+  CHECK(find(mod, "c_point") != nullptr);
+  CHECK(find(mod, "c_single") != nullptr);
+
+  fs::remove_all(dir);
+}
+
 TEST_CASE("parser populates content and file hashes", "[parser]") {
   auto m = parse_fixture("shapes.hpp");
   REQUIRE(m.files.size() == 1);

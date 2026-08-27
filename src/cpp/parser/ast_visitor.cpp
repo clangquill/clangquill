@@ -736,6 +736,15 @@ CXChildVisitResult visit(CXCursor c, CXCursor /*parent*/, CXClientData data) {
     return CXChildVisit_Continue;
   }
 
+  // extern "C" { ... } / extern "C" decl blocks carry no symbol kind of their
+  // own and aren't a scope, so the recursion below never reaches inside them.
+  // Descend transparently, under the enclosing scope's parent_usr, so the
+  // declarations they wrap are still visited.
+  if (clang_getCursorKind(c) == CXCursor_LinkageSpec) {
+    clang_visitChildren(c, visit, &ctx);
+    return CXChildVisit_Continue;
+  }
+
   model::SymbolKind kind = map_kind(clang_getCursorKind(c));
   if (kind == model::SymbolKind::Unknown) return CXChildVisit_Continue;
 
