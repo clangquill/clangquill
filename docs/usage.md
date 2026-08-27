@@ -116,6 +116,9 @@ the SQLite IR and a small bookkeeping cache in that directory between runs and:
 - **re-parses only the stale translation units** when some files did change:
   the cache attributes every `#include`d file to the inputs that pull it in, so
   an edit re-parses just those inputs (in parallel) into the existing IR;
+- **re-renders only the pages whose symbols changed**, replaying the previous
+  text for the rest (custom templates opt into this by
+  [declaring themselves](guides/templates.md#custom-templates-and-warm-builds));
 - **rewrites only the pages whose content changed**, comparing each rendered
   page against the hash recorded for the previous run; and
 - **deletes pages whose symbols disappeared**, so removing a declaration removes
@@ -129,7 +132,13 @@ clangquill_cache_dir = "_clangquill_cache"   # under the Sphinx srcdir
 Re-running an unchanged build therefore regenerates nothing, touching one header
 regenerates only the affected pages, and a removed symbol's page is cleaned up.
 Without a cache directory the build is stateless: it re-parses into a throwaway
-database and rewrites every page each time.
+database and re-renders every page each time.
+
+Either way, a page is only *written* when its content actually changed — an
+unchanged page keeps its modification time. That is what keeps Sphinx from
+re-reading the whole API set on every build, and what lets
+[sphinx-autobuild](https://github.com/sphinx-doc/sphinx-autobuild) watch the
+source directory clangquill generates into without rebuilding in a loop.
 
 ## Example notebooks statistics
 

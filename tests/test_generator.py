@@ -5,13 +5,14 @@ from __future__ import annotations
 import io
 import os
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
 from clangquill.comments import CommentModel
-from clangquill.generator import Generator
+from clangquill.generator import Generator, PagePlan, write_if_changed
 from clangquill.store import Reference, RefKind, SourceFile, Store, Symbol
 
 if TYPE_CHECKING:
@@ -91,6 +92,61 @@ def test_generate_writes_pages_and_index(gen: Generator, tmp_path: Path) -> None
     _assert_golden("index.md", (out / "index.md").read_text())
     # The generated page is the same content the per-symbol render produces.
     assert (out / "geo.md").read_text().startswith("# Namespace `geo`")
+
+
+def test_generate_leaves_unchanged_pages_untouched(gen: Generator, tmp_path: Path) -> None:
+    # Sphinx re-reads a document whose mtime moved, and sphinx-autobuild
+    # rebuilds when anything under the source directory is touched -- so a
+    # second identical build must not rewrite a single file.
+    out = tmp_path / "api"
+    gen.generate(out)
+    # Backdated rather than compared against the clock: mtime resolution is
+    # coarse enough on some filesystems that two builds in a row could share a
+    # timestamp even when both wrote.
+    for path in out.iterdir():
+        os.utime(path, ns=(0, 0))
+
+    gen.generate(out)
+
+    assert {path.name: path.stat().st_mtime_ns for path in out.iterdir()} == {path.name: 0 for path in out.iterdir()}
+
+
+def test_generate_rewrites_a_page_whose_content_changed(gen: Generator, tmp_path: Path) -> None:
+    out = tmp_path / "api"
+    gen.generate(out)
+    page = out / "geo.md"
+    page.write_text("stale\n", encoding="utf-8")
+
+    gen.generate(out)
+
+    assert page.read_text().startswith("# Namespace `geo`")
+
+
+def test_write_if_changed_reports_and_repairs(tmp_path: Path) -> None:
+    target = tmp_path / "page.md"
+    assert write_if_changed(target, "hello\n") is True
+    assert write_if_changed(target, "hello\n") is False
+    assert write_if_changed(target, "goodbye\n") is True
+    assert target.read_text() == "goodbye\n"
+
+    # Undecodable bytes are not a reason to keep them.
+    target.write_bytes(b"\xff\xfe not utf-8")
+    assert write_if_changed(target, "hello\n") is True
+
+
+def test_wide_page_fingerprint_covers_what_content_hash_omits(gen: Generator, store: Store) -> None:
+    # content_hash folds in the fields the bundled templates render, so a symbol
+    # that only moved lines keeps its default key -- and its cached page. A
+    # custom template may render the declaration line, so the wide key (the one
+    # a declared template opts into) has to move with it.
+    symbol = _symbol(store, "geo")
+    moved = replace(symbol, line=symbol.line + 10)
+
+    def plan_for(sym: Symbol) -> PagePlan:
+        return PagePlan(sym.spelling, sym.spelling, lambda: "", subtree_seeds=(sym,))
+
+    assert gen.page_fingerprint(plan_for(symbol)) == gen.page_fingerprint(plan_for(moved))
+    assert gen.page_fingerprint(plan_for(symbol), wide=True) != gen.page_fingerprint(plan_for(moved), wide=True)
 
 
 def test_unique_stem_dedupes_case_insensitively() -> None:

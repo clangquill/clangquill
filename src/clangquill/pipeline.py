@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING
 from clangquill import _core
 from clangquill.cache import BuildCache, OutputRecord, ParseStatus, file_sha256, fingerprint, hash_text
 from clangquill.config import CONFIG_PREFIX
-from clangquill.generator import Generator
+from clangquill.generator import Generator, write_if_changed
 from clangquill.store import Store, StoreVersionError
 
 if TYPE_CHECKING:
@@ -503,45 +503,93 @@ def _make_generator(config: Config, base_dir: Path, store: Store) -> Generator:
     )
 
 
-def _page_cache_eligible(config: Config) -> bool:
-    """Whether per-page render memoisation is safe for ``config``.
+#: Declaration a custom template puts in a comment to opt back into per-page
+#: render memoisation (see :func:`_page_cache_mode`).
+PAGE_CACHE_MARKER = "clangquill:page-cache"
 
-    The page cache replays a page's text whenever the IR data the *bundled*
-    templates read is unchanged. A custom template (a ``template_dirs`` override
-    or a per-kind ``templates`` mapping) may read IR fields the dependency
-    fingerprint does not track, so those builds keep the full-render path and
-    stay correct — the render fingerprint still busts the whole cache when a
-    template changes, but within a build every page is rendered.
+#: Template files an override directory can contribute. Anything else in there
+#: (a README, an editor backup) is not a template and does not gate the cache.
+_TEMPLATE_GLOB = "*.jinja"
+
+
+def _page_cache_mode(config: Config, base_dir: Path) -> tuple[bool, bool]:
+    """Return ``(memoise, wide)``: whether — and how — pages may be memoised.
+
+    The page cache replays a page's text whenever the IR data that page reads is
+    unchanged, which only works if the dependency fingerprint tracks everything
+    the templates read.
+
+    * Bundled templates only (no ``template_dirs``; a ``templates`` mapping may
+      still point kinds at other *bundled* stems): memoise on the default
+      fingerprint, which is exactly what those templates read.
+    * Override template files that *all* declare ``clangquill:page-cache`` in a
+      comment: memoise on the wide fingerprint
+      (:meth:`~clangquill.generator.Generator.page_fingerprint`), which covers
+      every per-symbol field the documented template context exposes.
+    * Anything else: no memoisation. An undeclared template may read IR the
+      fingerprint does not track (``gen.roots()`` and friends reach outside the
+      page entirely), so those builds keep the full-render path and stay
+      correct — the render fingerprint still busts the whole cache when a
+      template changes, but within a build every page is rendered.
+
+    A directory that contributes no template file at all is treated as bundled
+    only: there is nothing custom to read anything.
     """
-    return not config.template_dirs and not config.templates
+    templates = [
+        path
+        for directory in config.template_dirs
+        for path in sorted((base_dir / directory).rglob(_TEMPLATE_GLOB))
+        if path.is_file()
+    ]
+    if not templates:
+        return True, False
+    if all(_declares_page_cache(path) for path in templates):
+        return True, True
+    return False, False
+
+
+def _declares_page_cache(path: Path) -> bool:
+    """Whether the template at ``path`` opts into page memoisation.
+
+    The declaration is a plain substring match on the file's text: it is meant
+    to sit in a Jinja comment (``{# clangquill:page-cache #}``), but a template
+    is free to put it wherever a comment is legal for its own syntax. An
+    unreadable file does not declare anything.
+    """
+    try:
+        return PAGE_CACHE_MARKER in path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def _rendered_files(
     generator: Generator,
     config: Config,
+    base_dir: Path,
     *,
     cache: BuildCache | None = None,
     render_fingerprint: str = "",
 ) -> list[tuple[str, str]]:
     """Render every output into ``(filename, text)`` pairs, index last.
 
-    When ``cache`` is supplied and the build uses only bundled templates
-    (:func:`_page_cache_eligible`), each page is keyed by its dependency
-    fingerprint combined with ``render_fingerprint`` and replayed from the page
-    cache when unchanged, so an incremental build re-runs Jinja only for the
-    pages whose symbols actually moved. Without a cache it renders everything.
+    When ``cache`` is supplied and the build's templates allow it
+    (:func:`_page_cache_mode`), each page is keyed by its dependency fingerprint
+    combined with ``render_fingerprint`` and replayed from the page cache when
+    unchanged, so an incremental build re-runs Jinja only for the pages whose
+    symbols actually moved. Without a cache it renders everything.
     """
     # The index stem is reserved so no symbol page (e.g. a function named
     # ``index``) can collide with the root document appended below.
     plans = generator.plan_pages(group_by=config.group_by, reserved_stems=(config.root_document,))
-    memoize = cache is not None and _page_cache_eligible(config)
+    eligible, wide = _page_cache_mode(config, base_dir)
+    memoize = cache is not None and eligible
     rendered: list[tuple[str, str]] = []
     records: dict[str, tuple[str, str]] = {}
     for plan in plans:
         key = ""
         text: str | None = None
         if memoize:
-            key = hash_text(render_fingerprint + generator.page_fingerprint(plan))
+            key = hash_text(render_fingerprint + generator.page_fingerprint(plan, wide=wide))
             text = cache.cached_page(plan.stem, key)
         if text is None:
             text = plan.render()
@@ -774,7 +822,7 @@ def _incremental_build(
             elif parsed:
                 cache.record_parse(parse_fp, snapshot, _tu_deps(counts), parse_started_ns=parse_started_ns)
             generator = _make_generator(config, base, store)
-            rendered = _rendered_files(generator, config, cache=cache, render_fingerprint=render_fp)
+            rendered = _rendered_files(generator, config, base, cache=cache, render_fingerprint=render_fp)
             symbol_count = store.symbol_count()
             reference_count = store.reference_count()
             file_count = store.file_count()
@@ -1035,8 +1083,10 @@ def _apply_outputs(
 
     cache.record_outputs(new_index)
     # Keep the manifest in sync so a later switch to a stateless build prunes
-    # these pages correctly.
-    (output_dir / MANIFEST_NAME).write_text(json.dumps(sorted(new_index), indent=2), encoding="utf-8")
+    # these pages correctly. Written only when it changes: it lives inside the
+    # Sphinx source directory, so touching it on an otherwise unchanged build is
+    # enough to keep a srcdir watcher (sphinx-autobuild) rebuilding forever.
+    write_if_changed(output_dir / MANIFEST_NAME, json.dumps(sorted(new_index), indent=2))
     return sorted(written), sorted(deleted)
 
 
@@ -1058,7 +1108,7 @@ def prune_stale(output_dir: Path, kept: list[str]) -> list[str]:
             if name not in kept:
                 (output_dir / name).unlink(missing_ok=True)
                 deleted.append(name)
-    manifest.write_text(json.dumps(sorted(kept), indent=2), encoding="utf-8")
+    write_if_changed(manifest, json.dumps(sorted(kept), indent=2))
     return sorted(deleted)
 
 

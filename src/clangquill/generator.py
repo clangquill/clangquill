@@ -1076,17 +1076,22 @@ class Generator:
         ``"class"`` one page per documented class/namespace, and ``"namespace"``
         a browsable index → namespace → per-symbol hierarchy.
         ``toctree_maxdepth`` and ``root_document`` shape the generated index
-        page (written as ``<root_document>.md``). Returns the page stems written
-        (excluding the index), in toctree order.
+        page (written as ``<root_document>.md``). Returns the page stems
+        (excluding the index), in toctree order — every planned page, whether or
+        not it had to be written.
+
+        A page whose rendered content is already on disk is left alone (see
+        :func:`write_if_changed`), so a rebuild that changes nothing touches no
+        mtimes.
         """
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         pages = self.render_pages(group_by=group_by, reserved_stems=(root_document,))
         for page in pages:
-            (out / f"{page.stem}.md").write_text(page.text, encoding="utf-8")
-        (out / f"{root_document}.md").write_text(
+            write_if_changed(out / f"{page.stem}.md", page.text)
+        write_if_changed(
+            out / f"{root_document}.md",
             self.render_index(pages, toctree_maxdepth=toctree_maxdepth),
-            encoding="utf-8",
         )
         return [page.stem for page in pages]
 
@@ -1405,7 +1410,7 @@ class Generator:
 
     # -- per-page dependency fingerprint --------------------------------------
 
-    def page_fingerprint(self, plan: PagePlan) -> str:
+    def page_fingerprint(self, plan: PagePlan, *, wide: bool = False) -> str:
         """Hash everything ``plan`` reads from the IR into a render-cache key.
 
         The digest covers each symbol the page renders (its ``content_hash``,
@@ -1415,6 +1420,15 @@ class Generator:
         lists. It is deliberately render-config-agnostic: the pipeline combines
         it with the render fingerprint (templates, grouping, …) for the full key,
         so this method need only track the IR data the bundled templates read.
+
+        ``wide`` widens it to every per-symbol field the *documented* template
+        context can reach, not just the ones the bundled templates use: the
+        symbol-row fields ``content_hash`` leaves out (spelling, display name,
+        parent, documented flag, declaring file and line) and the symbol's
+        template parameters. That is what lets a custom template opt back into
+        page memoisation (see :func:`~clangquill.pipeline._page_cache_mode`); it
+        is off by default because it is strictly more conservative — a page
+        whose symbols merely shifted lines re-renders under it.
         """
         tokens: list[str] = []
         # A hub page's text is its toctree of child stems, so a changed child set
@@ -1434,9 +1448,9 @@ class Generator:
             self._file_scope = plan.file_scope
             try:
                 for symbol in plan.shallow_seeds:
-                    self._collect_symbol_tokens(symbol, tokens, visited, recurse=False)
+                    self._collect_symbol_tokens(symbol, tokens, visited, recurse=False, wide=wide)
                 for symbol in plan.subtree_seeds:
-                    self._collect_symbol_tokens(symbol, tokens, visited, recurse=True)
+                    self._collect_symbol_tokens(symbol, tokens, visited, recurse=True, wide=wide)
             finally:
                 self._file_scope = previous
         return hashlib.sha256(_DEP_RECORD_SEP.join(tokens).encode("utf-8")).hexdigest()
@@ -1463,6 +1477,7 @@ class Generator:
         visited: set[str],
         *,
         recurse: bool,
+        wide: bool = False,
     ) -> None:
         r"""Append the dependency tokens for ``symbol`` (and, if ``recurse``, its subtree).
 
@@ -1476,6 +1491,23 @@ class Generator:
             return
         visited.add(symbol.usr)
         tokens.append(f"S{_DEP_FIELD_SEP}{symbol.usr}{_DEP_FIELD_SEP}{symbol.content_hash}")
+        if wide:
+            tokens.extend(self._wide_tokens(symbol))
+        tokens.extend(self._reference_tokens(symbol))
+        tokens.extend(self._related_tokens(symbol))
+        if symbol.kind == SymbolKind.ENUM:
+            tokens.extend(self._enumerator_tokens(symbol))
+        if recurse and (symbol.kind == SymbolKind.NAMESPACE or symbol.kind in _RECORD_KINDS):
+            for child in self.children(symbol):
+                self._collect_symbol_tokens(child, tokens, visited, recurse=True, wide=wide)
+
+    def _reference_tokens(self, symbol: Symbol) -> list[str]:
+        """Return the tokens for ``symbol``'s outgoing cross-references.
+
+        The content hash of every resolved target rides along, because a
+        cross-reference prints the target's qualified name.
+        """
+        tokens: list[str] = []
         for ref in self.store.references(symbol.usr):
             tokens.append(
                 _DEP_FIELD_SEP.join(
@@ -1494,18 +1526,57 @@ class Generator:
                 target = self.store.symbol(ref.to_usr)
                 if target is not None:
                     tokens.append(f"T{_DEP_FIELD_SEP}{ref.to_usr}{_DEP_FIELD_SEP}{target.content_hash}")
-        tokens.extend(self._related_tokens(symbol))
-        if symbol.kind == SymbolKind.ENUM:
-            for en in self.enumerators(symbol):
-                tokens.append(
-                    _DEP_FIELD_SEP.join(("N", en.usr, en.name, str(en.value), str(int(en.value_is_signed)))),
+        return tokens
+
+    def _enumerator_tokens(self, symbol: Symbol) -> list[str]:
+        """Return the tokens for the enumerators an enum page lists."""
+        tokens: list[str] = []
+        for en in self.enumerators(symbol):
+            tokens.append(
+                _DEP_FIELD_SEP.join(("N", en.usr, en.name, str(en.value), str(int(en.value_is_signed)))),
+            )
+            enumerator = self.store.symbol(en.usr)
+            if enumerator is not None:
+                tokens.append(f"E{_DEP_FIELD_SEP}{en.usr}{_DEP_FIELD_SEP}{enumerator.content_hash}")
+        return tokens
+
+    def _wide_tokens(self, symbol: Symbol) -> list[str]:
+        """Return the extra dependency tokens a custom template may need.
+
+        ``content_hash`` folds in what the bundled templates render; a custom
+        template can also read the rest of the symbol row and the symbol's
+        template parameters (which no bundled template touches, and which no
+        other token covers). Both are per-symbol, so a page picks up only what
+        it renders.
+        """
+        return [
+            _DEP_FIELD_SEP.join(
+                (
+                    "W",
+                    symbol.usr,
+                    symbol.spelling,
+                    symbol.display_name,
+                    symbol.parent_usr,
+                    str(int(symbol.is_documented)),
+                    str(symbol.file_id),
+                    str(symbol.line),
+                ),
+            ),
+            *(
+                _DEP_FIELD_SEP.join(
+                    (
+                        "WT",
+                        symbol.usr,
+                        str(tp.idx),
+                        str(tp.param_kind),
+                        tp.name,
+                        tp.type_repr,
+                        tp.default_repr,
+                    ),
                 )
-                enumerator = self.store.symbol(en.usr)
-                if enumerator is not None:
-                    tokens.append(f"E{_DEP_FIELD_SEP}{en.usr}{_DEP_FIELD_SEP}{enumerator.content_hash}")
-        if recurse and (symbol.kind == SymbolKind.NAMESPACE or symbol.kind in _RECORD_KINDS):
-            for child in self.children(symbol):
-                self._collect_symbol_tokens(child, tokens, visited, recurse=True)
+                for tp in self.store.template_parameters(symbol.usr)
+            ),
+        ]
 
     def _collect_group_tokens(self, group: Group, tokens: list[str]) -> None:
         """Append the dependency tokens a group page reads (heading, members, subgroups)."""
@@ -1535,6 +1606,39 @@ class Generator:
         return stem
 
 
+def write_if_changed(path: Path, text: str) -> bool:
+    r"""Write ``text`` to ``path`` unless the file already holds exactly that.
+
+    Rewriting a file with identical content still bumps its mtime, and that is
+    not free for anything generated into a Sphinx source directory: Sphinx
+    decides which documents to re-read from source mtimes, so an unconditional
+    write makes *every* generated page outdated on *every* build, and a watcher
+    on the source directory (sphinx-autobuild) rebuilds in a loop because each
+    build touches its own inputs. The cached pipeline already compares page
+    content before writing; this is what keeps the stateless path -- the
+    out-of-the-box Sphinx configuration, which has no ``cache_dir`` -- and the
+    page manifest to the same rule.
+
+    Both sides of the comparison are raw UTF-8 bytes, and the write goes out as
+    those bytes rather than through :meth:`~pathlib.Path.write_text`: the cached
+    path pins ``newline="\n"`` for its own reasons (see ``_apply_outputs``), so
+    letting this one translate newlines would make the two paths write different
+    files for the same page on Windows -- and a page written with CRLF would
+    never compare equal to the text it was rendered from. A missing or
+    unreadable file simply gets written.
+
+    Returns whether ``path`` was written.
+    """
+    data = text.encode("utf-8")
+    try:
+        if path.read_bytes() == data:
+            return False
+    except OSError:
+        pass
+    path.write_bytes(data)
+    return True
+
+
 def render_symbol(store: Store, symbol: Symbol, **kwargs: object) -> str:
     """Render a single symbol with a throwaway generator (convenience wrapper)."""
     return Generator(store).render_symbol(symbol, **kwargs)  # type: ignore[arg-type]
@@ -1545,4 +1649,4 @@ def generate(store: Store, out_dir: str | Path, **kwargs: object) -> list[str]:
     return Generator(store, **kwargs).generate(out_dir)  # type: ignore[arg-type]
 
 
-__all__ = ["Generator", "PagePlan", "RenderedPage", "generate", "render_symbol"]
+__all__ = ["Generator", "PagePlan", "RenderedPage", "generate", "render_symbol", "write_if_changed"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -94,6 +95,22 @@ def test_build_generates_pages_and_index(project: Path) -> None:
 
 
 @requires_libclang
+def test_stateless_rebuild_touches_nothing_when_nothing_changed(project: Path) -> None:
+    # Without a cache_dir every build re-renders from scratch, but an identical
+    # render must still leave the output directory alone: Sphinx re-reads pages
+    # by mtime, and sphinx-autobuild watches the source directory it writes into.
+    config = Config(input=["demo.hpp"], output_dir="api")
+    build(config, base_dir=project)
+    api = project / "api"
+    for path in api.iterdir():
+        os.utime(path, ns=(0, 0))
+
+    build(config, base_dir=project)
+
+    assert {path.name for path in api.iterdir() if path.stat().st_mtime_ns != 0} == set()
+
+
+@requires_libclang
 def test_build_path_base_reroots_file_headings(project: Path) -> None:
     # With group_by="file" the heading renders the source path; path_base="."
     # re-roots it against the project so the absolute build-machine path the IR
@@ -129,12 +146,12 @@ def test_index_cache_key_includes_top_level(fixture_db: Path, tmp_path: Path, mo
 
         top_level_plan = PagePlan("geo", "geo", lambda: "geo text", top_level=True)
         monkeypatch.setattr(generator, "plan_pages", lambda **_kw: [top_level_plan])
-        rendered = pipeline._rendered_files(generator, config, cache=cache, render_fingerprint="rf")  # noqa: SLF001
+        rendered = pipeline._rendered_files(generator, config, tmp_path, cache=cache, render_fingerprint="rf")  # noqa: SLF001
         index_top_level = dict(rendered)["index.md"]
 
         nested_plan = PagePlan("geo", "geo", lambda: "geo text", top_level=False)
         monkeypatch.setattr(generator, "plan_pages", lambda **_kw: [nested_plan])
-        rendered = pipeline._rendered_files(generator, config, cache=cache, render_fingerprint="rf")  # noqa: SLF001
+        rendered = pipeline._rendered_files(generator, config, tmp_path, cache=cache, render_fingerprint="rf")  # noqa: SLF001
         index_nested = dict(rendered)["index.md"]
 
     assert "geo" in index_top_level
@@ -446,6 +463,108 @@ def test_incremental_page_cache_replays_unchanged_pages(
     assert "index" in hits
     assert result.pages_written == ["alpha.md"]
     assert "alpha ns edited" in (project / "api" / "alpha.md").read_text()
+
+
+def test_page_cache_mode_follows_the_template_declaration(tmp_path: Path) -> None:
+    templates = tmp_path / "my_templates"
+    templates.mkdir()
+
+    # Bundled templates only -- including a `templates` mapping that just points
+    # kinds at other bundled stems -- memoise on the default fingerprint.
+    assert pipeline._page_cache_mode(Config(input=[]), tmp_path) == (True, False)  # noqa: SLF001
+    assert pipeline._page_cache_mode(Config(input=[], templates={"method": "function"}), tmp_path) == (  # noqa: SLF001
+        True,
+        False,
+    )
+    # A directory holding no template at all is still a bundled-only build.
+    (templates / "README.md").write_text("not a template\n")
+    config = Config(input=[], template_dirs=["my_templates"])
+    assert pipeline._page_cache_mode(config, tmp_path) == (True, False)  # noqa: SLF001
+
+    # A declared override memoises on the wide fingerprint.
+    (templates / "class.md.jinja").write_text("{# clangquill:page-cache #}\n{{ symbol.spelling }}\n")
+    assert pipeline._page_cache_mode(config, tmp_path) == (True, True)  # noqa: SLF001
+
+    # One undeclared template is enough to disable memoisation for the build.
+    (templates / "enum.md.jinja").write_text("{{ symbol.spelling }}\n")
+    assert pipeline._page_cache_mode(config, tmp_path) == (False, False)  # noqa: SLF001
+
+
+@requires_libclang
+def test_declared_custom_template_keeps_page_memoisation(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A custom template used to disable per-page memoisation outright, so the
+    # users who invest most in their output got the worst warm builds. One that
+    # declares what it reads gets the same replay the bundled templates get.
+    templates = project / "my_templates"
+    templates.mkdir()
+    (templates / "namespace.md.jinja").write_text(
+        "{# clangquill:page-cache #}\n{{ '#' * level }} My `{{ symbol.qualified_name }}`\n",
+        encoding="utf-8",
+    )
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    (project / "beta.hpp").write_text("/// beta ns\nnamespace beta { /// g\nint g(); }\n")
+    config = Config(
+        input=["alpha.hpp", "beta.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        template_dirs=["my_templates"],
+    )
+    build(config, base_dir=project)
+    assert (project / "api" / "alpha.md").read_text().startswith("# My `alpha`")
+
+    hits: list[str] = []
+    misses: list[str] = []
+    real = BuildCache.cached_page
+
+    def spy(self: BuildCache, stem: str, key: str) -> str | None:
+        text = real(self, stem, key)
+        (hits if text is not None else misses).append(stem)
+        return text
+
+    monkeypatch.setattr(BuildCache, "cached_page", spy)
+
+    (project / "alpha.hpp").write_text("/// alpha ns edited\nnamespace alpha { /// f\nint f(); }\n")
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    assert misses == ["alpha"]
+    assert "beta" in hits
+
+
+@requires_libclang
+def test_undeclared_custom_template_renders_every_page(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Without the declaration the template may read anything at all, so the
+    # build keeps the full-render path: the page cache is never consulted.
+    templates = project / "my_templates"
+    templates.mkdir()
+    (templates / "namespace.md.jinja").write_text(
+        "{{ '#' * level }} My `{{ symbol.qualified_name }}`\n",
+        encoding="utf-8",
+    )
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    (project / "beta.hpp").write_text("/// beta ns\nnamespace beta { /// g\nint g(); }\n")
+    config = Config(
+        input=["alpha.hpp", "beta.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        template_dirs=["my_templates"],
+    )
+    build(config, base_dir=project)
+
+    consulted: list[str] = []
+    monkeypatch.setattr(BuildCache, "cached_page", lambda _self, stem, _key: consulted.append(stem))
+
+    (project / "alpha.hpp").write_text("/// alpha ns edited\nnamespace alpha { /// f\nint f(); }\n")
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    assert consulted == []
 
 
 @requires_libclang
