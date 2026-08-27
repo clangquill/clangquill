@@ -1,13 +1,15 @@
 {% import "partials/signature.md.jinja" as sig %}
 {% set comment = gen.comment(symbol) %}
 {% set fields = field_list(comment) %}
+{% set body = render_comment(comment) %}
+{% set fence = gen.fence(body, fields) %}
 {{ level | heading }} {{ gen.label(symbol) }} `{{ symbol.qualified_name }}`
 
-```{{ "{" ~ gen.directive(symbol) ~ "}" }} {{ sig.directive_argument(symbol) }}
+{{ fence }}{{ "{" ~ gen.directive(symbol) ~ "}" }} {{ sig.directive_argument(symbol) }}
 
-{{ render_comment(comment) }}
+{{ body }}
 {% if fields %}
 
 {{ fields }}
 {% endif %}
-```
+{{ fence }}
