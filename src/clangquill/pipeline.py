@@ -94,6 +94,11 @@ SEVERITY_NAMES = {0: "ignored", 1: "note", 2: "warning", 3: "error", 4: "fatal"}
 #: diagnostic, never a problem in their own right.
 WARNING_SEVERITY = 2
 
+#: Severity ``BuildResult.diagnostics`` (the console/Sphinx-warning stream) is
+#: filtered to, mirroring what the core itself reports there regardless of
+#: ``capture_all_diagnostics``.
+ERROR_SEVERITY = 3
+
 
 @dataclass(frozen=True)
 class Diagnostic:
@@ -368,6 +373,83 @@ def warnings_or_worse(records: list[Diagnostic]) -> list[Diagnostic]:
     the list when it is one worth failing on.
     """
     return [record for record in records if record.severity >= WARNING_SEVERITY]
+
+
+def _diagnostic_texts(records: list[Diagnostic]) -> list[str]:
+    """Error-severity-or-worse message texts, matching the core's ``diagnostics`` field.
+
+    Used to rebuild :attr:`BuildResult.diagnostics` from cached records on a
+    cache-hit build, so it stays exactly what a live parse would have reported.
+    """
+    return [record.text for record in records if record.severity >= ERROR_SEVERITY]
+
+
+def _diagnostics_to_json(records: list[Diagnostic]) -> list[dict[str, object]]:
+    """Serialize ``records`` for storage in the render cache summary."""
+    return [
+        {
+            "severity": record.severity,
+            "depth": record.depth,
+            "text": record.text,
+            "file": record.file,
+            "line": record.line,
+            "column": record.column,
+        }
+        for record in records
+    ]
+
+
+def _diagnostics_from_json(raw: object) -> list[Diagnostic]:
+    """Deserialize the diagnostics stored by :func:`_diagnostics_to_json`.
+
+    Tolerant of anything malformed or missing — an older cache predating this
+    field, or a hand-edited summary — by dropping the offending entry rather
+    than raising, since a cached diagnostic is only ever a best-effort replay.
+    """
+    if not isinstance(raw, list):
+        return []
+    records: list[Diagnostic] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            records.append(
+                Diagnostic(
+                    severity=int(item["severity"]),
+                    depth=int(item["depth"]),
+                    text=str(item["text"]),
+                    file=str(item.get("file", "")),
+                    line=int(item.get("line", 0)),
+                    column=int(item.get("column", 0)),
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return records
+
+
+def _carry_forward_diagnostics(
+    previous: list[Diagnostic],
+    partial_deps: dict[str, list[str]],
+    dropped: list[str],
+    records: list[Diagnostic],
+) -> list[Diagnostic]:
+    """Combine a partial reparse's diagnostics with the untouched rest of the project.
+
+    Every file the reparsed translation units now reach (each of their own
+    paths included, per the core's inclusion walk) is freshly known, so a
+    previously carried diagnostic located in one of them is superseded by
+    ``records`` — dropped if it cleared up, replaced if it did not — rather
+    than kept alongside a stale duplicate. ``dropped`` (the reparse's candidates
+    for removal from the IR, see :meth:`BuildCache.deps_only_from`) covers the
+    other direction: a file the stale translation units no longer reach at all
+    is not in ``partial_deps`` either, so without it a diagnostic that used to
+    live there would never be superseded and would linger forever.
+    """
+    reparsed_files = {dep for deps in partial_deps.values() for dep in deps}
+    reparsed_files.update(dropped)
+    carried = [diagnostic for diagnostic in previous if diagnostic.file not in reparsed_files]
+    return carried + warnings_or_worse(records)
 
 
 def _diagnostics_log_path(config: Config, base: Path) -> Path | None:
@@ -776,13 +858,25 @@ def _incremental_build(
         if not parsed and cache.render_is_current(render_fp) and _outputs_intact(output_dir, cache):
             return _noop_result(output_dir, ir_path, cache.render_summary())
 
+        # The complete warning-severity-or-worse view as of the *previous* run,
+        # read before anything below advances the parse (which invalidates this
+        # same summary). A build that does not re-parse everything below must
+        # carry these forward, or a project's diagnostics would only ever exist
+        # for one run — see the module-level note on why the cache cannot just
+        # noop past a dirty tree.
+        previous_diagnostics = _diagnostics_from_json((cache.render_summary() or {}).get("diagnostics"))
+
         counts: _core.ParseResult | None = None
-        diagnostics: list[str] = []
         records: list[Diagnostic] = []
         # Translation units actually re-parsed, or None for a full parse. Only
         # those units' diagnostics exist this run, so the log has to say so.
         reparsed: int | None = None
         partial_deps: dict[str, list[str]] | None = None
+        # The diagnostics this ``BuildResult`` reports: unlike ``records`` (this
+        # run's parse only, for the log), this always covers the whole project,
+        # replaying whatever a full parse would show even when this run only
+        # touched part of it — see issue #207.
+        full_diagnostics: list[Diagnostic]
         # Read before libclang touches anything: the hashes recorded below come
         # from the parser's read of each file, so any file written at or after
         # this instant must not have its stat trusted as describing them.
@@ -790,8 +884,8 @@ def _incremental_build(
         if not status.current and status.stale_inputs is None:
             # Configuration changed or no per-TU map: rebuild the whole IR.
             counts = _parse_into(inputs, ir_path, options)
-            diagnostics = counts.diagnostics
             records = _records(counts)
+            full_diagnostics = warnings_or_worse(records)
         elif not status.current:
             # Only some inputs are stale: re-parse just those translation units
             # into the existing IR, leaving every other TU's rows in place.
@@ -801,8 +895,13 @@ def _incremental_build(
             # writer drops its IR rows — otherwise a header removed from an
             # include closure keeps rendering until the next full rebuild.
             dropped = cache.deps_only_from(stale)
-            partial_deps, diagnostics, records = _parse_tus_into(stale, ir_path, options, dropped)
+            partial_deps, _diagnostics, records = _parse_tus_into(stale, ir_path, options, dropped)
             reparsed = len(stale)
+            full_diagnostics = _carry_forward_diagnostics(previous_diagnostics, partial_deps, dropped, records)
+        else:
+            # Render-only rebuild: the parse is unchanged, so its diagnostics
+            # are exactly what the previous run already established.
+            full_diagnostics = previous_diagnostics
         # Only when libclang actually ran: a render-only rebuild (parse cached,
         # templates or output changed) has no diagnostics of its own, and
         # overwriting a good log with an empty one would report silence where
@@ -840,6 +939,7 @@ def _incremental_build(
                 "reference_count": reference_count,
                 "file_count": file_count,
                 "pages": page_stems,
+                "diagnostics": _diagnostics_to_json(full_diagnostics),
             },
         )
 
@@ -851,9 +951,9 @@ def _incremental_build(
         symbol_count=symbol_count,
         reference_count=reference_count,
         file_count=file_count,
-        diagnostics=diagnostics,
-        diagnostic_records=records,
-        diagnostic_counts=severity_counts(records),
+        diagnostics=_diagnostic_texts(full_diagnostics),
+        diagnostic_records=full_diagnostics,
+        diagnostic_counts=severity_counts(full_diagnostics),
         diagnostics_log=written_log,
         parsed=parsed,
         pages_written=written,
@@ -869,6 +969,11 @@ def _noop_result(output_dir: Path, ir_path: Path, summary: dict[str, object] | N
     with silence. Leaving the previous run's file (with its own ``generated``
     timestamp) in place and reporting ``diagnostics_log=None`` lets the caller
     tell "wrote it" from "left the old one alone".
+
+    The in-process diagnostics are a different matter: ``result.diagnostics`` is
+    what a Sphinx build re-emits as warnings, so replaying the last real parse's
+    warning-severity-or-worse records here is what keeps a ``-W`` build failing
+    on every cache-hit rebuild instead of just the first one (issue #207).
     """
     summary = summary or {}
 
@@ -877,6 +982,7 @@ def _noop_result(output_dir: Path, ir_path: Path, summary: dict[str, object] | N
         return value if isinstance(value, int) else 0
 
     pages = summary.get("pages")
+    records = _diagnostics_from_json(summary.get("diagnostics"))
     return BuildResult(
         output_dir=output_dir,
         pages=[str(p) for p in pages] if isinstance(pages, list) else [],
@@ -885,7 +991,9 @@ def _noop_result(output_dir: Path, ir_path: Path, summary: dict[str, object] | N
         symbol_count=count("symbol_count"),
         reference_count=count("reference_count"),
         file_count=count("file_count"),
-        diagnostics=[],
+        diagnostics=_diagnostic_texts(records),
+        diagnostic_records=records,
+        diagnostic_counts=severity_counts(records),
         parsed=False,
         pages_written=[],
         pages_deleted=[],

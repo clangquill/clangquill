@@ -1529,6 +1529,60 @@ def test_warnings_as_errors_sees_a_warning_in_an_untouched_input(project: Path) 
     assert any("beta is on its way out" in record.text for record in result.diagnostic_records)
 
 
+@requires_libclang
+def test_a_fully_cached_build_replays_the_previous_diagnostics(project: Path) -> None:
+    # Issue #207: without warnings_as_errors, a noop build must not silently
+    # drop the diagnostics a Sphinx -W build relies on to keep failing.
+    (project / "demo.hpp").write_text(ERROR_FIXTURE)
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    first = build(config, base_dir=project)
+    second = build(config, base_dir=project)
+
+    assert first.parsed
+    assert second.parsed is False
+    assert first.diagnostics
+    assert second.diagnostics == first.diagnostics
+    assert second.diagnostic_counts == first.diagnostic_counts
+    assert [r.text for r in second.diagnostic_records] == [r.text for r in first.diagnostic_records]
+
+
+@requires_libclang
+def test_a_partial_reparse_keeps_diagnostics_from_an_untouched_input(project: Path) -> None:
+    # The non-strict counterpart of test_warnings_as_errors_sees_a_warning_in_
+    # an_untouched_input: even without warnings_as_errors forcing a full parse,
+    # an incremental re-parse of one input must not drop another input's
+    # still-standing error just because this run never touched it.
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    (project / "beta.hpp").write_text(ERROR_FIXTURE)
+    config = Config(input=["alpha.hpp", "beta.hpp"], output_dir="api", cache_dir=".cache")
+    first = build(config, base_dir=project)
+    assert first.diagnostics
+
+    (project / "alpha.hpp").write_text("/// alpha ns edited\nnamespace alpha { /// f\nint f(); }\n")
+    second = build(config, base_dir=project)
+
+    assert second.parsed
+    assert second.diagnostics == first.diagnostics
+
+
+@requires_libclang
+def test_a_partial_reparse_clears_a_diagnostic_from_a_dropped_include(project: Path) -> None:
+    # The other direction from the previous test: a diagnostic must not survive
+    # forever once the file it lived in has actually left the build, or a fixed
+    # project would keep failing a -W build on an error that no longer exists.
+    (project / "leaf.hpp").write_text(ERROR_FIXTURE)
+    (project / "beta.hpp").write_text('#include "leaf.hpp"\n/// beta ns\nnamespace beta { /// g\nint g(); }\n')
+    config = Config(input=["beta.hpp"], output_dir="api", cache_dir=".cache")
+    first = build(config, base_dir=project)
+    assert first.diagnostics
+
+    (project / "beta.hpp").write_text("/// beta ns\nnamespace beta { /// g\nint g(); }\n")
+    second = build(config, base_dir=project)
+
+    assert second.parsed
+    assert second.diagnostics == []
+
+
 def test_severity_counts_omits_severities_that_never_occurred() -> None:
     records = [
         pipeline.Diagnostic(severity=3, depth=0, text="a.hpp:1:1: error: bad"),
