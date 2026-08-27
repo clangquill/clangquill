@@ -96,6 +96,27 @@ TEST_CASE("parser records friend relationships", "[m7]") {
   CHECK(friend_class);
 }
 
+TEST_CASE("parser gives hidden friends a symbol", "[m7]") {
+  auto m = parse_m7();
+  const auto* eq = find(m, "m7::operator==");
+  REQUIRE(eq != nullptr);
+  CHECK(eq->kind == model::SymbolKind::Function);
+  CHECK(eq->is_documented);
+
+  const auto* ns = find(m, "m7");
+  REQUIRE(ns != nullptr);
+  CHECK(eq->parent_usr == ns->usr);
+
+  bool has_comment = false;
+  for (const auto& c : m.comments) {
+    if (c.symbol_usr == eq->usr &&
+        c.text.find("Compares two vectors") != std::string::npos) {
+      has_comment = true;
+    }
+  }
+  CHECK(has_comment);
+}
+
 TEST_CASE("parser captures operator overloads", "[m7]") {
   auto m = parse_m7();
   const auto* plus = find(m, "m7::operator+");

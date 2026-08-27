@@ -47,6 +47,11 @@ struct Vec {
   friend void reset(Vec& v);
   /// Grants a helper type access to internals.
   friend struct Inspector;
+
+  /// Compares two vectors for equality.
+  friend bool operator==(const Vec& a, const Vec& b) {
+    return a.x == b.x && a.y == b.y;
+  }
 };
 
 /// Adds two vectors component-wise.
