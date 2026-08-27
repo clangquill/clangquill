@@ -2,8 +2,10 @@
 
 #include <clang-c/Documentation.h>
 
+#include <algorithm>
 #include <cctype>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -50,6 +52,15 @@ std::string lower(std::string s) {
   return s;
 }
 
+// The highlighting language of a `\code{...}` attribute. Doxygen writes it as a
+// file extension (`{.py}`, `{.cpp}`) and spells "no highlighting" as
+// `{.unparsed}`, which maps to an empty info string.
+std::string code_language(const std::string& attr) {
+  std::string lang = lower(attr);
+  if (!lang.empty() && lang.front() == '.') lang.erase(0, 1);
+  return lang == "unparsed" ? std::string{} : lang;
+}
+
 // Canonical spelling of a `\param` direction attribute, or "" when the text is
 // not a direction Doxygen defines. Doxygen writes the attribute without spaces
 // (`[in]`, `[out]`, `[in,out]`), which is what lets the command word be
@@ -63,24 +74,98 @@ std::string canonical_direction(const std::string& attr) {
   return {};
 }
 
-// Splits a raw command word into its name and its direction attribute. Doxygen
-// glues the attribute onto the command (`\param[out] result the answer`), so
-// without this the whole `param[out]` is taken as the command name, matches no
-// route, and the parameter's name/description split never happens -- the entry
-// vanishes from `params`. Only `param`/`tparam` carry a direction, and only a
-// direction Doxygen defines is stripped, so an unknown `\foo[bar]` still
-// reaches `custom` under its full spelling as before.
-std::pair<std::string, std::string> split_direction(const std::string& cmd) {
-  if (cmd.empty() || cmd.back() != ']') return {cmd, {}};
-  std::size_t open = cmd.find('[');
-  if (open == std::string::npos) return {cmd, {}};
+// A command word and the attribute Doxygen glues onto it.
+struct CommandWord {
+  std::string name;       ///< The command itself, e.g. "param" or "code".
+  std::string direction;  ///< `\param[in,out]` -> "in,out"; else empty.
+  std::string language;   ///< `\code{.py}` -> "py"; else empty.
+};
+
+// Splits a raw command word from its attribute. Doxygen writes both the
+// parameter direction and a code block's language attached to the command word
+// itself, so without this the whole `param[out]` / `code{.py}` is taken as the
+// command name, matches no route, and (for `\param`) the name/description split
+// never happens -- the entry vanishes from `params`. Only attributes this
+// parser understands are stripped, so an unknown `\foo[bar]` still reaches
+// `custom` under its full spelling.
+CommandWord split_command_word(const std::string& cmd) {
+  if (cmd.empty()) return {cmd, {}, {}};
+  char close = cmd.back();
+  char open_ch = close == ']' ? '[' : (close == '}' ? '{' : '\0');
+  if (open_ch == '\0') return {cmd, {}, {}};
+  std::size_t open = cmd.find(open_ch);
+  if (open == std::string::npos) return {cmd, {}, {}};
   std::string name = cmd.substr(0, open);
-  if (name != "param" && name != "tparam") return {cmd, {}};
-  std::string dir =
-      canonical_direction(cmd.substr(open + 1, cmd.size() - open - 2));
-  if (dir.empty()) return {cmd, {}};
-  return {name, dir};
+  std::string attr = cmd.substr(open + 1, cmd.size() - open - 2);
+  if (close == ']' && (name == "param" || name == "tparam")) {
+    std::string dir = canonical_direction(attr);
+    if (!dir.empty()) return {name, dir, {}};
+  } else if (close == '}' && name == "code") {
+    return {name, {}, code_language(attr)};
+  }
+  return {cmd, {}, {}};
 }
+
+bool is_blank(const std::string& s) {
+  return s.find_first_not_of(" \t") == std::string::npos;
+}
+
+// Renders a verbatim block as a MyST fenced code block, line structure intact.
+//
+// The output target is Markdown, where a code example's newlines and relative
+// indentation are load-bearing -- running the body through normalize_ws turned
+// every example into one line of mangled prose. The block is carried as a
+// ready-to-emit fence in `detail` so it keeps its position among the prose
+// paragraphs, which a separate field could not.
+//
+// @param kind The opening command, `code` or `verbatim`.
+// @param language Highlighting language from a `{.py}` attribute, if any.
+// @param lines The block body, one entry per source line.
+std::string fenced_block(const std::string& kind, const std::string& language,
+                         std::vector<std::string> lines) {
+  while (!lines.empty() && is_blank(lines.front())) lines.erase(lines.begin());
+  while (!lines.empty() && is_blank(lines.back())) lines.pop_back();
+  if (lines.empty()) return {};
+
+  // The comment marker (`///`, ` * `) left a common indent on every line; only
+  // what each line has beyond it is the example's own structure.
+  std::size_t indent = std::string::npos;
+  for (const std::string& line : lines) {
+    if (is_blank(line)) continue;
+    indent = std::min(indent, line.find_first_not_of(" \t"));
+  }
+  if (indent == std::string::npos) indent = 0;
+
+  // A fence has to be longer than any backtick run it encloses.
+  std::size_t ticks = 3;
+  std::size_t run = 0;
+  for (const std::string& line : lines) {
+    for (char ch : line) {
+      run = ch == '`' ? run + 1 : 0;
+      ticks = std::max(ticks, run + 1);
+    }
+    run = 0;
+  }
+
+  // A `\verbatim` block is preformatted text rather than code, so it gets no
+  // info string; a `\code` block without an explicit language is C++, which is
+  // the only language a libclang-driven parser sees.
+  std::string info = language;
+  if (info.empty() && kind == "code") info = "cpp";
+
+  std::string fence(ticks, '`');
+  std::string out = fence + info + "\n";
+  for (const std::string& line : lines) {
+    out += is_blank(line) ? std::string{} : line.substr(indent);
+    out += '\n';
+  }
+  out += fence;
+  return out;
+}
+
+// True for a `detail` entry that fenced_block produced. Such a block is never a
+// one-line summary, so it must not be promoted to the brief.
+bool is_fenced_block(const std::string& s) { return s.rfind("```", 0) == 0; }
 
 // Group commands carry cross-symbol bookkeeping (assembled separately from the
 // symbol's raw comment); they must never leak into the rendered prose.
@@ -160,13 +245,12 @@ bool takes_line(const std::string& cmd) {
 }
 
 // Commands that take no argument at all. `\internal` marks the text after it as
-// internal documentation and `\code`/`\endcode`/`\li` are markers, so
-// everything following them is the entity's own prose. (This only stops them
-// swallowing it; rendering `\code` as a real code block is a separate matter.)
+// internal documentation and `\li` is a list marker, so everything following
+// them is the entity's own prose.
 bool takes_nothing(const std::string& cmd) {
-  // `\code` is NOT here: it genuinely takes a block, and treating it as a
-  // marker spills the code body into the prose. What was broken is that
-  // `\endcode` never ended it, so the text after the block was swallowed too.
+  // `\code`/`\verbatim` are NOT here: they open a block that parse_raw reads
+  // line by line, and their `\end...` is consumed by that block. These entries
+  // only catch a stray terminator with no block open.
   return cmd == "internal" || cmd == "endinternal" || cmd == "endcode" ||
          cmd == "endverbatim" || cmd == "li" || cmd == "arg";
 }
@@ -186,10 +270,9 @@ bool raw_has_unroutable_command(const std::string& raw) {
       "ingroup",  "defgroup", "addtogroup", "class", "struct",  "union",
       "enum",     "namespace", "fn",        "var",   "typedef", "relates",
       "internal", "li"};
-  // Deliberately not `code`/`endcode`: libclang's parsed tree preserves a
-  // verbatim block's line structure, which parse_raw's normalize_ws destroys.
-  // A comment that also carries one of the above still takes the raw path, and
-  // `endcode` is classified there so the prose after the block is not lost.
+  // Deliberately not `code`/`endcode`: nothing about a verbatim block needs the
+  // raw path. Both paths now render one as a fenced block with its lines
+  // intact, so a comment reaches either one none the worse.
   for (std::size_t i = 0; i + 1 < raw.size(); ++i) {
     if (raw[i] != '\\' && raw[i] != '@') continue;
     for (const char* cmd : kCmds) {
@@ -265,15 +348,25 @@ void route_command(model::CommentModel& m, const std::string& name,
 }
 
 // Promotes the leading free-text paragraphs into brief/detail. With an explicit
-// @brief the lead paragraphs are all detail; otherwise the first is the brief.
+// @brief the lead paragraphs are all detail; otherwise the first prose
+// paragraph is the brief. A verbatim block is skipped over rather than
+// promoted: it is never a one-line summary, and a comment that opens with a
+// code example would otherwise have no brief at all.
 void apply_lead(model::CommentModel& m, const std::vector<std::string>& lead,
                 bool explicit_brief) {
-  std::size_t start = 0;
-  if (!explicit_brief && !lead.empty()) {
-    m.brief = lead.front();
-    start = 1;
+  std::size_t brief_at = lead.size();
+  if (!explicit_brief) {
+    for (std::size_t i = 0; i < lead.size(); ++i) {
+      if (!is_fenced_block(lead[i])) {
+        brief_at = i;
+        break;
+      }
+    }
   }
-  for (std::size_t i = start; i < lead.size(); ++i) m.detail.push_back(lead[i]);
+  if (brief_at < lead.size()) m.brief = lead[brief_at];
+  for (std::size_t i = 0; i < lead.size(); ++i) {
+    if (i != brief_at) m.detail.push_back(lead[i]);
+  }
 }
 
 // The direction libclang parsed off a `\param`, or "" when the comment did not
@@ -292,6 +385,31 @@ std::string explicit_direction(CXComment param_command) {
       return "in,out";
   }
   return {};
+}
+
+// The fenced rendering of a parsed `\code` / `\verbatim` block. libclang hands
+// the body back one CXComment_VerbatimBlockLine per source line -- collapsing
+// them with collect_text is what destroyed the block -- and puts a `\code{.py}`
+// attribute in the first of those lines rather than in the command's arguments.
+std::string verbatim_block(CXComment bc) {
+  std::string kind = lower(to_string(clang_BlockCommandComment_getCommandName(bc)));
+  std::vector<std::string> lines;
+  unsigned n = clang_Comment_getNumChildren(bc);
+  for (unsigned i = 0; i < n; ++i) {
+    CXComment child = clang_Comment_getChild(bc, i);
+    if (clang_Comment_getKind(child) != CXComment_VerbatimBlockLine) continue;
+    lines.push_back(to_string(clang_VerbatimBlockLineComment_getText(child)));
+  }
+  std::string language;
+  if (!lines.empty()) {
+    std::string first = lines.front();
+    std::size_t a = first.find_first_not_of(" \t");
+    if (a != std::string::npos && first[a] == '{' && first.back() == '}') {
+      language = code_language(first.substr(a + 1, first.size() - a - 2));
+      lines.erase(lines.begin());
+    }
+  }
+  return fenced_block(kind, language, std::move(lines));
 }
 
 model::CommentModel parse_parsed_comment(CXComment full) {
@@ -329,7 +447,14 @@ model::CommentModel parse_parsed_comment(CXComment full) {
             name, text_of(clang_BlockCommandComment_getParagraph(child)), {}});
         break;
       }
-      case CXComment_VerbatimBlockCommand:
+      case CXComment_VerbatimBlockCommand: {
+        // Appended to `lead`, not straight to `detail`: apply_lead flushes the
+        // prose paragraphs afterwards, so a block written between two of them
+        // would otherwise be reordered ahead of both.
+        std::string t = verbatim_block(child);
+        if (!t.empty()) lead.push_back(std::move(t));
+        break;
+      }
       case CXComment_VerbatimLine: {
         std::string t = text_of(child);
         if (!t.empty()) m.detail.push_back(std::move(t));
@@ -344,6 +469,56 @@ model::CommentModel parse_parsed_comment(CXComment full) {
   return m;
 }
 
+// Strips the comment markers from one raw line, returning its content.
+//
+// Whitespace *after* the marker is kept: inside a `\code` block it is the only
+// record of the example's indentation, and everywhere else normalize_ws
+// collapses it anyway. Only the single space that conventionally separates the
+// marker from the text (`/// foo`, ` * foo`) is removed. A line holding nothing
+// but markers and whitespace comes back empty, which is the paragraph break
+// parse_raw looks for.
+std::string strip_line_markers(std::string line) {
+  auto rtrim = [](std::string& s) {
+    std::size_t b = s.find_last_not_of(" \t\r");
+    s.erase(b == std::string::npos ? 0 : b + 1);
+  };
+  rtrim(line);
+  if (line.size() >= 2 && line.compare(line.size() - 2, 2, "*/") == 0) {
+    line.erase(line.size() - 2);
+    rtrim(line);
+  }
+  std::size_t a = line.find_first_not_of(" \t");
+  if (a == std::string::npos) return {};
+
+  // Post-item "<" variants first, so the trailing '<' is not left as content.
+  auto marker = [&](std::string_view p) {
+    return line.compare(a, p.size(), p) == 0;
+  };
+  std::size_t k = 0;
+  bool stripped = true;
+  if (marker("///<") || marker("//!<") || marker("/**<") || marker("/*!<")) {
+    k = a + 4;
+  } else if (marker("/**") || marker("/*!") || marker("///") || marker("//!")) {
+    k = a + 3;
+  } else if (marker("/*") || marker("//")) {
+    k = a + 2;
+  } else {
+    stripped = false;
+  }
+
+  // A leading '*' is a Javadoc continuation marker, not content.
+  std::size_t c = line.find_first_not_of(" \t", k);
+  if (c != std::string::npos && line[c] == '*') {
+    k = c + 1;
+    stripped = true;
+  }
+  if (stripped && k < line.size() && line[k] == ' ') ++k;
+  if (k >= line.size()) return {};
+  std::string content = line.substr(k);
+  rtrim(content);
+  return content;
+}
+
 // Removes Doxygen/C++ comment markers, returning the documentation lines. Used
 // only as a fallback when libclang produced no parsed comment.
 std::vector<std::string> strip_markers(const std::string& raw) {
@@ -352,36 +527,8 @@ std::vector<std::string> strip_markers(const std::string& raw) {
   std::size_t i = 0;
   while (i <= raw.size()) {
     if (i == raw.size() || raw[i] == '\n') {
-      std::string line = cur;
+      lines.push_back(strip_line_markers(cur));
       cur.clear();
-      // Trim.
-      std::size_t a = line.find_first_not_of(" \t\r");
-      if (a == std::string::npos) {
-        lines.emplace_back();
-        ++i;
-        continue;
-      }
-      std::size_t b = line.find_last_not_of(" \t\r");
-      line = line.substr(a, b - a + 1);
-      // Strip leading markers (post-item "<" variants checked first so the
-      // trailing '<' is not left behind as content).
-      auto starts_with = [&](const char* p) { return line.rfind(p, 0) == 0; };
-      if (starts_with("///<") || starts_with("//!<")) line.erase(0, 4);
-      else if (starts_with("/**<") || starts_with("/*!<")) line.erase(0, 4);
-      else if (starts_with("/**") || starts_with("/*!")) line.erase(0, 3);
-      else if (starts_with("/*")) line.erase(0, 2);
-      else if (starts_with("///") || starts_with("//!")) line.erase(0, 3);
-      else if (starts_with("//")) line.erase(0, 2);
-      // Strip trailing */.
-      if (line.size() >= 2 && line.compare(line.size() - 2, 2, "*/") == 0) {
-        line.erase(line.size() - 2);
-      }
-      // Strip a single leading '*' (Javadoc continuation).
-      std::size_t c = line.find_first_not_of(" \t");
-      if (c != std::string::npos && line[c] == '*') line.erase(0, c + 1);
-      // Re-trim.
-      a = line.find_first_not_of(" \t");
-      lines.push_back(a == std::string::npos ? std::string() : line.substr(a));
       ++i;
       continue;
     }
@@ -400,6 +547,10 @@ model::CommentModel parse_raw(const std::string& raw) {
   std::string dir;          // direction attribute of the active command
   std::string buf;          // accumulated text for the active section
   bool have_lead_para = false;
+
+  std::string verbatim;     // open `code`/`verbatim` block (empty => none)
+  std::string verbatim_language;
+  std::vector<std::string> verbatim_lines;
 
   auto flush = [&]() {
     std::string text = normalize_ws(buf);
@@ -424,7 +575,38 @@ model::CommentModel parse_raw(const std::string& raw) {
     dir.clear();
   };
 
+  // Appends the finished block where the prose paragraphs go, so it keeps its
+  // place among them once apply_lead runs.
+  auto close_verbatim = [&]() {
+    std::string block =
+        fenced_block(verbatim, verbatim_language, std::move(verbatim_lines));
+    if (!block.empty()) lead.push_back(std::move(block));
+    verbatim.clear();
+    verbatim_language.clear();
+    verbatim_lines.clear();
+  };
+
   for (const std::string& source_line : strip_markers(raw)) {
+    // Inside a verbatim block every line is body text -- commands, blank lines
+    // and all -- until the matching `\endcode` / `\endverbatim`.
+    if (!verbatim.empty()) {
+      std::size_t s = source_line.find_first_not_of(" \t");
+      bool ends = false;
+      if (s != std::string::npos &&
+          (source_line[s] == '@' || source_line[s] == '\\')) {
+        std::size_t e = source_line.find_first_of(" \t", s + 1);
+        ends = lower(source_line.substr(
+                   s + 1, (e == std::string::npos ? source_line.size() : e) -
+                              s - 1)) == "end" + verbatim;
+      }
+      if (ends) {
+        close_verbatim();
+      } else {
+        verbatim_lines.push_back(source_line);
+      }
+      continue;
+    }
+
     std::string line = source_line;
     // A no-argument command does not even own the rest of its own line: Eigen
     // writes `\internal \ingroup enums` and `\internal \class Foo`, so the
@@ -437,10 +619,23 @@ model::CommentModel parse_raw(const std::string& raw) {
       if (is_command) {
         flush();
         std::size_t e = line.find_first_of(" \t", s + 1);
-        std::tie(cmd, dir) = split_direction(
+        CommandWord word = split_command_word(
             lower(line.substr(s + 1,
                               (e == std::string::npos ? line.size() : e) - s - 1)));
+        cmd = word.name;
+        dir = word.direction;
         std::string rest = e == std::string::npos ? std::string{} : line.substr(e + 1);
+        if (cmd == "code" || cmd == "verbatim") {
+          verbatim = cmd;
+          verbatim_language = word.language;
+          cmd.clear();
+          dir.clear();
+          // Anything after the opening command is already body text, and the
+          // rescan must not read it as one: inside a block nothing is a command
+          // but the matching `\end...`.
+          if (!is_blank(rest)) verbatim_lines.push_back(rest);
+          break;
+        }
         if (takes_nothing(cmd)) {
           route_command(m, cmd, "");
           cmd.clear();
@@ -455,7 +650,7 @@ model::CommentModel parse_raw(const std::string& raw) {
         if (takes_line(cmd)) flush();  // the argument ended with the line
         continue;
       }
-      if (line.empty()) {
+      if (is_blank(line)) {
         // A blank line ends whatever section is open. Doxygen's paragraph
         // commands run only to the next blank line, so the paragraphs below one
         // document the entity rather than extending `\brief` or the last
@@ -472,6 +667,8 @@ model::CommentModel parse_raw(const std::string& raw) {
       if (cmd.empty()) have_lead_para = true;
     }
   }
+  // An unterminated block still carries documentation; keep what it holds.
+  if (!verbatim.empty()) close_verbatim();
   flush();
 
   apply_lead(m, lead, explicit_brief);

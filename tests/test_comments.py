@@ -161,6 +161,49 @@ def test_model_from_fields_splits_the_direction_off_the_arg() -> None:
     assert model.tparams == [CommentParam("T", "a type", "in")]
 
 
+VERBATIM = """
+/**
+ * Squares a value.
+ * @code{.py}
+ *   y = square(3)
+ *   if y:
+ *       print(y)
+ * @endcode
+ * Prose written after the block stays after it.
+ * @verbatim
+ *   +---+
+ *   | x |
+ *   +---+
+ * @endverbatim
+ */
+"""
+
+
+def test_doxygen_parse_keeps_verbatim_blocks_intact() -> None:
+    # Since the output is Markdown, a code example's newlines and relative
+    # indentation are load-bearing; collapsing them mangles every example.
+    model = doxygen_parse(VERBATIM)
+    assert model.brief == "Squares a value."
+    assert model.detail == [
+        "```py\ny = square(3)\nif y:\n    print(y)\n```",
+        "Prose written after the block stays after it.",
+        "```\n+---+\n| x |\n+---+\n```",
+    ]
+
+
+def test_doxygen_parse_fences_around_nested_backticks() -> None:
+    model = doxygen_parse("/// @code\n/// ``` not the end\n/// @endcode\n")
+    assert model.detail == ["````cpp\n``` not the end\n````"]
+
+
+def test_doxygen_parse_leading_block_is_not_the_brief() -> None:
+    # A code example is never a one-line summary, so the brief is the first
+    # prose paragraph and the block keeps its place in the detail.
+    model = doxygen_parse("/// @code\n/// x = 1\n/// @endcode\n/// The summary.\n")
+    assert model.brief == "The summary."
+    assert model.detail == ["```cpp\nx = 1\n```"]
+
+
 def test_model_from_fields_round_trips() -> None:
     rows = [
         ("brief", "", "A brief."),

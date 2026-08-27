@@ -135,3 +135,16 @@ int paragraph_helper(int a);
   * \param plain a parameter with no direction attribute
   */
 int directed_helper(int* result, int value, int* scratch, int plain);
+
+/** \ingroup shapes
+  * \brief Keeps a code block intact.
+  *
+  * \code{.py}
+  *   y = square(3)
+  *   if y:
+  *       print(y)
+  * \endcode
+  *
+  * Prose written after the block stays after it.
+  */
+int coded_helper(int x);

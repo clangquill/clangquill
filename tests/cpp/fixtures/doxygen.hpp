@@ -36,7 +36,11 @@ int old_divide(int a, int b);
  * Squares a value.
  * @code
  *   int y = square(3); // y == 9
+ *   if (y > 0) {
+ *     return y;
+ *   }
  * @endcode
+ * Prose written after the block stays after it.
  */
 int square(int x);
 

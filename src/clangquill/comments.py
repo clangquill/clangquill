@@ -149,10 +149,15 @@ def model_from_fields(rows: Iterable[tuple[str, str, str]]) -> CommentModel:
 # --- Default Doxygen parser (pure Python) ------------------------------------
 
 _MARKER_RE = re.compile(r"^\s*(/\*\*<|/\*!<|/\*\*|/\*!|/\*|///<|///|//!<|//!|//)")
-# A command word, optionally carrying Doxygen's bracketed direction attribute
-# (``@param[in,out] buf ...``). Without the attribute group the brackets would
-# be read as the parameter's name and the real name as its description.
-_COMMAND_RE = re.compile(r"^[@\\](\w+)(\[[^\]\s]*\])?\s*(.*)$")
+# A command word, optionally carrying the attribute Doxygen glues onto it: a
+# direction on ``@param[in,out] buf ...``, a language on ``@code{.py}``. Without
+# the attribute group the brackets would be read as the parameter's name and the
+# real name as its description. The leading ``\s*`` is what lets a command still
+# be recognized now that _strip_markers keeps a line's indentation.
+_COMMAND_RE = re.compile(r"^\s*[@\\](\w+)((?:\[[^\]\s]*\])|(?:\{[^}\s]*\}))?\s*(.*)$")
+
+# Commands opening a block whose lines are carried through verbatim.
+_VERBATIM_CMDS = frozenset({"code", "verbatim"})
 
 # Command aliases collapsed onto a canonical model field/handler.
 _RETURN_CMDS = {"return", "returns", "result"}
@@ -186,19 +191,30 @@ _PARAM_CMDS = frozenset({"param", "tparam"})
 
 
 def _strip_markers(raw: str) -> list[str]:
-    """Strip comment markers, returning the trimmed documentation lines."""
+    """Strip comment markers, returning the documentation lines.
+
+    Whitespace *after* the marker is kept: inside a ``@code`` block it is the
+    only record of the example's indentation. Only the single space that
+    conventionally separates the marker from the text is removed, and a line
+    holding nothing but markers comes back empty.
+    """
     out: list[str] = []
     for original in raw.splitlines():
-        line = original.strip()
+        line = original.rstrip().removesuffix("*/").rstrip()
         marker = _MARKER_RE.match(line)
         if marker:
             line = line[marker.end() :]
-        line = line.removesuffix("*/")
-        line = line.strip()
+            stripped = True
+        else:
+            stripped = False
         # A leading '*' is a Javadoc continuation marker, not content.
-        if line.startswith("*") and not line.startswith("*/"):
-            line = line[1:].strip()
-        out.append(line)
+        head = line.lstrip()
+        if head.startswith("*"):
+            line = head[1:]
+            stripped = True
+        if stripped:
+            line = line.removeprefix(" ")
+        out.append(line.rstrip() if line.strip() else "")
     return out
 
 
@@ -222,22 +238,110 @@ def _route(model: CommentModel, name: str, text: str, direction: str = "") -> No
         model.custom.setdefault(name, []).append(text)
 
 
-def _split_command_direction(name: str, attr: str | None) -> tuple[str, str]:
-    """Split a command word into its name and its direction attribute.
+def _split_command_word(name: str, attr: str | None) -> tuple[str, str]:
+    """Split a command word into its name and the attribute Doxygen glues on.
 
-    Only ``@param``/``@tparam`` carry one, and only a direction Doxygen defines
-    is taken; any other bracket suffix stays glued to the command name, so an
-    unknown ``@foo[bar]`` still reaches ``custom`` under its full spelling.
+    Returns the command and its attribute value: a direction for
+    ``@param``/``@tparam``, a highlighting language for ``@code``. Any other
+    suffix stays glued to the command name, so an unknown ``@foo[bar]`` still
+    reaches ``custom`` under its full spelling.
     """
     if attr is None:
         return name, ""
     text = attr[1:-1].lower()
-    if name in _PARAM_CMDS:
+    if attr.startswith("[") and name in _PARAM_CMDS:
         if text in {"in", "out"}:
             return name, text
         if text in {"inout", "in,out"}:
             return name, "in,out"
+    elif attr.startswith("{") and name == "code":
+        language = text.removeprefix(".")
+        return name, "" if language == "unparsed" else language
     return name + attr, ""
+
+
+def _fenced_block(kind: str, language: str, lines: list[str]) -> str:
+    """Render a verbatim block as a MyST fenced code block, line structure intact.
+
+    The output target is Markdown, where a code example's newlines and relative
+    indentation are load-bearing; the block is carried as a ready-to-emit fence
+    in ``detail`` so it keeps its position among the prose paragraphs.
+    """
+    body = list(lines)
+    while body and not body[0].strip():
+        body.pop(0)
+    while body and not body[-1].strip():
+        body.pop()
+    if not body:
+        return ""
+    # The comment marker left a common indent on every line; only what each
+    # line has beyond it is the example's own structure.
+    indent = min(len(line) - len(line.lstrip()) for line in body if line.strip())
+    ticks = max(3, *(_longest_backtick_run(line) + 1 for line in body))
+    # A @verbatim block is preformatted text rather than code, so it gets no
+    # info string; a @code block without an explicit language is C++.
+    info = language or ("cpp" if kind == "code" else "")
+    fence = "`" * ticks
+    rendered = "\n".join(line[indent:] if line.strip() else "" for line in body)
+    return f"{fence}{info}\n{rendered}\n{fence}"
+
+
+def _longest_backtick_run(line: str) -> int:
+    longest = run = 0
+    for char in line:
+        run = run + 1 if char == "`" else 0
+        longest = max(longest, run)
+    return longest
+
+
+def _is_fenced_block(text: str) -> bool:
+    """Report whether ``text`` is a ``detail`` entry :func:`_fenced_block` produced."""
+    return text.startswith("```")
+
+
+class _VerbatimBlock:
+    """The body of an open ``@code`` / ``@verbatim`` block being collected.
+
+    Inside such a block every line is body text -- commands, blank lines and
+    all -- until the matching ``@endcode`` / ``@endverbatim``. The finished
+    block is appended to ``out``, the same list the prose paragraphs go to, so
+    it keeps its place among them.
+    """
+
+    def __init__(self, out: list[str]) -> None:
+        self._out = out
+        self.kind = ""
+        self.language = ""
+        self.lines: list[str] = []
+
+    def open(self, kind: str, language: str, first_line: str) -> None:
+        """Start a block; anything after the command is already body text."""
+        self.kind = kind
+        self.language = language
+        self.lines = [first_line] if first_line.strip() else []
+
+    def feed(self, line: str) -> None:
+        """Take one line, closing the block when its terminator arrives."""
+        match = _COMMAND_RE.match(line)
+        if match and match.group(1).lower() == "end" + self.kind:
+            self.close()
+        else:
+            self.lines.append(line)
+
+    def close(self) -> None:
+        """Emit and reset the block; a no-op when none is open.
+
+        An unterminated block still carries documentation, so closing one out
+        at the end of a comment keeps what it holds.
+        """
+        if not self.kind:
+            return
+        rendered = _fenced_block(self.kind, self.language, self.lines)
+        if rendered:
+            self._out.append(rendered)
+        self.kind = ""
+        self.language = ""
+        self.lines = []
 
 
 def _split_first(text: str) -> tuple[str, str]:
@@ -249,6 +353,38 @@ def _split_first(text: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
+@dataclass
+class _Scan:
+    """The open section of a comment while :func:`doxygen_parse` walks it.
+
+    ``buf`` accumulates either lead prose (``cmd`` is ``None``) or the argument
+    of the active command, and :meth:`flush` closes whichever it is.
+    """
+
+    model: CommentModel
+    lead: list[str] = field(default_factory=list)
+    explicit_brief: bool = False
+    cmd: str | None = None
+    direction: str = ""
+    buf: list[str] = field(default_factory=list)
+    have_lead_para: bool = False
+
+    def flush(self) -> None:
+        """Close the open section, routing what it collected into the model."""
+        text = " ".join(self.buf).strip()
+        self.buf.clear()
+        if self.cmd is None:
+            if text:
+                self.lead.append(text)
+            self.have_lead_para = False
+        else:
+            if self.cmd in _BRIEF_CMDS:
+                self.explicit_brief = True
+            _route(self.model, self.cmd, text, self.direction)
+        self.cmd = None
+        self.direction = ""
+
+
 def doxygen_parse(raw: str) -> CommentModel:
     """Parse a raw Doxygen comment into a :class:`CommentModel`.
 
@@ -256,58 +392,58 @@ def doxygen_parse(raw: str) -> CommentModel:
     behind the Python override hook. It mirrors the C++ Doxygen parser closely
     enough that either side produces an equivalent structured model.
     """
-    model = CommentModel()
-    lead: list[str] = []
-    explicit_brief = False
-    cmd: str | None = None
-    direction = ""
-    buf: list[str] = []
-    have_lead_para = False
-
-    def flush() -> None:
-        nonlocal cmd, direction, explicit_brief, have_lead_para
-        text = " ".join(buf).strip()
-        buf.clear()
-        if cmd is None:
-            if text:
-                lead.append(text)
-            have_lead_para = False
-        else:
-            if cmd in _BRIEF_CMDS:
-                explicit_brief = True
-            _route(model, cmd, text, direction)
-        cmd = None
-        direction = ""
+    scan = _Scan(CommentModel())
+    block = _VerbatimBlock(scan.lead)
 
     for line in _strip_markers(raw):
+        if block.kind:
+            block.feed(line)
+            continue
         match = _COMMAND_RE.match(line)
         if match:
-            flush()
-            cmd, direction = _split_command_direction(match.group(1).lower(), match.group(2))
-            buf.append(match.group(3))
+            scan.flush()
+            cmd, attribute = _split_command_word(match.group(1).lower(), match.group(2))
+            if cmd in _VERBATIM_CMDS:
+                block.open(cmd, attribute, match.group(3))
+                continue
+            scan.cmd = cmd
+            scan.direction = attribute
+            scan.buf.append(match.group(3))
         elif not line:
             # A blank line ends whatever section is open: a Doxygen paragraph
             # command runs only to the next blank line, so the paragraphs below
             # one document the entity rather than extending ``@brief`` or the
             # last ``@param``.
-            if cmd is not None or have_lead_para:
-                flush()
+            if scan.cmd is not None or scan.have_lead_para:
+                scan.flush()
         else:
-            buf.append(line)
-            have_lead_para = have_lead_para or cmd is None
-    flush()
+            scan.buf.append(line)
+            # The flag says what ``buf`` is holding: lead prose, or the text of
+            # an active command.
+            scan.have_lead_para = scan.cmd is None
+    block.close()
+    scan.flush()
 
-    _assign_lead(model, lead, explicit_brief=explicit_brief)
-    return model
+    _assign_lead(scan.model, scan.lead, explicit_brief=scan.explicit_brief)
+    return scan.model
 
 
 def _assign_lead(model: CommentModel, lead: list[str], *, explicit_brief: bool) -> None:
-    """Promote leading paragraphs: the first is the brief unless one was given."""
-    if not explicit_brief and lead:
-        model.brief = lead[0]
-        model.detail.extend(lead[1:])
-    else:
-        model.detail.extend(lead)
+    """Promote leading paragraphs: the first is the brief unless one was given.
+
+    A verbatim block is skipped over rather than promoted -- it is never a
+    one-line summary, and a comment opening with a code example would otherwise
+    end up with no brief at all.
+    """
+    brief_at = None
+    if not explicit_brief:
+        brief_at = next(
+            (i for i, text in enumerate(lead) if not _is_fenced_block(text)),
+            None,
+        )
+    if brief_at is not None:
+        model.brief = lead[brief_at]
+    model.detail.extend(text for i, text in enumerate(lead) if i != brief_at)
 
 
 # --- Parser registry & override hook -----------------------------------------

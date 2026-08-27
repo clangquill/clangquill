@@ -383,6 +383,46 @@ TEST_CASE("doxygen parser preserves verbatim block text", "[comments]") {
   CHECK(found_code);
 }
 
+TEST_CASE("a verbatim block keeps its lines, language and place",
+          "[comments]") {
+  // Collapsing the block through normalize_ws turned every code example into
+  // one line of mangled prose. Since the output is Markdown, its newlines and
+  // relative indentation are load-bearing.
+  auto expect_block = [](const std::vector<Field>& fs, const std::string& fence,
+                         const std::string& indented) {
+    const Field* block = nullptr;
+    int prose_after = 0;
+    for (const auto& f : fs) {
+      if (f.name != "detail") continue;
+      if (block == nullptr && f.value.rfind(fence, 0) == 0) block = &f;
+      else if (block != nullptr &&
+               f.value.find("stays after it") != std::string::npos) {
+        ++prose_after;
+      }
+    }
+    REQUIRE(block != nullptr);
+    // Line structure survives, and the marker indent is removed while the
+    // example's own indentation is kept.
+    CHECK(block->value.find('\n') != std::string::npos);
+    CHECK(block->value.find(indented) != std::string::npos);
+    CHECK(block->value.substr(block->value.size() - 3) == "```");
+    // ... and the block stays where it was written, before the closing prose.
+    CHECK(prose_after == 1);
+  };
+
+  // Parsed path: `@code` with no attribute in a C++ header.
+  auto parsed = parse_fixture("doxygen.hpp");
+  const auto* sq = find(parsed, "doc::square");
+  REQUIRE(sq != nullptr);
+  expect_block(fields_of(parsed, sq->usr), "```cpp\n", "\n  return y;");
+
+  // Raw path (forced by `\ingroup`): `\code{.py}` carries its language.
+  auto raw = parse_fixture("structural.hpp");
+  const auto* coded = find(raw, "coded_helper");
+  REQUIRE(coded != nullptr);
+  expect_block(fields_of(raw, coded->usr), "```py\n", "\n    print(y)");
+}
+
 TEST_CASE("parsed comments store a format and JSON projection", "[comments]") {
   auto m = parse_fixture("doxygen.hpp");
   const auto* divide = find(m, "doc::divide");
