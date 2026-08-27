@@ -43,6 +43,9 @@ struct Vec {
   /// Indexed access to a component.
   int operator[](int i) const { return i == 0 ? x : y; }
 
+  /// True if either component is non-zero.
+  explicit operator bool() const { return x != 0 || y != 0; }
+
   /// Grants the free `reset` function access to internals.
   friend void reset(Vec& v);
   /// Grants a helper type access to internals.

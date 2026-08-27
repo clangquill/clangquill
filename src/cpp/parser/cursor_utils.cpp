@@ -24,6 +24,7 @@ model::SymbolKind map_kind(CXCursorKind kind) {
     case CXCursor_FunctionTemplate:
       return model::SymbolKind::FunctionTemplate;
     case CXCursor_CXXMethod:
+    case CXCursor_ConversionFunction:
       return model::SymbolKind::Method;
     case CXCursor_Constructor:
       return model::SymbolKind::Constructor;
