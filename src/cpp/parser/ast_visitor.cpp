@@ -52,6 +52,7 @@ struct VisitCtx {
   std::vector<StructuralBlock>* structural;
   const ICommentParser* comment_parser;
   const FileIdSet* main_ids;
+  bool extract_anonymous_namespaces;
 };
 
 std::pair<std::string, unsigned> cursor_file_line(CXCursor c) {
@@ -1092,6 +1093,17 @@ CXChildVisitResult visit(CXCursor c, CXCursor /*parent*/, CXClientData data) {
   // reason rather than emitting a symbol under a name that is not one.
   if (is_deduction_guide(c)) return CXChildVisit_Continue;
 
+  // An anonymous namespace has internal linkage: what it holds belongs to one
+  // translation unit and cannot be named, called or linked against from
+  // anywhere else, so it is not API. Doxygen hides it by default
+  // (EXTRACT_ANON_NSPACES = NO) and so do we -- skipped without descending, so
+  // the internals inside stay out too. The option puts them back, and
+  // qualified_name then names the scope (`@anonymous`) rather than eliding it.
+  if (clang_getCursorKind(c) == CXCursor_Namespace &&
+      !ctx.extract_anonymous_namespaces && spelling(c).empty()) {
+    return CXChildVisit_Continue;
+  }
+
   model::SymbolKind kind = map_kind(clang_getCursorKind(c));
   if (kind == model::SymbolKind::Unknown) return CXChildVisit_Continue;
 
@@ -1199,14 +1211,16 @@ void attach_structural_blocks(VisitCtx& ctx,
 }  // namespace
 
 void visit_translation_unit(CXCursor tu_cursor, const std::string& main_file,
-                            model::ParsedModule& out) {
+                            model::ParsedModule& out,
+                            const VisitOptions& options) {
   visit_translation_unit(tu_cursor, std::vector<std::string>{main_file},
-                         /*trust_main_file=*/true, out);
+                         /*trust_main_file=*/true, out, options);
 }
 
 void visit_translation_unit(CXCursor tu_cursor,
                             const std::vector<std::string>& main_files,
-                            bool trust_main_file, model::ParsedModule& out) {
+                            bool trust_main_file, model::ParsedModule& out,
+                            const VisitOptions& options) {
   CXTranslationUnit tu = clang_Cursor_getTranslationUnit(tu_cursor);
 
   std::unordered_set<std::string> seen_symbols;
@@ -1235,6 +1249,7 @@ void visit_translation_unit(CXCursor tu_cursor,
   ctx.structural = &structural;
   ctx.comment_parser = &comment_parser;
   ctx.main_ids = &main_ids;
+  ctx.extract_anonymous_namespaces = options.extract_anonymous_namespaces;
 
   // Capture free-floating `\defgroup` blocks first so groups carry their title
   // and description before any `\ingroup` membership creates a stub for them.

@@ -57,6 +57,7 @@ struct PyParseOptions {
   std::optional<std::string> compile_commands_dir;
   bool keep_going = true;
   bool capture_all_diagnostics = false;
+  bool extract_anonymous_namespaces = false;
   int jobs = 0;
   int tu_batch = 0;
 };
@@ -100,6 +101,7 @@ clangquill::parser::ParseOptions to_core_options(const PyParseOptions& opt) {
   po.compile_commands_dir = opt.compile_commands_dir;
   po.keep_going = opt.keep_going;
   po.capture_all_diagnostics = opt.capture_all_diagnostics;
+  po.extract_anonymous_namespaces = opt.extract_anonymous_namespaces;
   po.jobs = opt.jobs;
   po.tu_batch = opt.tu_batch;
   return po;
@@ -247,6 +249,8 @@ NB_MODULE(_core, m) {
       .def_rw("keep_going", &PyParseOptions::keep_going)
       .def_rw("capture_all_diagnostics",
               &PyParseOptions::capture_all_diagnostics)
+      .def_rw("extract_anonymous_namespaces",
+              &PyParseOptions::extract_anonymous_namespaces)
       .def_rw("jobs", &PyParseOptions::jobs)
       .def_rw("tu_batch", &PyParseOptions::tu_batch);
 

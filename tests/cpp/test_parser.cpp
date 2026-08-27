@@ -76,6 +76,48 @@ TEST_CASE("parser extracts symbols and hierarchy", "[parser]") {
   CHECK(area->parent_usr == shape->usr);
 }
 
+TEST_CASE("anonymous-namespace contents are not published as API", "[parser]") {
+  // An anonymous namespace has internal linkage: what it holds belongs to one
+  // translation unit and cannot be named, called or linked against from
+  // anywhere else. Extracting it published internals -- and, because the
+  // anonymous scope has no spelling to contribute, published them under the
+  // *enclosing* namespace's name, indistinguishable from real API. Doxygen
+  // hides them by default (EXTRACT_ANON_NSPACES = NO); so do we.
+  auto m = parse_fixture("anonymous_ns.hpp");
+
+  CHECK(find(m, "demo::visible") != nullptr);
+  CHECK(find(m, "demo::hidden_helper") == nullptr);
+  CHECK(find(m, "demo::kHiddenLimit") == nullptr);
+  CHECK(find(m, "demo::HiddenTag") == nullptr);
+  // Nothing from inside the scope, at any depth: the walk does not descend.
+  for (const auto& sym : m.symbols) {
+    CHECK(sym.qualified_name.find("Hidden") == std::string::npos);
+    CHECK(sym.qualified_name.find("hidden") == std::string::npos);
+  }
+}
+
+TEST_CASE("opting in names the anonymous namespace a symbol came from",
+          "[parser]") {
+  // With the opt-in the internals are documented -- but qualified by the scope
+  // they actually live in, spelled the way the Sphinx C++ domain spells an
+  // anonymous entity, so they are never mistaken for members of the enclosing
+  // namespace and the declaration the generator emits still parses.
+  parser::ParseOptions opts;
+  opts.extract_anonymous_namespaces = true;
+  model::ParsedModule m;
+  REQUIRE(parser::Parser(opts).parse_file(
+      std::string(CLANGQUILL_FIXTURE_DIR) + "/anonymous_ns.hpp", m));
+
+  CHECK(find(m, "demo::visible") != nullptr);
+  CHECK(find(m, "demo::@anonymous::hidden_helper") != nullptr);
+  CHECK(find(m, "demo::@anonymous::kHiddenLimit") != nullptr);
+  CHECK(find(m, "demo::@anonymous::HiddenTag") != nullptr);
+  CHECK(find(m, "demo::@anonymous::HiddenTag::hidden_field") != nullptr);
+  // Never at the enclosing scope, which is where they used to land.
+  CHECK(find(m, "demo::hidden_helper") == nullptr);
+  CHECK(find(m, "demo::HiddenTag") == nullptr);
+}
+
 TEST_CASE("parser resolves base-class references", "[parser]") {
   auto m = parse_fixture("shapes.hpp");
   const auto* circle = find(m, "geo::Circle");

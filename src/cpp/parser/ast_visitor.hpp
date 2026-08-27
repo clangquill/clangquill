@@ -14,14 +14,29 @@
 
 namespace clangquill::parser {
 
+/// @brief Options that change what the AST walk extracts.
+struct VisitOptions {
+  /// @brief Extract the contents of anonymous namespaces.
+  ///
+  /// Off by default, matching Doxygen's `EXTRACT_ANON_NSPACES = NO`: an
+  /// anonymous namespace has internal linkage, so what it holds is one
+  /// translation unit's implementation detail rather than API anyone can name
+  /// or link against. When on, its contents are extracted with `@anonymous`
+  /// in their qualified name -- the Sphinx C++ domain's spelling for an
+  /// anonymous entity -- rather than under the enclosing namespace's name.
+  bool extract_anonymous_namespaces = false;
+};
+
 /// @brief Walks the translation unit rooted at @p tu_cursor into @p out.
 ///
 /// Appends symbols, references, parameters, enumerators, comments and file rows.
 /// @param tu_cursor Cursor for the translation unit to traverse.
 /// @param main_file Path passed to the parser, used to filter out included declarations.
 /// @param out Module that extracted rows are appended to.
+/// @param options What the walk extracts (see VisitOptions).
 void visit_translation_unit(CXCursor tu_cursor, const std::string& main_file,
-                            model::ParsedModule& out);
+                            model::ParsedModule& out,
+                            const VisitOptions& options = {});
 
 /// @brief Walks the translation unit, extracting from a *set* of files.
 ///
@@ -38,8 +53,10 @@ void visit_translation_unit(CXCursor tu_cursor, const std::string& main_file,
 ///        regardless of path spelling (`true` only when the main file is a real
 ///        input rather than a synthetic umbrella).
 /// @param out Module that extracted rows are appended to.
+/// @param options What the walk extracts (see VisitOptions).
 void visit_translation_unit(CXCursor tu_cursor,
                             const std::vector<std::string>& main_files,
-                            bool trust_main_file, model::ParsedModule& out);
+                            bool trust_main_file, model::ParsedModule& out,
+                            const VisitOptions& options = {});
 
 }  // namespace clangquill::parser
