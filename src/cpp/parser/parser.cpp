@@ -345,6 +345,24 @@ void Parser::report_compile_db_failure(model::ParsedModule& out) const {
               "'. Falling back to -std/-I/-D flags."});
 }
 
+void Parser::report_member_borrowed_flags(
+    const std::vector<std::string>& paths, const std::vector<std::string>& abs,
+    model::ParsedModule& out) const {
+  borrowed_note_.reset();  // Whatever the batch's own build_args left behind.
+  if (!options_.compile_commands_dir) return;
+  std::unordered_set<std::string> reported;
+  for (std::size_t i = 0; i < paths.size(); ++i) {
+    // Keyed on the absolute path, like the umbrella body itself: a caller may
+    // name one file under two spellings, and it is included -- and warned
+    // about -- once.
+    if (!reported.insert(abs[i]).second) continue;
+    // The caller's spelling, so the warning names the input the way a
+    // single-member parse of it would.
+    build_args(paths[i]);
+    report_borrowed_flags(out);
+  }
+}
+
 void Parser::report_borrowed_flags(model::ParsedModule& out) const {
   if (!borrowed_note_) return;
   // Warning, not error: the parse is sound enough to document, and a
@@ -744,10 +762,16 @@ bool Parser::parse_batch(const std::vector<std::string>& paths,
     if (emitted.insert(p).second) contents += "#include \"" + p + "\"\n";
   }
 
+  // One command for the whole batch, looked up for its first member. Every
+  // member shares it by construction: `parse_files` only ever batches inputs
+  // whose compilation-database commands normalize to the same flag set.
   std::vector<std::string> args =
       build_args(abs.front(), /*from_compile_db=*/nullptr, &umbrella);
   report_compile_db_failure(out);
-  report_borrowed_flags(out);
+  // The batch documents every member, not just the one the flags were looked
+  // up for, so the borrowed-flags warning is raised per member -- which also
+  // drops the note the build_args above stashed for the first of them.
+  report_member_borrowed_flags(paths, abs, out);
   std::vector<const char*> argv;
   argv.reserve(args.size());
   for (const auto& a : args) argv.push_back(a.c_str());
@@ -897,6 +921,76 @@ void merge_into(model::ParsedModule& out, model::ParsedModule& part,
   merge_diagnostics(out, part, seen_diagnostics);
 }
 
+// The compilation-database command every input would be parsed under, flattened
+// into one comparable key per input.
+//
+// Two inputs with equal keys can share an umbrella translation unit: the batch
+// is parsed under its first member's command (see `Parser::parse_batch`), and
+// an equal key says that is the command every other member would have got.
+// What is compared is what `CompileDb::args_for` answers -- the entry minus
+// argv[0], minus the input file itself and minus the flags that would write a
+// file -- so two headers that borrow the same entry compare equal even though
+// libclang interpolated it separately for each of them. On a CMake project the
+// per-target flag sets are few and the headers of a target share one, so this
+// is a handful of groups over thousands of inputs.
+//
+// Every key is empty when the database will not load: then every input falls
+// back to the same -std/-I/-D defaults, which is the no-database case, and
+// batching them together is exactly what that case already does.
+std::vector<std::string> compile_flag_keys(const std::vector<std::string>& inputs,
+                                           const std::string& dir) {
+  std::vector<std::string> keys(inputs.size());
+  CompileDb db;
+  if (!db.load(dir)) return keys;
+  // Memoized on the caller's spelling: an input list may name the same file
+  // twice, and a lookup canonicalizes paths to recognise the entry's own file.
+  std::unordered_map<std::string, std::string> memo;
+  for (std::size_t i = 0; i < inputs.size(); ++i) {
+    auto it = memo.find(inputs[i]);
+    if (it == memo.end()) {
+      std::string key;
+      // NUL-separated, so ["-DA", "-DB"] cannot compare equal to ["-DA-DB"].
+      for (const auto& arg : db.args_for(inputs[i])) {
+        key += arg;
+        key.push_back('\0');
+      }
+      it = memo.emplace(inputs[i], std::move(key)).first;
+    }
+    keys[i] = it->second;
+  }
+  return keys;
+}
+
+// Splits `order` -- input indices in canonical parse order -- into umbrella
+// batches of at most `batch_size` members, never putting two inputs whose
+// `keys` differ into the same batch.
+//
+// A batch is created the moment its first member is reached, so batches come
+// out ordered by their first member's canonical position and members keep
+// canonical order within a batch: the composition and the sequence are a
+// function of the input set alone, for the same reason the canonical order
+// itself is (see parse_files). With one key shared by every input -- no
+// compilation database -- this is a plain chunking of `order`.
+std::vector<std::vector<std::size_t>> make_batches(
+    const std::vector<std::size_t>& order, const std::vector<std::string>& keys,
+    std::size_t batch_size) {
+  constexpr std::size_t kNoBatch = static_cast<std::size_t>(-1);
+  std::vector<std::vector<std::size_t>> batches;
+  // The batch each flag set is currently filling, so a group interrupted by
+  // another group's members resumes into the same partial batch instead of
+  // starting a new one.
+  std::unordered_map<std::string, std::size_t> open;
+  for (const std::size_t i : order) {
+    std::size_t& slot = open.try_emplace(keys[i], kNoBatch).first->second;
+    if (slot == kNoBatch || batches[slot].size() >= batch_size) {
+      slot = batches.size();
+      batches.emplace_back();
+    }
+    batches[slot].push_back(i);
+  }
+  return batches;
+}
+
 }  // namespace
 
 model::ParsedModule parse_files(const std::vector<std::string>& inputs,
@@ -906,16 +1000,9 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
   if (tu_files != nullptr) tu_files->assign(inputs.size(), {});
   if (tu_parsed != nullptr) tu_parsed->assign(inputs.size(), false);
 
-  std::size_t batch_size;
-  if (options.compile_commands_dir) {
-    batch_size = 1;  // per-file compile flags cannot share one TU
-  } else if (options.tu_batch > 0) {
-    batch_size = static_cast<std::size_t>(options.tu_batch);
-  } else {
-    batch_size = kDefaultTuBatch;
-  }
-  const std::size_t num_batches =
-      inputs.empty() ? 0 : (inputs.size() + batch_size - 1) / batch_size;
+  const std::size_t batch_size =
+      options.tu_batch > 0 ? static_cast<std::size_t>(options.tu_batch)
+                           : kDefaultTuBatch;
 
   // Inputs are parsed in canonical order rather than the order the caller
   // listed them in, so which members share an umbrella -- and with it the IR
@@ -940,6 +1027,28 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
     return keys[a] < keys[b];
   });
 
+  // With a compilation database the batches are cut along flag sets as well as
+  // along the canonical order: the members of an umbrella share one command,
+  // and per-file commands genuinely differ. The alternative -- what this used
+  // to do -- is to give up on batching entirely whenever a database is
+  // configured, which is every Sphinx build, since the extension requires one.
+  // That handed the front end this project is built around the *slowest* cold
+  // parse available: every header re-lexing the whole shared #include prelude
+  // for itself. Grouping recovers the batching win wherever flags actually
+  // agree (on a CMake project, nearly everywhere) and falls back to a batch of
+  // one exactly where they do not.
+  //
+  // Skipped when the batch size is 1: nothing can share a unit anyway, so the
+  // database lookups would be pure cost -- and `tu_batch = 1` is the documented
+  // way to ask for per-file isolation, which must not depend on a database.
+  std::vector<std::string> flag_keys(inputs.size());
+  if (batch_size > 1 && options.compile_commands_dir) {
+    flag_keys = compile_flag_keys(inputs, *options.compile_commands_dir);
+  }
+  const std::vector<std::vector<std::size_t>> batches =
+      make_batches(order, flag_keys, batch_size);
+  const std::size_t num_batches = batches.size();
+
   // One result slot per batch keeps the merge deterministic (input order)
   // regardless of which thread parses which batch or in what order it finishes.
   std::vector<model::ParsedModule> parts(num_batches);
@@ -962,14 +1071,13 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
     Parser parser(options);
     std::size_t b;
     while ((b = next.fetch_add(1)) < num_batches) {
-      const std::size_t begin = b * batch_size;
-      const std::size_t end = std::min(begin + batch_size, inputs.size());
+      const std::vector<std::size_t>& batch = batches[b];
       // The caller's spellings, not the canonical keys: parse_batch absolutises
       // for itself, accepts either spelling when attributing symbols, and names
       // the path the caller gave when it has to report a member.
       std::vector<std::string> members;
-      members.reserve(end - begin);
-      for (std::size_t i = begin; i < end; ++i) members.push_back(inputs[order[i]]);
+      members.reserve(batch.size());
+      for (const std::size_t i : batch) members.push_back(inputs[i]);
       // Parse into a local module so a mid-parse exception cannot leave
       // half-built rows in the slot: only a clean parse is published, and an
       // exception escaping a worker thread (which would otherwise call
@@ -989,19 +1097,19 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
         for (std::size_t i = 0; i < members.size(); ++i) {
           // Sinks are indexed by the caller's position, not the parse order:
           // the bindings pair them up with the input list they passed in.
-          if (tu_files != nullptr) (*tu_files)[order[begin + i]] = std::move(member_files[i]);
+          if (tu_files != nullptr) (*tu_files)[batch[i]] = std::move(member_files[i]);
         }
         ok_parts[b] = std::move(member_ok);
         parts[b] = std::move(part);
       } catch (const std::exception& e) {
         parts[b] = model::ParsedModule{};
         parts[b].diagnostics.push_back(model::Diagnostic{
-            .text = "exception parsing batch of " + inputs[order[begin]] + ": " +
-                    e.what()});
+            .text = "exception parsing batch of " + inputs[batch.front()] +
+                    ": " + e.what()});
       } catch (...) {
         parts[b] = model::ParsedModule{};
         parts[b].diagnostics.push_back(model::Diagnostic{
-            .text = "unknown exception parsing batch of " + inputs[order[begin]]});
+            .text = "unknown exception parsing batch of " + inputs[batch.front()]});
       }
     }
   };
@@ -1029,9 +1137,8 @@ model::ParsedModule parse_files(const std::vector<std::string>& inputs,
     // A batch that died with an exception leaves its ok_parts slot empty, so
     // its inputs keep their initial `false`.
     for (std::size_t b = 0; b < num_batches; ++b) {
-      const std::size_t begin = b * batch_size;
       for (std::size_t i = 0; i < ok_parts[b].size(); ++i) {
-        (*tu_parsed)[order[begin + i]] = ok_parts[b][i];
+        (*tu_parsed)[batches[b][i]] = ok_parts[b][i];
       }
     }
   }

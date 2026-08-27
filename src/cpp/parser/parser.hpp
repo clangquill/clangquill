@@ -34,9 +34,11 @@ struct ParseOptions {
   /// Inputs grouped into one umbrella translation unit. Grouping amortises the
   /// dominant parse cost — re-lexing the shared `#include` closure — across the
   /// batch. `0` selects a default batch size; `1` parses every input as its own
-  /// translation unit. Forced to `1` when `compile_commands_dir` is set, since
-  /// per-file compile flags cannot be merged into one unit. Batch *composition*
-  /// is fixed by the input set (see @ref parse_files), so this value still
+  /// translation unit. With `compile_commands_dir` set this is an upper bound
+  /// rather than the batch size: a batch's members have to share one compiler
+  /// command, so inputs are first grouped by the flags the database answers
+  /// with (see @ref parse_files) and an input whose flags are unique ends up
+  /// alone. Batch *composition* is fixed by the input set, so this value still
   /// changes what a header that is not self-contained sees; `1` is the setting
   /// that removes that effect entirely.
   int tu_batch = 0;
@@ -82,6 +84,11 @@ class Parser {
   /// for exact per-file isolation. A batch of one delegates to @ref parse_file.
   /// If the umbrella itself cannot be created, every member is re-parsed
   /// individually as a fallback.
+  ///
+  /// One translation unit gets one command line, looked up for the first
+  /// member, so the members must be ones a compilation database answers for
+  /// identically — which is what @ref parse_files groups them by. Every member
+  /// that borrowed its flags is still reported individually.
   ///
   /// @param paths The batch members, in the order they should be included.
   /// @param out Module that extracted rows are appended to.
@@ -162,6 +169,24 @@ class Parser {
   // build_args was last called for, and clears it. No-op when the database
   // listed that input itself.
   void report_borrowed_flags(model::ParsedModule& out) const;
+
+  // Appends that same diagnostic for every distinct member of an umbrella
+  // batch whose flags were borrowed, and discards any note a preceding
+  // build_args left behind.
+  //
+  // A batch is parsed under one member's command, so build_args only ever
+  // classifies that one member -- but the batch documents all of them, and a
+  // header whose flags describe another file is exactly as much of a guess
+  // whether or not it happened to be the member the lookup went through.
+  //
+  // @param paths The batch members, in the caller's own spelling (which the
+  //        diagnostic names).
+  // @param abs The same members, absolute (which deduplicates them, since the
+  //        umbrella includes a repeated member once).
+  // @param out Module the diagnostics are appended to.
+  void report_member_borrowed_flags(const std::vector<std::string>& paths,
+                                    const std::vector<std::string>& abs,
+                                    model::ParsedModule& out) const;
 };
 
 /// @brief Parses every input file and merges the per-batch IR into one module.
@@ -169,6 +194,12 @@ class Parser {
 /// Inputs are grouped into batches of `options.tu_batch` (see ParseOptions) and
 /// each batch is parsed as one umbrella translation unit, so the shared
 /// `#include` closure is parsed once per batch rather than once per input.
+/// When `options.compile_commands_dir` is set the batches are additionally cut
+/// along compiler commands: inputs are grouped by the (normalised) command the
+/// database answers with, and only inputs that agree on it share a unit — so a
+/// project whose headers borrow a handful of per-target flag sets, which is
+/// what CMake generates, still gets umbrella batching, while an input with
+/// genuinely unique flags is parsed on its own.
 /// Batches are parsed concurrently across up to `min(batches, effective_jobs)`
 /// threads, each owning its own `Parser`/`CXIndex` (libclang indices must not
 /// be shared between threads, but one per thread is safe). Inputs are parsed in

@@ -116,9 +116,11 @@ class Config:
     #: amortises the dominant parse cost — re-parsing the shared ``#include``
     #: closure — across the batch, which speeds up cold builds dramatically.
     #: ``0`` (the default) picks a sensible batch size; ``1`` parses every input
-    #: as its own fully isolated translation unit. Ignored (forced to ``1``) when
-    #: ``compile_commands`` is configured, because per-file compile flags cannot
-    #: be merged into one unit.
+    #: as its own fully isolated translation unit. With ``compile_commands``
+    #: configured this is an upper bound rather than the batch size: one unit
+    #: can only be given one compiler command, so inputs are first grouped by
+    #: the command the database answers with and an input whose flags are
+    #: unique is parsed on its own.
     tu_batch: int = 0
 
     # -- output ---------------------------------------------------------------

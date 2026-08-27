@@ -515,6 +515,154 @@ TEST_CASE("a header with no entry of its own gets a sibling .cpp's flags",
   fs::remove_all(dir);
 }
 
+TEST_CASE("headers sharing one compile-database command share an umbrella TU",
+          "[parser]") {
+  // A configured compilation database used to force one translation unit per
+  // input outright, which meant the Sphinx front end -- which requires a
+  // database -- could never use umbrella batching at all (#214). Headers that
+  // borrow the same entry are handed the same flags, so they can share a unit,
+  // and now do.
+  //
+  // Observed through the preprocessor: `b_uses.hpp` declares something only
+  // when the macro `a_defs.hpp` defines is already in scope, which is true
+  // exactly when the two were parsed as one unit. Inputs are parsed in
+  // canonical (path-lexicographic) order, so a_defs.hpp comes first whatever
+  // order this test names them in.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-batching-test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+
+  std::ofstream(dir / "a_defs.hpp")
+      << "#define CQ_SHARED_UNIT 1\n/// From a.\ninline int from_a() { return 1; }\n";
+  std::ofstream(dir / "b_uses.hpp")
+      << "#ifdef CQ_SHARED_UNIT\n/// From b.\ninline int from_b_batched() { return 2; }\n#endif\n";
+  std::ofstream(dir / "target.cpp") << "int target();\n";
+
+  {
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"" << (dir / "target.cpp").string()
+       << "\", \"arguments\": [\"c++\", \"-std=c++20\", \"-c\", \""
+       << (dir / "target.cpp").string() << "\"]}]";
+  }
+
+  const std::vector<std::string> inputs{(dir / "b_uses.hpp").string(),
+                                        (dir / "a_defs.hpp").string()};
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+
+  const auto batched = parser::parse_files(inputs, opts);
+  CHECK(find(batched, "from_a") != nullptr);
+  CHECK(find(batched, "from_b_batched") != nullptr);
+
+  // tu_batch = 1 still means exact per-file isolation, database or not: it is
+  // the documented way to ask for it, and benchmarks/verify.py compares the two
+  // to prove batching changes nothing else.
+  parser::ParseOptions isolated = opts;
+  isolated.tu_batch = 1;
+  const auto separate = parser::parse_files(inputs, isolated);
+  CHECK(find(separate, "from_a") != nullptr);
+  CHECK(find(separate, "from_b_batched") == nullptr);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("headers with different compile-database commands are not batched together",
+          "[parser]") {
+  // Grouping by flag set is what keeps batching honest under a database: two
+  // targets' headers must not land in one unit, or one target's -D would decide
+  // what the other's headers declare -- and only one of the two commands could
+  // be handed to libclang in the first place.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-groups-test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+
+  std::ofstream(dir / "alpha.hpp")
+      << "#define CQ_LEAKED 1\n#ifdef CQ_ALPHA\n"
+         "/// Alpha.\ninline int alpha_flag() { return 1; }\n#endif\n";
+  std::ofstream(dir / "beta.hpp")
+      << "#ifdef CQ_BETA\n/// Beta.\ninline int beta_flag() { return 2; }\n#endif\n"
+         "#ifdef CQ_LEAKED\n/// Leaked.\ninline int leaked_from_alpha() { return 3; }\n#endif\n";
+
+  // Each header is listed with its own -D, so the two commands genuinely differ
+  // rather than both being interpolated from one entry.
+  {
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string() << "\", \"file\": \""
+       << (dir / "alpha.hpp").string()
+       << "\", \"arguments\": [\"c++\", \"-std=c++20\", \"-DCQ_ALPHA\", \"-c\", \""
+       << (dir / "alpha.hpp").string() << "\"]},"
+       << "{\"directory\": \"" << dir.string() << "\", \"file\": \""
+       << (dir / "beta.hpp").string()
+       << "\", \"arguments\": [\"c++\", \"-std=c++20\", \"-DCQ_BETA\", \"-c\", \""
+       << (dir / "beta.hpp").string() << "\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  const auto m = parser::parse_files(
+      {(dir / "alpha.hpp").string(), (dir / "beta.hpp").string()}, opts);
+
+  // Each header was parsed under its own target's define ...
+  CHECK(find(m, "alpha_flag") != nullptr);
+  CHECK(find(m, "beta_flag") != nullptr);
+  // ... and neither inherited the other's preprocessor state.
+  CHECK(find(m, "leaked_from_alpha") == nullptr);
+  // Both are listed, so nothing borrowed another file's command either.
+  for (const auto& d : m.diagnostics) {
+    CHECK(d.text.find("no compilation database entry") == std::string::npos);
+  }
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("every batched member that borrowed its flags is reported", "[parser]") {
+  // The batch's command is looked up once, for its first member -- but the
+  // batch documents all of them, and each one borrowed a command describing a
+  // different file. Reporting only the member the lookup went through would
+  // silently drop that caveat for every other header in the batch, which
+  // warnings-as-errors builds rely on seeing.
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "clangquill-cc-borrowed-batch-test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+
+  std::ofstream(dir / "one.hpp") << "/// One.\ninline int one_value() { return 1; }\n";
+  std::ofstream(dir / "two.hpp") << "/// Two.\ninline int two_value() { return 2; }\n";
+  std::ofstream(dir / "target.cpp") << "int target();\n";
+  {
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.string()
+       << "\", \"file\": \"" << (dir / "target.cpp").string()
+       << "\", \"arguments\": [\"c++\", \"-std=c++20\", \"-c\", \""
+       << (dir / "target.cpp").string() << "\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  const auto m = parser::parse_files(
+      {(dir / "one.hpp").string(), (dir / "two.hpp").string()}, opts);
+
+  REQUIRE(find(m, "one_value") != nullptr);
+  REQUIRE(find(m, "two_value") != nullptr);
+
+  std::vector<std::string> borrowed;
+  for (const auto& d : m.diagnostics) {
+    if (d.text.find("no compilation database entry") != std::string::npos) {
+      borrowed.push_back(d.file);
+      CHECK(d.severity == model::kSeverityWarning);
+    }
+  }
+  std::sort(borrowed.begin(), borrowed.end());
+  CHECK(borrowed == std::vector<std::string>{(dir / "one.hpp").string(),
+                                             (dir / "two.hpp").string()});
+
+  fs::remove_all(dir);
+}
+
 TEST_CASE("an unused link-only flag is not reported even under the "
           "project's own -Werror",
           "[parser]") {
