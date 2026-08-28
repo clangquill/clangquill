@@ -407,9 +407,13 @@ bool is_unused_argument_diagnostic(CXDiagnostic d) {
 // this only guards against a pathological (or malicious) diagnostic tree.
 constexpr int kMaxDiagnosticDepth = 8;
 
-// Appends `d` to `out.diagnostics` at nesting level `depth`, then recurses
-// into its attached `note:` diagnostics.
-void collect_one(CXDiagnostic d, int depth, model::ParsedModule& out) {
+// Builds a flat record for `d` at nesting level `depth`: severity, formatted
+// text and presumed location, but none of its attached `note:` diagnostics.
+// Shared by both branches of collect_diagnostics() below, so a caller who
+// needs to know *where* an error-severity diagnostic came from (e.g. to
+// invalidate a cached one once its file leaves the build) can rely on
+// `.file`/`.line`/`.column` regardless of whether `all` capture is on.
+model::Diagnostic make_record(CXDiagnostic d, int depth) {
   model::Diagnostic record;
   record.severity = static_cast<int>(clang_getDiagnosticSeverity(d));
   record.depth = depth;
@@ -429,7 +433,13 @@ void collect_one(CXDiagnostic d, int depth, model::ParsedModule& out) {
   record.file = to_string(filename);
   record.line = static_cast<int>(line);
   record.column = static_cast<int>(column);
-  out.diagnostics.push_back(std::move(record));
+  return record;
+}
+
+// Appends `d` to `out.diagnostics` at nesting level `depth`, then recurses
+// into its attached `note:` diagnostics.
+void collect_one(CXDiagnostic d, int depth, model::ParsedModule& out) {
+  out.diagnostics.push_back(make_record(d, depth));
 
   if (depth >= kMaxDiagnosticDepth) return;
   // The child set is owned by `d` — it must NOT be disposed, only the
@@ -458,11 +468,7 @@ void collect_diagnostics(CXTranslationUnit tu, model::ParsedModule& out,
       } else if (clang_getDiagnosticSeverity(d) >= CXDiagnostic_Error) {
         // Deliberately flat: without `all`, notes are dropped and only the
         // top-level message is kept, exactly as before this option existed.
-        out.diagnostics.push_back(model::Diagnostic{
-            .severity = static_cast<int>(clang_getDiagnosticSeverity(d)),
-            .depth = base_depth,
-            .text = to_string(clang_formatDiagnostic(
-                d, clang_defaultDiagnosticDisplayOptions()))});
+        out.diagnostics.push_back(make_record(d, base_depth));
       }
     }
     clang_disposeDiagnostic(d);

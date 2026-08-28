@@ -1259,6 +1259,28 @@ TEST_CASE("notes are dropped when full capture is off", "[parser]") {
   std::filesystem::remove_all(file.parent_path());
 }
 
+TEST_CASE("an error's location is captured even when full capture is off",
+          "[parser]") {
+  // A caller that persists an error-severity diagnostic across runs (e.g. to
+  // know which file it belongs to once that file leaves the build) needs its
+  // location even without capture_all_diagnostics — dropping notes is not the
+  // same as dropping where the surviving diagnostic itself occurred.
+  const auto file = write_scratch("clangquill-diag-location", "widget.hpp",
+                                  kErrorWithNoteSource);
+
+  parser::ParseOptions opts;  // capture_all_diagnostics defaults to false
+  model::ParsedModule mod;
+  parser::Parser(opts).parse_file(file.string(), mod);
+
+  REQUIRE_FALSE(mod.diagnostics.empty());
+  const auto& d = mod.diagnostics.front();
+  CHECK(d.file == file.string());
+  CHECK(d.line == 2);
+  CHECK(d.column > 0);
+
+  std::filesystem::remove_all(file.parent_path());
+}
+
 TEST_CASE("a diagnostic shared by several batches is merged once", "[parser]") {
   // Two inputs in separate umbrella batches both pull in the same bad header.
   // Without dedup its error — and its note — would be reported once per batch.
