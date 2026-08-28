@@ -159,6 +159,33 @@ def test_parse_tu_to_sqlite_replaces_only_that_unit(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_parse_to_sqlite_fully_replaces_an_existing_ir(tmp_path: Path) -> None:
+    """A caller may point parse_to_sqlite at a database an earlier parse filled.
+
+    The streamed write builds the fresh IR into a temporary database and
+    replaces db_path with it atomically (see SqliteStore::write_streamed_full_parse)
+    rather than clearing db_path in place, so this must still fully replace the
+    old contents rather than merely adding to them.
+    """
+    first = tmp_path / "first.hpp"
+    first.write_text("/// ns first\nnamespace first { /// f\nint f(); }\n")
+    db = tmp_path / "out.sqlite"
+    _core.parse_to_sqlite([str(first)], str(db), _core.ParseOptions())
+    with Store.open(db) as store:
+        assert {s.qualified_name for s in store.symbols()} >= {"first", "first::f"}
+
+    second = tmp_path / "second.hpp"
+    second.write_text("/// ns second\nnamespace second { /// g\nint g(); }\n")
+    _core.parse_to_sqlite([str(second)], str(db), _core.ParseOptions())
+
+    with Store.open(db) as store:
+        names = {s.qualified_name for s in store.symbols()}
+    assert {"second", "second::g"}.issubset(names)
+    assert "first" not in names
+    assert "first::f" not in names
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
 def test_parse_tu_failure_does_not_wipe_existing_rows(tmp_path: Path) -> None:
     a = tmp_path / "a.hpp"
     a.write_text("/// ns a\nnamespace a { /// f\nint f(); }\n")

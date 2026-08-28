@@ -338,9 +338,8 @@ TEST_CASE("successive write_part calls accumulate one batch at a time",
   std::remove(path.c_str());
 }
 
-TEST_CASE("clear before a streamed parse drops the previous one", "[store]") {
-  // write_part accumulates, so a streamed full parse gets the replacing
-  // semantics of write by clearing once before it hands over the first batch.
+TEST_CASE("write_streamed_full_parse replaces the previous contents on success",
+          "[store]") {
   std::string path = temp_db_path();
   model::SourceFile stale;
   stale.path = "/tmp/stale.hpp";
@@ -356,29 +355,117 @@ TEST_CASE("clear before a streamed parse drops the previous one", "[store]") {
   fresh.sha256 = std::string(64, 'e');
   fresh.size_bytes = 7;
 
-  model::ParsedModule batch;
-  batch.files.push_back(fresh);
-  batch.symbols.push_back(group_symbol("c:@F@kept", fresh.path));
+  model::ParsedModule first_batch;
+  first_batch.files.push_back(fresh);
+  first_batch.symbols.push_back(group_symbol("c:@F@kept1", fresh.path));
+
+  model::ParsedModule second_batch;
+  second_batch.files.push_back(fresh);
+  second_batch.symbols.push_back(group_symbol("c:@F@kept2", fresh.path));
 
   {
     store::SqliteStore writer(path);
     writer.write(previous, store::Meta::current());
   }
-  {
-    store::SqliteStore writer(path);
-    writer.clear();
-    writer.write_part(batch, store::Meta::current());
-  }
+
+  store::write_streamed_full_parse(
+      path, store::Meta::current(), [&](const store::BatchSink& sink) {
+        sink(model::ParsedModule(first_batch));
+        sink(model::ParsedModule(second_batch));
+      });
 
   store::SqliteStore reader(path);
   model::ParsedModule got = reader.read();
 
   REQUIRE(got.files.size() == 1);
   CHECK(got.files[0].path == fresh.path);
-  REQUIRE(got.symbols.size() == 1);
-  CHECK(got.symbols[0].usr == "c:@F@kept");
+  REQUIRE(got.symbols.size() == 2);
+  bool has_kept1 = false;
+  bool has_kept2 = false;
+  for (const auto& s : got.symbols) {
+    if (s.usr == "c:@F@kept1") has_kept1 = true;
+    if (s.usr == "c:@F@kept2") has_kept2 = true;
+  }
+  CHECK(has_kept1);
+  CHECK(has_kept2);
 
   std::remove(path.c_str());
+}
+
+TEST_CASE(
+    "write_streamed_full_parse leaves an existing database untouched on a "
+    "mid-stream failure",
+    "[store]") {
+  // Regression test for #317: the old streamed-write path cleared the target
+  // database up front and wrote each batch straight into it, so an exception
+  // between batches (a hard parse failure, a killed process) left the target
+  // holding a mix of the previous IR's rows and whatever batches had landed.
+  // write_streamed_full_parse must stream into a temp file instead and only
+  // ever touch the target on success.
+  std::string path = temp_db_path();
+  model::SourceFile good;
+  good.path = "/tmp/good.hpp";
+  good.sha256 = std::string(64, 'a');
+  good.size_bytes = 3;
+
+  model::ParsedModule previous;
+  previous.files.push_back(good);
+  previous.symbols.push_back(group_symbol("c:@F@survivor", good.path));
+
+  {
+    store::SqliteStore writer(path);
+    writer.write(previous, store::Meta::current());
+  }
+
+  model::SourceFile fresh;
+  fresh.path = "/tmp/fresh.hpp";
+  fresh.sha256 = std::string(64, 'b');
+  fresh.size_bytes = 4;
+  model::ParsedModule first_batch;
+  first_batch.files.push_back(fresh);
+  first_batch.symbols.push_back(group_symbol("c:@F@partial", fresh.path));
+
+  CHECK_THROWS_AS(
+      store::write_streamed_full_parse(
+          path, store::Meta::current(),
+          [&](const store::BatchSink& sink) {
+            // One batch lands successfully before the parse "crashes" -- the
+            // exact shape of a kill or a hard parse failure partway through a
+            // multi-batch stream.
+            sink(model::ParsedModule(first_batch));
+            throw std::runtime_error("simulated mid-stream parse failure");
+          }),
+      std::runtime_error);
+
+  // The target must still hold exactly the pre-existing IR: no trace of the
+  // batch that landed in the (discarded) temporary database.
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  REQUIRE(got.files.size() == 1);
+  CHECK(got.files[0].path == good.path);
+  REQUIRE(got.symbols.size() == 1);
+  CHECK(got.symbols[0].usr == "c:@F@survivor");
+
+  std::remove(path.c_str());
+}
+
+TEST_CASE(
+    "write_streamed_full_parse never creates the target when the very first "
+    "batch fails",
+    "[store]") {
+  std::string path = temp_db_path();
+  REQUIRE_FALSE(std::filesystem::exists(path));
+
+  CHECK_THROWS_AS(
+      store::write_streamed_full_parse(
+          path, store::Meta::current(),
+          [&](const store::BatchSink&) {
+            throw std::runtime_error("parse never produced a single batch");
+          }),
+      std::runtime_error);
+
+  CHECK_FALSE(std::filesystem::exists(path));
 }
 
 TEST_CASE("SqliteStore write_tus replaces only the re-parsed file's rows",

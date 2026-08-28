@@ -1,5 +1,9 @@
 #include "store/sqlite_store.hpp"
 
+#include <filesystem>
+#include <random>
+#include <stdexcept>
+#include <system_error>
 #include <unordered_map>
 
 #include "core/version.hpp"
@@ -10,6 +14,28 @@
 #endif
 
 namespace clangquill::store {
+
+namespace {
+
+// A path next to `target` that does not currently exist, so the temporary
+// database @ref write_streamed_full_parse builds can later be renamed onto
+// `target` atomically (same directory => same filesystem, which a rename
+// across filesystems cannot do).
+std::filesystem::path unique_sibling_path(const std::filesystem::path& target) {
+  namespace fs = std::filesystem;
+  const fs::path dir = target.has_parent_path() ? target.parent_path() : fs::path(".");
+  std::random_device entropy;
+  for (int attempt = 0; attempt < 64; ++attempt) {
+    const fs::path candidate =
+        dir / (target.filename().string() + ".tmp" + std::to_string(entropy()));
+    std::error_code ec;
+    if (!fs::exists(candidate, ec)) return candidate;
+  }
+  throw std::runtime_error("could not find an unused temporary path next to " +
+                           target.string());
+}
+
+}  // namespace
 
 Meta Meta::current() {
   Meta m;
@@ -49,12 +75,6 @@ void SqliteStore::write_part(const model::ParsedModule& module,
   // keep the id that batch's symbols reference.
   FileIds file_ids = upsert_files(module);
   insert_rows(module, file_ids);
-  tx.commit();
-}
-
-void SqliteStore::clear() {
-  Transaction tx(db_);
-  clear_all();
   tx.commit();
 }
 
@@ -609,6 +629,33 @@ model::ParsedModule SqliteStore::read() {
   }
 
   return m;
+}
+
+void write_streamed_full_parse(const std::string& path, const Meta& meta,
+                               const std::function<void(const BatchSink&)>& produce) {
+  namespace fs = std::filesystem;
+  const fs::path target(path);
+  const fs::path tmp = unique_sibling_path(target);
+  try {
+    {
+      // Scoped so the temp database's connection (and its WAL) is closed
+      // before the rename below -- and, if `produce` throws, before the temp
+      // file is removed in the catch block.
+      SqliteStore staging(tmp.string());
+      produce([&](model::ParsedModule&& part) { staging.write_part(part, meta); });
+    }
+    std::error_code ec;
+    fs::rename(tmp, target, ec);
+    if (ec) {
+      throw std::runtime_error("failed to move parsed database '" + tmp.string() +
+                               "' into place at '" + target.string() +
+                               "': " + ec.message());
+    }
+  } catch (...) {
+    std::error_code ec;
+    fs::remove(tmp, ec);
+    throw;
+  }
 }
 
 }  // namespace clangquill::store

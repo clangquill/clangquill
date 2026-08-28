@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -55,18 +56,13 @@ class SqliteStore {
   /// build one database: files are upserted, so a header a previous batch
   /// already wrote keeps the id that batch's symbols reference, and every
   /// other table is keyed by USR and written with `INSERT OR REPLACE` or a
-  /// non-destructive upsert. Nothing is ever deleted here, so a caller
-  /// replacing an existing parse calls @ref clear once before the first
-  /// batch; refreshing part of an IR in place is @ref write_tus.
+  /// non-destructive upsert. Nothing is ever deleted here, so this is meant to
+  /// be called against a database that starts empty — see
+  /// @ref write_streamed_full_parse, which drives exactly that; refreshing
+  /// part of an IR in place is @ref write_tus.
   /// @param module The batch's IR.
   /// @param meta Metadata stored alongside the IR.
   void write_part(const model::ParsedModule& module, const Meta& meta);
-
-  /// @brief Deletes every IR row, in a single transaction.
-  ///
-  /// Leaves the schema and the `meta` rows in place. A streamed full parse
-  /// calls this once up front to get the replacing semantics @ref write has.
-  void clear();
 
   /// @brief Re-writes the re-parsed translation units' rows into an existing DB.
   ///
@@ -130,5 +126,34 @@ class SqliteStore {
 
   Db db_;
 };
+
+/// @brief Receives one batch of a streamed full parse, as @ref write_part would.
+using BatchSink = std::function<void(model::ParsedModule&&)>;
+
+/// @brief Streams a full parse into `path`, replacing it only once it succeeds.
+///
+/// `produce` is called exactly once, and hands it a sink to invoke for every
+/// batch of a streamed parse (mirroring `parser::PartSink`). Every batch lands
+/// in a fresh temporary database created next to `path`, via @ref write_part —
+/// `path` itself is never opened for writing. Only once `produce` returns
+/// without throwing is the temporary file renamed over `path`, atomically
+/// replacing whatever was there (or creating it fresh).
+///
+/// This is what gives a streamed full parse — which, unlike @ref write, has no
+/// single transaction to roll back — the same all-or-nothing guarantee for the
+/// *target path*: an exception from `produce` (a hard parse failure, a
+/// constraint violation) or the process being killed mid-parse discards the
+/// temporary file and leaves `path` exactly as it was, rather than holding a
+/// mix of an old IR's rows and however many batches had landed (#317).
+///
+/// @param path Filesystem path of the target database.
+/// @param meta Metadata stored alongside every batch.
+/// @param produce Callback that drives the parse, calling the sink it is given
+///        once per batch.
+/// @throws Whatever `produce` throws, or std::runtime_error if the temporary
+///         file cannot be created or the final rename fails.
+void write_streamed_full_parse(
+    const std::string& path, const Meta& meta,
+    const std::function<void(const BatchSink&)>& produce);
 
 }  // namespace clangquill::store
