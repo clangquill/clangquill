@@ -476,6 +476,33 @@ def test_schema_version_exposed() -> None:
     assert _core.SCHEMA_VERSION >= 1
 
 
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_ir_carries_no_dead_weight(tmp_path: Path) -> None:
+    """The IR holds one representation of a comment, and no unwritten tables.
+
+    ``comments.fields_json`` used to duplicate — as a serialized blob, on every
+    documented symbol — the model ``comment_fields`` already spells out, and
+    nothing read it. The ``outputs`` table was declared but never written or
+    read (the build cache keeps its own, differently shaped one in a separate
+    database). Both are gone; this guards against either coming back.
+    """
+    header = tmp_path / "demo.hpp"
+    header.write_text(FIXTURE)
+    db = tmp_path / "out.sqlite"
+    _core.parse_to_sqlite([str(header)], str(db), _core.ParseOptions())
+
+    con = sqlite3.connect(db)
+    try:
+        tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert "comment_fields" in tables
+        assert "outputs" not in tables
+
+        columns = {row[1] for row in con.execute("PRAGMA table_info(comments)")}
+        assert columns == {"symbol_usr", "raw_text", "format"}
+    finally:
+        con.close()
+
+
 def test_store_open_rejects_incompatible_schema_version(tmp_path: Path) -> None:
     db = tmp_path / "old.sqlite"
     con = sqlite3.connect(db)

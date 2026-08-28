@@ -560,7 +560,8 @@ TEST_CASE("inline markup and HTML reach the reader", "[comments]") {
   CHECK(prose.find("{cpp:any}`some-page`") == std::string::npos);
 }
 
-TEST_CASE("parsed comments store a format and JSON projection", "[comments]") {
+TEST_CASE("a parsed comment stores its format alongside its fields",
+          "[comments]") {
   auto m = parse_fixture("doxygen.hpp");
   const auto* divide = find(m, "doc::divide");
   REQUIRE(divide != nullptr);
@@ -570,11 +571,17 @@ TEST_CASE("parsed comments store a format and JSON projection", "[comments]") {
     if (c.symbol_usr == divide->usr) {
       found = true;
       CHECK(c.format == "doxygen");
-      CHECK(c.fields_json.find("\"brief\"") != std::string::npos);
-      CHECK(c.fields_json.find("quotient") != std::string::npos);
     }
   }
   CHECK(found);
+
+  // The structured parse lives in `comment_fields` and nowhere else; the row
+  // above carries only the verbatim text and the dialect it was parsed as.
+  auto fs = fields_of(m, divide->usr);
+  REQUIRE(field(fs, "brief") != nullptr);
+  const Field* returns = field(fs, "returns");
+  REQUIRE(returns != nullptr);
+  CHECK(returns->value.find("quotient") != std::string::npos);
 }
 
 #else  // !CLANGQUILL_HAVE_LIBCLANG

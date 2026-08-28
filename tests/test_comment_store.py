@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,6 +12,7 @@ from clangquill.comments import OVERRIDE_ENV, CommentModel
 from clangquill.store import Store
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 FIXTURE = """
@@ -105,3 +107,63 @@ def test_comment_python_override_replaces_default(
         assert model.brief == "OVERRIDDEN"
         # The override receives the verbatim raw comment, not the C++ parse.
         assert "@param x" in model.detail[0]
+
+
+def _first_documented_usr(store: Store) -> str:
+    for symbol in store.symbols():
+        if store.raw_comment(symbol.usr) is not None:
+            return symbol.usr
+    msg = "the fixture database has no documented symbol"
+    raise AssertionError(msg)
+
+
+@contextmanager
+def _counted_queries(store: Store) -> Iterator[list[str]]:
+    """Record the SQL a store runs inside the block."""
+    seen: list[str] = []
+    store._con.set_trace_callback(seen.append)  # noqa: SLF001
+    try:
+        yield seen
+    finally:
+        store._con.set_trace_callback(None)  # noqa: SLF001
+
+
+def test_comment_is_memoised_per_usr(fixture_db: Path) -> None:
+    """A symbol's model is built once, however many pages render it."""
+    with Store.open(fixture_db) as store:
+        usr = _first_documented_usr(store)
+        first = store.comment(usr)
+        assert first is not None
+
+        with _counted_queries(store) as queries:
+            # The memo hands back the very object the first read built, so the
+            # `comments` + `comment_fields` queries do not run again.
+            assert store.comment(usr) is first
+        assert queries == []
+
+
+def test_comment_memo_holds_an_undocumented_symbol(fixture_db: Path) -> None:
+    """``None`` is memoised too, so an undocumented symbol is not re-queried."""
+    with Store.open(fixture_db) as store:
+        undocumented = next(s.usr for s in store.symbols() if store.raw_comment(s.usr) is None)
+        assert store.comment(undocumented) is None
+
+        with _counted_queries(store) as queries:
+            assert store.comment(undocumented) is None
+        assert queries == []
+
+
+def test_comment_memo_is_dropped_when_the_parser_changes(fixture_db: Path) -> None:
+    """Switching parsers re-reads rather than serving the other parser's models."""
+    with Store.open(fixture_db) as store:
+        usr = _first_documented_usr(store)
+        default = store.comment(usr)
+        assert default is not None
+        assert default.brief != "OVERRIDDEN"
+
+        overridden = store.comment(usr, parser=tagging_parser)
+        assert overridden is not None
+        assert overridden.brief == "OVERRIDDEN"
+
+        # ... and back again.
+        assert store.comment(usr) == default

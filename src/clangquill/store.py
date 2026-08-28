@@ -73,12 +73,11 @@ class RefKind(IntEnum):
 
 @dataclass(frozen=True)
 class RawComment:
-    """A row from the ``comments`` table: the verbatim text plus its parse."""
+    """A row from the ``comments`` table: the verbatim text and its dialect."""
 
     symbol_usr: str
     raw_text: str
     format: str
-    fields_json: str
 
 
 @dataclass(frozen=True)
@@ -179,6 +178,11 @@ class Store:
         """Wrap an open sqlite3 connection (use :meth:`open` instead)."""
         self._con = connection
         self._con.row_factory = sqlite3.Row
+        # Per-USR memo for comment(): a documented symbol is read once by the
+        # dependency-fingerprint pass and again by every page that renders it,
+        # and each miss costs two queries plus a model reconstruction.
+        self._comment_cache: dict[str, CommentModel | None] = {}
+        self._comment_parser: CommentParser | None = None
 
     @classmethod
     @contextmanager
@@ -455,7 +459,7 @@ class Store:
     def raw_comment(self, usr: str) -> RawComment | None:
         """Return the raw ``comments`` row for ``usr``, or ``None``."""
         row = self._con.execute(
-            "SELECT symbol_usr, raw_text, format, fields_json FROM comments WHERE symbol_usr = ?",
+            "SELECT symbol_usr, raw_text, format FROM comments WHERE symbol_usr = ?",
             (usr,),
         ).fetchone()
         if row is None:
@@ -464,7 +468,6 @@ class Store:
             symbol_usr=row["symbol_usr"],
             raw_text=row["raw_text"],
             format=row["format"],
-            fields_json=row["fields_json"] or "",
         )
 
     def comment(
@@ -481,11 +484,28 @@ class Store:
         variable) the symbol's raw comment text is re-parsed by that callable
         instead, so the comment format stays swappable from pure Python.
         Returns ``None`` for an undocumented symbol.
+
+        The result is memoised per USR for the lifetime of the store, which is
+        read-only, so the model cannot go stale under it. Callers therefore
+        share one :class:`~clangquill.comments.CommentModel` per symbol and
+        must treat it as read-only. Switching parsers mid-store drops the memo
+        rather than serving the previous parser's models.
         """
+        override = resolve_override(parser)
+        if override is not self._comment_parser:
+            self._comment_cache.clear()
+            self._comment_parser = override
+        elif usr in self._comment_cache:
+            return self._comment_cache[usr]
+        model = self._read_comment(usr, override)
+        self._comment_cache[usr] = model
+        return model
+
+    def _read_comment(self, usr: str, override: CommentParser | None) -> CommentModel | None:
+        """Return ``usr``'s comment model straight from the database (no memo)."""
         raw = self.raw_comment(usr)
         if raw is None:
             return None
-        override = resolve_override(parser)
         if override is not None:
             return override(raw.raw_text)
         rows = self._con.execute(
