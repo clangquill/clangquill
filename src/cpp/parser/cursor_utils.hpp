@@ -177,14 +177,19 @@ bool in_file(CXCursor c, const std::string& main_file);
 /// different strings. Comparing those strings silently attributes nothing.
 using FileIdSet = std::set<std::array<unsigned long long, 3>>;
 
-/// @brief Returns @p path as a normalized absolute path.
+/// @brief Returns @p path as a normalized, OS-canonicalized absolute path.
 ///
 /// libclang reports a file by the spelling it was reached with, so the same
 /// header can arrive as `./Eigen/src/Core/Matrix.h` and as an absolute path
-/// within one run. Recording either verbatim puts two rows in the IR for one
-/// file and — for the relative one — a path that means something different to
-/// whoever reopens the IR from another directory. Absolute paths are returned
-/// unchanged, so the common case costs one check.
+/// within one run — or, on a case-insensitive filesystem (Windows'
+/// NTFS/ReFS), as `Foo.h` from one `#include` and `foo.h` from another.
+/// Recording any of these verbatim puts two rows in the IR for one file and
+/// — for the relative one — a path that means something different to whoever
+/// reopens the IR from another directory. This asks the filesystem for the
+/// real on-disk spelling of the longest existing path prefix (also resolving
+/// symlinks), so every spelling of one physical file collapses to the same
+/// tracked path; a process-wide cache keeps that OS query to once per
+/// distinct input spelling, since this runs once per symbol on a hot path.
 std::string normalized_path(const std::string& path);
 
 /// @brief Returns @p file's identity, or `std::nullopt` if libclang has none.

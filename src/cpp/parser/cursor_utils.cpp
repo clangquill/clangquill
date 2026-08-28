@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <mutex>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 namespace clangquill::parser {
@@ -435,12 +437,48 @@ bool in_file(CXCursor c, const std::string& main_file) {
 
 std::string normalized_path(const std::string& path) {
   if (path.empty()) return path;
+
+  // fill_location calls this once per symbol, and parser.cpp's inclusion-edge
+  // and record_file call sites add one more call per #include -- a hot path
+  // on a large TU. Below, OS-level canonicalization asks the filesystem for
+  // the file's real on-disk spelling, so the result is cached process-wide
+  // keyed on the exact (pre-canonicalization) input string: the same
+  // spelling recurs constantly (a header's own path, reused across every
+  // symbol it declares), while the OS query itself only has to run once per
+  // spelling ever seen. Mirrors record_file's own (path -> ...) cache below.
+  static std::mutex cache_mutex;
+  static std::unordered_map<std::string, std::string> cache;
+  {
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = cache.find(path);
+    if (it != cache.end()) return it->second;
+  }
+
   std::filesystem::path p(path);
-  if (p.is_absolute()) return p.lexically_normal().string();
   std::error_code ec;
-  std::filesystem::path abs = std::filesystem::absolute(p, ec);
-  if (ec) return path;
-  return abs.lexically_normal().string();
+  std::filesystem::path abs = p.is_absolute() ? p : std::filesystem::absolute(p, ec);
+  std::string result;
+  if (ec) {
+    result = path;
+  } else {
+    // weakly_canonical resolves the real on-disk spelling of the longest
+    // existing leading portion of the path -- symlinks, and on a
+    // case-insensitive filesystem (Windows' NTFS/ReFS) case -- then lexically
+    // normalizes whatever doesn't exist yet. That's what collapses two
+    // #include spellings of one physical header (`Foo.h` vs `foo.h`) to a
+    // single tracked path (issue #329), the same OS mechanism
+    // (GetFinalPathNameByHandleW on Windows) `pipeline.py`'s
+    // `Path.resolve()` already uses for the top-level input list. Falls back
+    // to the lexically normalized absolute path if the OS query itself fails
+    // (e.g. a permissions error, or a path that never exists on disk at all).
+    std::error_code canon_ec;
+    std::filesystem::path canon = std::filesystem::weakly_canonical(abs, canon_ec);
+    result = (canon_ec ? abs.lexically_normal() : canon).string();
+  }
+
+  std::lock_guard<std::mutex> lock(cache_mutex);
+  cache.emplace(path, result);
+  return result;
 }
 
 std::optional<std::array<unsigned long long, 3>> file_identity(CXFile file) {
