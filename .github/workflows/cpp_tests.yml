@@ -82,6 +82,47 @@ jobs:
           flags: cpp
           fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
+  ctest-no-libclang:
+    # A second, separately-named job rather than a matrix leg on `ctest`:
+    # matrixing that job would rename its check run away from the bare
+    # "C++ unit tests" branch protection requires, permanently blocking every
+    # future PR. This job builds the same Catch2 binary with
+    # CLANGQUILL_HAVE_LIBCLANG undefined, which swaps the parser/m7/
+    # comment-parser suites for their `[!mayfail]` stub TEST_CASEs — that
+    # branch was otherwise never compiled, let alone run, in CI (issue 226).
+    # No libclang-dev is installed here on purpose: a build that silently
+    # found some other libclang would defeat the point.
+    name: C++ unit tests (no libclang)
+    runs-on: ubuntu-24.04
+    env:
+          # sqlite.org 403s vcpkg's default downloader, so distfiles go through
+          # a browser-User-Agent script (SHA512 is still checked by vcpkg).
+      X_VCPKG_ASSET_SOURCES: >-
+        clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
+        {url} {sha512} {dst}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install nanobind (build-time dependency)
+        run: python -m pip install nanobind
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCLANGQUILL_WITH_LIBCLANG=OFF
+          -DCLANGQUILL_BUILD_TESTS=ON
+          -DCMAKE_BUILD_TYPE=Debug
+          -DPython_EXECUTABLE="$(which python)"
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
   ctest-windows:
     # The Catch2 suite has only ever run on Linux/gcc/libstdc++, while a
     # Windows wheel ships to users every release: everything MSVC does

@@ -207,6 +207,19 @@ def build(  # noqa: PLR0913
     except ConfigError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
+    if not _core.have_libclang():
+        # Fail before touching the pipeline: parse_to_sqlite would otherwise
+        # raise a raw RuntimeError from the C++ stub backend. Unlike the
+        # Sphinx extension there is no toctree to keep resolving, so there is
+        # nothing graceful to degrade to — report it cleanly and stop.
+        typer.echo(
+            "Error: clangquill was built without libclang (stub backend) — cannot parse. "
+            "Install a distribution with libclang bundled, or build with "
+            "-DCLANGQUILL_WITH_LIBCLANG=ON.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     try:
         result = run_pipeline(config, base_dir=Path.cwd())
     except FileNotFoundError as exc:
