@@ -190,6 +190,21 @@ std::string normalized_path(const std::string& path);
 /// @brief Returns @p file's identity, or `std::nullopt` if libclang has none.
 std::optional<std::array<unsigned long long, 3>> file_identity(CXFile file);
 
+/// @brief Folds @p path for a case-insensitive-on-Windows lookup key.
+///
+/// Not for display or storage: it exists so a `main_files.count(name)`-style
+/// membership check does not fragment across case on a filesystem that does
+/// not distinguish it. Windows' filesystems (NTFS, ReFS) are case-insensitive
+/// by default even though `std::string`/`std::filesystem::path` comparison is
+/// not, so this folds ASCII case there and returns @p path unchanged
+/// everywhere else -- POSIX filesystems are case-sensitive, and folding on a
+/// case-sensitive filesystem would wrongly conflate `Foo.h` and `foo.h`.
+/// ASCII-only: the result is only ever compared to another key this function
+/// produced, so it never has to agree with how an OS API spells a path.
+/// @param path The path string to fold.
+/// @return @p path, case-folded on Windows.
+std::string path_lookup_key(const std::string& path);
+
 /// @brief Tests whether a cursor's location is in one of the given files.
 /// @param c The cursor to test.
 /// @param main_files Accepted file path spellings.

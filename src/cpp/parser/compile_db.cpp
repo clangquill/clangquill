@@ -16,10 +16,11 @@ namespace {
 /// @brief Whether @p arg names the same file as @p path.
 ///
 /// A compile_commands.json is free to spell its source file differently from
-/// the path we look it up with -- relative to the entry's `directory`, or with
-/// unresolved `..` segments -- so a plain string comparison is not enough.
-/// Missing this leaves the source path in the argument list, and libclang then
-/// sees two input files and fails to create the translation unit at all.
+/// the path we look it up with -- relative to the entry's `directory`, with
+/// unresolved `..` segments, a different case, or `\` in place of `/` -- so a
+/// plain string comparison is not enough. Missing this leaves the source path
+/// in the argument list, and libclang then sees two input files and fails to
+/// create the translation unit at all.
 bool names_same_file(const std::filesystem::path& dir, const std::string& arg,
                      const std::string& path) {
   if (arg == path) return true;
@@ -28,14 +29,27 @@ bool names_same_file(const std::filesystem::path& dir, const std::string& arg,
   if (arg.empty() || arg.front() == '-') return false;
   std::filesystem::path candidate(arg);
   if (candidate.is_relative() && !dir.empty()) candidate = dir / candidate;
+  const std::filesystem::path path_arg(path);
+  // Identity first: the OS knows whether two spellings name the same file --
+  // case folding on a case-insensitive volume, symlinks, `..` segments --
+  // without this reimplementing that per platform. Requires both sides to
+  // exist, which the file the database names and the file this project is
+  // resolving a command for both normally do.
+  std::error_code eq_ec;
+  const bool equivalent = std::filesystem::equivalent(candidate, path_arg, eq_ec);
+  if (!eq_ec) return equivalent;
+  // One side doesn't exist yet (a stale entry, a generated header not built
+  // yet): fall back to comparing the weakly-canonicalized spellings, folded
+  // case-insensitively on Windows the same way the identity check above would
+  // have been had both paths existed.
   std::error_code arg_ec;
   std::error_code path_ec;
   const std::filesystem::path resolved_arg =
       std::filesystem::weakly_canonical(candidate, arg_ec);
   const std::filesystem::path resolved_path =
-      std::filesystem::weakly_canonical(std::filesystem::path(path), path_ec);
+      std::filesystem::weakly_canonical(path_arg, path_ec);
   if (arg_ec || path_ec) return false;
-  return resolved_arg == resolved_path;
+  return path_lookup_key(resolved_arg.string()) == path_lookup_key(resolved_path.string());
 }
 
 /// @brief Whether @p arg starts with @p prefix.
@@ -213,17 +227,22 @@ bool CompileDb::lists_file(const std::string& path) const {
         std::error_code ec;
         const std::filesystem::path resolved =
             std::filesystem::weakly_canonical(file, ec);
-        files_.insert(ec ? file.lexically_normal().string() : resolved.string());
+        // Folded case-insensitively on Windows: `files_` only ever answers a
+        // membership question, so nothing depends on the case it stores, and
+        // an unfolded key would fragment a database that spells the same file
+        // two ways (relative vs the `directory` prefix already resolves it,
+        // or plain case) across two entries.
+        files_.insert(path_lookup_key(ec ? file.lexically_normal().string() : resolved.string()));
       }
       clang_CompileCommands_dispose(all);
     }
   }
-  if (files_.count(path) != 0) return true;
+  if (files_.count(path_lookup_key(path)) != 0) return true;
   std::error_code ec;
   const std::filesystem::path resolved =
       std::filesystem::weakly_canonical(std::filesystem::path(path), ec);
   if (ec) return false;
-  return files_.count(resolved.string()) != 0;
+  return files_.count(path_lookup_key(resolved.string())) != 0;
 }
 
 }  // namespace clangquill::parser

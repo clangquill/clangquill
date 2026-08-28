@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1333,6 +1334,26 @@ def test_resolve_inputs_still_globs_when_no_literal_file_exists(tmp_path: Path) 
     resolved = pipeline._resolve_inputs(["*.h"], tmp_path)  # noqa: SLF001
 
     assert resolved == sorted(str(p.resolve()) for p in [tmp_path / "a.h", tmp_path / "b.h"])
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="case-insensitive-filesystem semantics only apply on Windows")
+def test_resolve_inputs_normalizes_case_on_windows(tmp_path: Path) -> None:
+    # NTFS is case-insensitive but case-preserving. ``BuildCache.deps_only_from``
+    # and ``tu_inputs`` (cache.py) key straight off these resolved strings, so if
+    # two spellings of the same input resolved to two different strings here, the
+    # same physical translation unit would look like two distinct inputs to the
+    # cache's per-TU dependency map -- silently breaking stale-row pruning across
+    # a rebuild that happened to spell an input differently than the one before it
+    # (issue 313). ``Path.resolve()`` is what keeps this safe: on Windows it asks
+    # the OS for the file's one true on-disk spelling, whichever case the caller
+    # used to name it.
+    header = tmp_path / "Foo.hpp"
+    header.write_text("// foo\n")
+
+    resolved_matching_case = pipeline._resolve_inputs(["Foo.hpp"], tmp_path)  # noqa: SLF001
+    resolved_other_case = pipeline._resolve_inputs(["FOO.HPP"], tmp_path)  # noqa: SLF001
+
+    assert resolved_matching_case == resolved_other_case == [str(header.resolve())]
 
 
 @requires_libclang
