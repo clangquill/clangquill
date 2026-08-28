@@ -31,9 +31,30 @@ SqliteStore::SqliteStore(const std::string& path) : db_(path) {
 void SqliteStore::write(const model::ParsedModule& module, const Meta& meta) {
   Transaction tx(db_);
   put_meta(meta);
+  clear_all();
   FileIds file_ids = insert_files(module);
   insert_rows(module, file_ids);
   tx.commit();
+}
+
+void SqliteStore::clear_all() {
+  // Children before parents, spelled out explicitly rather than relying on
+  // `ON DELETE CASCADE`: symbols' cascades cover function_parameters,
+  // template_parameters, enumerators, references_, comments, comment_fields
+  // and outputs, and groups' cascade covers group_members — but files has no
+  // cascade from symbols (a file row is never dropped on the ordinary
+  // paths), so symbols must go before files regardless.
+  db_.exec("DELETE FROM group_members;");
+  db_.exec("DELETE FROM groups;");
+  db_.exec("DELETE FROM outputs;");
+  db_.exec("DELETE FROM comment_fields;");
+  db_.exec("DELETE FROM comments;");
+  db_.exec("DELETE FROM references_;");
+  db_.exec("DELETE FROM enumerators;");
+  db_.exec("DELETE FROM template_parameters;");
+  db_.exec("DELETE FROM function_parameters;");
+  db_.exec("DELETE FROM symbols;");
+  db_.exec("DELETE FROM files;");
 }
 
 void SqliteStore::write_tus(

@@ -1,10 +1,13 @@
 #include "parser/ast_visitor.hpp"
 
+#include <algorithm>
 #include <map>
 #include <optional>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "hash/content_hash.hpp"
 #include "parser/comment_parser.hpp"
@@ -196,7 +199,19 @@ bool is_forward_declarable(model::SymbolKind kind) {
 // declaration was documented — a forward declaration reports its definition's
 // comment whenever both are in the same unit. So ask where the comment sits: it
 // belongs to this cursor when it ends in the same file, on or just above the
-// line the cursor starts on. Trailing `///<` comments end on that line too.
+// line the declaration starts on. Trailing `///<` comments end on that line
+// too.
+//
+// The declaration's start is the start of its *extent*, not the cursor
+// location: the latter is where the entity is named, which a template head or
+// an attribute puts lines below the comment --
+//
+//     /// An opaque handle type.
+//     template <typename T>
+//     class Foo;
+//
+// -- and measuring against the `Foo` line called that comment somebody else's,
+// dropping a deliberately documented forward declaration.
 bool documented_here(CXCursor c) {
   CXSourceRange range = clang_Cursor_getCommentRange(c);
   if (clang_Range_isNull(range) != 0) return false;
@@ -204,7 +219,8 @@ bool documented_here(CXCursor c) {
   CXFile cursor_file = nullptr;
   unsigned comment_end = 0, cursor_line = 0, col = 0, off = 0;
   clang_getSpellingLocation(clang_getRangeEnd(range), &comment_file, &comment_end, &col, &off);
-  clang_getSpellingLocation(clang_getCursorLocation(c), &cursor_file, &cursor_line, &col, &off);
+  clang_getSpellingLocation(clang_getRangeStart(clang_getCursorExtent(c)),
+                            &cursor_file, &cursor_line, &col, &off);
   if (comment_file == nullptr || clang_File_isEqual(comment_file, cursor_file) == 0) return false;
   return comment_end + 1 >= cursor_line;
 }
@@ -366,12 +382,62 @@ std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx,
   return usr;
 }
 
+// True when the enum declaration spells its own underlying type
+// (`enum class E : std::uint8_t`) rather than leaving it to the implementation.
+//
+// libclang has no query for this: clang_getEnumDeclIntegerType answers with the
+// type the implementation chose for an enum that fixes none, and with `int` for
+// both `enum class E` and `enum class E : int`. The `:` introducing the type is
+// what tells the two apart, so the declaration head -- everything up to the
+// first enumerator -- is tokenized to look for one. A qualified type name
+// spells `::` as a single token, so a bare `:` there is unambiguous.
+bool has_fixed_underlying_type(CXCursor enum_cursor) {
+  CXSourceRange extent = clang_getCursorExtent(enum_cursor);
+  if (clang_Range_isNull(extent) != 0) return false;
+
+  // Stop at the first enumerator so a large enum body is not tokenized (and so
+  // a `? :` in an enumerator's initializer cannot be mistaken for the type's).
+  CXSourceLocation head_end = clang_getRangeEnd(extent);
+  clang_visitChildren(
+      enum_cursor,
+      [](CXCursor child, CXCursor, CXClientData data) {
+        if (clang_getCursorKind(child) != CXCursor_EnumConstantDecl) {
+          return CXChildVisit_Continue;
+        }
+        *static_cast<CXSourceLocation*>(data) =
+            clang_getRangeStart(clang_getCursorExtent(child));
+        return CXChildVisit_Break;
+      },
+      &head_end);
+
+  CXTranslationUnit tu = clang_Cursor_getTranslationUnit(enum_cursor);
+  CXSourceRange head = clang_getRange(clang_getRangeStart(extent), head_end);
+  CXToken* tokens = nullptr;
+  unsigned count = 0;
+  clang_tokenize(tu, head, &tokens, &count);
+  bool fixed = false;
+  for (unsigned t = 0; t < count && !fixed; ++t) {
+    fixed = clang_getTokenKind(tokens[t]) == CXToken_Punctuation &&
+            to_string(clang_getTokenSpelling(tu, tokens[t])) == ":";
+  }
+  if (tokens != nullptr) clang_disposeTokens(tu, tokens, count);
+  return fixed;
+}
+
 void extract_enum(CXCursor enum_cursor, const std::string& enum_usr,
                   VisitCtx& ctx) {
   bool is_signed = true;
   CXType underlying = clang_getEnumDeclIntegerType(enum_cursor);
-  switch (underlying.kind) {
+  // Canonicalized first: the underlying type is written through a typedef at
+  // least as often as with a builtin keyword, and `std::uint64_t` arrives as
+  // CXType_Typedef (or CXType_Elaborated), neither of which is a case below.
+  // Reading that sugar as signed stores `Max = 0xFFFFFFFFFFFFFFFF` as -1.
+  switch (clang_getCanonicalType(underlying).kind) {
+    case CXType_Bool:
+    case CXType_Char_U:
     case CXType_UChar:
+    case CXType_Char16:
+    case CXType_Char32:
     case CXType_UShort:
     case CXType_UInt:
     case CXType_ULong:
@@ -381,6 +447,16 @@ void extract_enum(CXCursor enum_cursor, const std::string& enum_usr,
       break;
     default:
       break;
+  }
+
+  // The written underlying type is an edge like any other type mention, and the
+  // only one RefKind::EnumIntegerType is for. It is recorded with the sugar the
+  // author wrote (`std::uint8_t`, not `unsigned char`), matching every other
+  // reference. Only a *fixed* type is recorded: the implementation-chosen one
+  // is not something the header says.
+  if (has_fixed_underlying_type(enum_cursor)) {
+    ctx.mod->references.push_back(make_type_ref(
+        enum_usr, model::RefKind::EnumIntegerType, underlying, 0));
   }
 
   struct EnumCtx {
@@ -803,13 +879,92 @@ unsigned token_line(CXTranslationUnit tu, CXToken token, bool end) {
   return line;
 }
 
+// Where a token starts, in 1-based line and column.
+struct TokenStart {
+  unsigned line = 0;
+  unsigned column = 0;
+};
+
+TokenStart token_start(CXTranslationUnit tu, CXToken token) {
+  TokenStart pos;
+  unsigned off = 0;
+  CXSourceRange extent = clang_getTokenExtent(tu, token);
+  clang_getSpellingLocation(clang_getRangeStart(extent), nullptr, &pos.line,
+                            &pos.column, &off);
+  return pos;
+}
+
+// A file's lines, for the two questions about the source text the token stream
+// cannot answer: whether a comment is the first thing on its line, and which
+// line below a comment block is the first that carries anything.
+class LineIndex {
+ public:
+  explicit LineIndex(std::string_view contents) {
+    std::size_t start = 0;
+    for (;;) {
+      std::size_t nl = contents.find('\n', start);
+      lines_.push_back(contents.substr(
+          start, nl == std::string_view::npos ? std::string_view::npos
+                                              : nl - start));
+      if (nl == std::string_view::npos) break;
+      start = nl + 1;
+    }
+  }
+
+  /// True when everything before @p column on @p line is whitespace.
+  bool starts_line(unsigned line, unsigned column) const {
+    if (column <= 1) return true;
+    std::string_view text = at(line);
+    const std::size_t upto = std::min<std::size_t>(column - 1, text.size());
+    return is_blank(text.substr(0, upto));
+  }
+
+  /// The first line at or below @p line that is not whitespace-only.
+  unsigned next_content_line(unsigned line) const {
+    while (line <= lines_.size() && is_blank(at(line))) ++line;
+    return line;
+  }
+
+ private:
+  std::string_view at(unsigned line) const {
+    return line >= 1 && line <= lines_.size() ? lines_[line - 1]
+                                              : std::string_view{};
+  }
+
+  static bool is_blank(std::string_view s) {
+    return s.find_first_not_of(" \t\r\f\v") == std::string_view::npos;
+  }
+
+  std::vector<std::string_view> lines_;
+};
+
+// True for a comment block Doxygen would read as documentation for whatever
+// follows it: one opening with a doc marker. A plain `//` or `/* */` block --
+// a `// TODO:`, a commented-out line, a license header -- documents nothing,
+// and publishing it as the documentation of the `#define` below also marks
+// that macro is_documented, which passes it through the documented-only filter
+// and onto a rendered page.
+//
+// The `<` variants (`///<`, `/**<`) are deliberately not markers here: those
+// document the *preceding* entity, so a trailing one must not be handed to the
+// next declaration down.
+bool is_doc_block(const std::string& block) {
+  for (std::string_view marker : {"///", "//!", "/**", "/*!"}) {
+    if (block.rfind(marker, 0) != 0) continue;
+    return block.size() == marker.size() || block[marker.size()] != '<';
+  }
+  return false;
+}
+
 // Tokenizes one source file and feeds free-floating comment blocks to the group
 // scanner so `\defgroup` definitions (and their following description lines)
 // become group rows. Consecutive line comments (`///`) tokenize separately, so
 // line-adjacent comment tokens are merged back into one block first.
 void scan_free_comments(CXTranslationUnit tu, CXFile file, VisitCtx& ctx) {
   std::size_t size = 0;
-  if (clang_getFileContents(tu, file, &size) == nullptr || size == 0) return;
+  const char* contents = clang_getFileContents(tu, file, &size);
+  if (contents == nullptr || size == 0) return;
+  const LineIndex lines{std::string_view(contents, size)};
   CXSourceLocation begin = clang_getLocationForOffset(tu, file, 0);
   CXSourceLocation end =
       clang_getLocationForOffset(tu, file, static_cast<unsigned>(size));
@@ -829,16 +984,26 @@ void scan_free_comments(CXTranslationUnit tu, CXFile file, VisitCtx& ctx) {
   auto flush = [&]() {
     if (block.empty()) return;
     scan_group_definitions(block, normalized_file, ctx);
-    // Record the block against the line it precedes, for macro doc lookup.
-    if (ctx.doc_above_line != nullptr) {
-      (*ctx.doc_above_line)[{file_name, last_line + 1}] = block;
+    // Record the block against the line it documents, for macro doc lookup --
+    // the first line below it that carries anything, since Doxygen attaches a
+    // block across the blank lines between it and the declaration it belongs
+    // to. Only a block written as documentation is attachable at all.
+    if (ctx.doc_above_line != nullptr && is_doc_block(block)) {
+      const unsigned documents = lines.next_content_line(last_line + 1);
+      (*ctx.doc_above_line)[{file_name, documents}] = block;
     }
     block.clear();
   };
   for (unsigned t = 0; t < count; ++t) {
     if (clang_getTokenKind(tokens[t]) != CXToken_Comment) continue;
-    unsigned start = token_line(tu, tokens[t], /*end=*/false);
-    if (!block.empty() && start > last_line + 1) flush();  // blank-line gap
+    TokenStart start = token_start(tu, tokens[t]);
+    // A block is a run of comment tokens on consecutive lines, each of them
+    // the first thing on its line. A comment trailing code (`#define A 1  //
+    // note`) is not a continuation of the block above: merging it moved the
+    // block's key past the very line it documents.
+    const bool continues = start.line <= last_line + 1 &&
+                           lines.starts_line(start.line, start.column);
+    if (!block.empty() && !continues) flush();
     if (!block.empty()) block += '\n';
     block += to_string(clang_getTokenSpelling(tu, tokens[t]));
     last_line = token_line(tu, tokens[t], /*end=*/true);

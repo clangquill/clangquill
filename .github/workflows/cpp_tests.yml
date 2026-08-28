@@ -82,3 +82,63 @@ jobs:
           flags: cpp
           fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
+  ctest-windows:
+    # The Catch2 suite has only ever run on Linux/gcc/libstdc++, while a
+    # Windows wheel ships to users every release: everything MSVC does
+    # differently (its standard library, its filesystem semantics, its
+    # case-insensitive paths) was until now covered by nothing but the wheel's
+    # own import check.
+    name: C++ unit tests (MSVC)
+    runs-on: windows-2022
+        # The pinned-release fallback below downloads and unpacks a multi-GB
+        # LLVM archive; bound the job so a hang fails fast instead of burning
+        # the 6h GitHub Actions default.
+    timeout-minutes: 60
+    env:
+          # sqlite.org 403s vcpkg's default downloader, so distfiles go through
+          # a browser-User-Agent script (SHA512 is still checked by vcpkg).
+      X_VCPKG_ASSET_SOURCES: >-
+        clear;x-script,powershell -NoProfile -ExecutionPolicy Bypass -File
+        ${{ github.workspace }}\tools\ci\vcpkg-asset-fetch.ps1 {url}
+        {sha512} {dst}
+      # Matches the Windows wheel build: sqlite3, nlohmann-json and catch2 link
+      # statically against the dynamic CRT, so no third-party DLL has to sit
+      # next to the test executable.
+      VCPKG_TARGET_TRIPLET: x64-windows-static-md
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install nanobind (build-time dependency)
+        run: python -m pip install nanobind
+          # The same libclang the Windows wheels bundle, not whatever LLVM the
+          # runner image happens to ship. This job exists to catch what MSVC
+          # does differently, and an uncontrolled second variable — a libclang
+          # whose comment parser attaches a command's trailing prose
+          # differently, say — turns a divergence into a guess. verify-extraction
+          # pins its toolchain for the same reason. The image's own LLVM was
+          # tried first and is what made that concrete: it fails a comment test
+          # that passes here against both libclang 18 and 22.
+      - name: Fetch the pinned libclang
+        shell: pwsh
+        run: |
+          Write-Host "pinned LLVM: $((Get-Content tools\ci\llvm-version.txt -Raw).Trim())"
+          & .\tools\ci\fetch-libclang.ps1 -Prefix C:\libclang
+          "LIBCLANG_ROOT=C:\libclang" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "C:\libclang\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          # The Visual Studio generator is the one that needs no vcvars dance;
+          # it is multi-config, hence --config on the build and -C on ctest.
+      - name: Configure
+        run: >-
+          cmake -S . -B build -A x64
+          -DCLANGQUILL_WITH_LIBCLANG=ON
+          -DCLANGQUILL_BUILD_TESTS=ON
+          -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+          -DLibClang_ROOT="$env:LIBCLANG_ROOT"
+          -DPython_EXECUTABLE="$((Get-Command python).Source)"
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure

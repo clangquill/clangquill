@@ -1,0 +1,64 @@
+{
+    "description": "The common Doxygen commands in one Javadoc-style block, including an unknown command that must land in `custom`.",
+    "raw": "\n/**\n * Computes the quotient of two integers.\n *\n * Second paragraph is detail.\n *\n * @param numerator the value to divide\n * @param denominator the divisor\n * @tparam T element type\n * @return the integer quotient\n * @retval 0 when the numerator is zero\n * @throws std::domain_error if denominator is zero\n * @note truncates toward zero\n * @warning undefined for INT_MIN\n * @since 1.2\n * @deprecated use divide2\n * @see multiply\n * @author Ada\n */\n",
+    "expected": {
+        "brief": "Computes the quotient of two integers.",
+        "detail": [
+            "Second paragraph is detail."
+        ],
+        "params": [
+            {
+                "name": "numerator",
+                "description": "the value to divide",
+                "direction": ""
+            },
+            {
+                "name": "denominator",
+                "description": "the divisor",
+                "direction": ""
+            }
+        ],
+        "tparams": [
+            {
+                "name": "T",
+                "description": "element type",
+                "direction": ""
+            }
+        ],
+        "returns": "the integer quotient",
+        "retvals": [
+            {
+                "value": "0",
+                "description": "when the numerator is zero"
+            }
+        ],
+        "throws": [
+            {
+                "exception": "std::domain_error",
+                "description": "if denominator is zero"
+            }
+        ],
+        "see": [
+            "multiply"
+        ],
+        "since": [
+            "1.2"
+        ],
+        "deprecated": [
+            "use divide2"
+        ],
+        "note": [
+            "truncates toward zero"
+        ],
+        "warning": [
+            "undefined for INT_MIN"
+        ],
+        "pre": [],
+        "post": [],
+        "custom": {
+            "author": [
+                "Ada"
+            ]
+        }
+    }
+}

@@ -32,7 +32,10 @@ class DoxygenCommentParser : public ICommentParser {
 
   /// @brief Parses a comment from its raw text alone (no cursor/parsed tree).
   ///
-  /// Used to recover free-floating `\defgroup` blocks that attach to no cursor.
+  /// Used to recover free-floating `\defgroup` blocks that attach to no cursor,
+  /// and is the entry point checked against `tests/comment_corpus/` alongside
+  /// `clangquill.comments.doxygen_parse`, the independent Python implementation
+  /// of the same raw-text scan (see its module docstring).
   /// @param raw The verbatim comment text.
   /// @return The structured comment model.
   static model::CommentModel parse_raw_text(const std::string& raw);

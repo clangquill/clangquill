@@ -714,6 +714,21 @@ def test_friends_block_links_documented_and_inlines_unknown(m7_gen: Generator, m
     assert "`Outsider`" in rendered
 
 
+def test_uncommon_symbol_kinds_render(uncommon_kinds_db: Path) -> None:
+    # UNION, TYPE_ALIAS and FUNCTION_TEMPLATE: exercised by the C++ parser for
+    # years (m7.hpp) but never inserted by any Python-side fixture, so a drift
+    # in the hand-maintained SymbolKind mirror (store.py) would ship silently.
+    with Store.open(uncommon_kinds_db) as store:
+        gen = Generator(store)
+        union_md = gen.render_symbol(_symbol(store, "Variant"))
+        alias_md = gen.render_symbol(_symbol(store, "Handle"))
+        template_md = gen.render_symbol(_symbol(store, "make"))
+
+    assert "{cpp:union} Variant" in union_md
+    assert "{cpp:type} Handle = int" in alias_md
+    assert "{cpp:function} template<typename T> T make()" in template_md
+
+
 def test_related_block_lists_functions_relates_points_at(gen: Generator, store: Store) -> None:
     # `\relates Circle` sits on geo::scale, and Doxygen lists such a function
     # under the class rather than only on its own page.

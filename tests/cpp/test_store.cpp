@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "store/schema.hpp"
+#include "store/sqlite_raii.hpp"
 #include "store/sqlite_store.hpp"
 
 using namespace clangquill;
@@ -99,6 +101,35 @@ model::ParsedModule make_module() {
   c.text = "/// A widget.";
   m.comments.push_back(c);
 
+  model::CommentField field;
+  field.symbol_usr = "c:@S@Widget";
+  field.name = "brief";
+  field.value = "A widget.";
+  m.comment_fields.push_back(field);
+
+  model::Group group;
+  group.id = "widgets";
+  group.title = "Widgets";
+  group.brief = "Widget types.";
+  group.detail = "The long version.";
+  m.groups.push_back(group);
+
+  model::GroupMember member;
+  member.group_id = "widgets";
+  member.member_usr = "c:@S@Widget";
+  m.group_members.push_back(member);
+
+  // Not part of the on-disk schema (no diagnostics table): write()/read() must
+  // silently drop these rather than throw or otherwise choke on them, since
+  // the CLI always shares one ParsedModule between the store and its own
+  // --diagnostics-log writer.
+  model::Diagnostic diag;
+  diag.severity = model::kSeverityWarning;
+  diag.text = "widget is on its way out";
+  diag.file = "/tmp/example.hpp";
+  diag.line = 1;
+  m.diagnostics.push_back(diag);
+
   return m;
 }
 
@@ -184,6 +215,74 @@ TEST_CASE("SqliteStore write/read round-trips the IR", "[store]") {
 
   REQUIRE(got.comments.size() == 1);
   CHECK(got.comments[0].text == "/// A widget.");
+
+  REQUIRE(got.comment_fields.size() == 1);
+  CHECK(got.comment_fields[0].symbol_usr == "c:@S@Widget");
+  CHECK(got.comment_fields[0].name == "brief");
+  CHECK(got.comment_fields[0].value == "A widget.");
+
+  REQUIRE(got.groups.size() == 1);
+  CHECK(got.groups[0].id == "widgets");
+  CHECK(got.groups[0].title == "Widgets");
+  CHECK(got.groups[0].brief == "Widget types.");
+  CHECK(got.groups[0].detail == "The long version.");
+
+  REQUIRE(got.group_members.size() == 1);
+  CHECK(got.group_members[0].group_id == "widgets");
+  CHECK(got.group_members[0].member_usr == "c:@S@Widget");
+
+  // Diagnostics are ephemeral parse output, not IR: the schema has no table
+  // for them, so a round trip must drop them rather than error out.
+  CHECK(got.diagnostics.empty());
+
+  std::remove(path.c_str());
+}
+
+TEST_CASE("SqliteStore write against a non-empty DB replaces prior contents",
+          "[store]") {
+  std::string path = temp_db_path();
+
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(writer.write(make_module(), store::Meta::current()));
+  }
+
+  // Re-running the full write against the same path must neither throw a
+  // UNIQUE-constraint error on repeated paths/usrs nor leave stale rows from
+  // the first parse sitting next to the second's.
+  model::ParsedModule second;
+  model::SourceFile f;
+  f.path = "/tmp/other.hpp";
+  f.sha256 = std::string(64, 'b');
+  f.size_bytes = 42;
+  second.files.push_back(f);
+
+  model::Symbol s;
+  s.usr = "c:@F@only_in_second";
+  s.kind = model::SymbolKind::Function;
+  s.spelling = "only_in_second";
+  s.qualified_name = "only_in_second";
+  s.display_name = "only_in_second()";
+  s.location.file_path = "/tmp/other.hpp";
+  second.symbols.push_back(s);
+
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(writer.write(second, store::Meta::current()));
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  REQUIRE(got.files.size() == 1);
+  CHECK(got.files[0].path == "/tmp/other.hpp");
+
+  REQUIRE(got.symbols.size() == 1);
+  CHECK(got.symbols[0].usr == "c:@F@only_in_second");
+  CHECK(got.parameters.empty());
+  CHECK(got.references.empty());
+  CHECK(got.enumerators.empty());
+  CHECK(got.comments.empty());
 
   std::remove(path.c_str());
 }
@@ -536,6 +635,48 @@ TEST_CASE("SqliteStore write_tus drops dependencies that left the closure",
   CHECK(sym_a);
   CHECK_FALSE(sym_dep);
   CHECK(sym_other);
+
+  std::remove(path.c_str());
+}
+
+TEST_CASE("SqliteStore::write refreshes a stale schema version in meta",
+          "[store]") {
+  // put_meta uses INSERT OR REPLACE, but nothing pinned that a later write
+  // actually overwrites an older value rather than leaving it behind -- which
+  // is exactly what happens when clangquill is upgraded and rerun against a
+  // database an older, incompatible build wrote. The Python Store rejects a
+  // stale schema_version on open (test_store_open_rejects_incompatible_schema_version);
+  // this pins the C++ side that has to produce the *current* value in the
+  // first place.
+  std::string path = temp_db_path();
+  {
+    store::SqliteStore writer(path);
+    store::Meta stale;
+    stale.schema_version = store::kSchemaVersion - 1;
+    stale.core_version = "0.0.0-stale";
+    stale.libclang_version = "stale-libclang";
+    writer.write(make_module(), stale);
+  }
+  {
+    // write() assumes an empty `files` table (insert_files, not upsert_files),
+    // so a second write against the same database goes through write_tus --
+    // the incremental path a real upgrade-and-rerun actually takes.
+    store::SqliteStore writer(path);
+    writer.write_tus(make_module(), store::Meta::current(), {"/tmp/example.hpp"});
+  }
+
+  store::Db db(path);
+  store::Stmt stmt(db, "SELECT value FROM meta WHERE key = ?;");
+  auto meta_value = [&](const char* key) {
+    stmt.reset();
+    stmt.bind(1, key);
+    REQUIRE(stmt.step());
+    return stmt.column_text(0);
+  };
+  const store::Meta current = store::Meta::current();
+  CHECK(meta_value("schema_version") == std::to_string(store::kSchemaVersion));
+  CHECK(meta_value("core_version") == current.core_version);
+  CHECK(meta_value("libclang_version") == current.libclang_version);
 
   std::remove(path.c_str());
 }

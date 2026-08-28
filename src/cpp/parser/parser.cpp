@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -42,7 +43,15 @@ CXIndex as_index(void* p) { return static_cast<CXIndex>(p); }
 const char* language_flag_for(const std::string& path) {
   static const std::unordered_set<std::string> kHeaderExtensions = {
       ".h", ".hpp", ".hh", ".hxx", ".h++", ".hp", ".inc", ".ipp", ".tpp", ".tcc"};
-  const std::string ext = std::filesystem::path(path).extension().string();
+  // Matched case-insensitively: `.H` is a real, if old-school, C++ header
+  // spelling, and a case-sensitive miss costs exactly the `#pragma once`
+  // failure this function exists to prevent. The list is spelled in lower
+  // case, so the lookup key is folded rather than the entries.
+  std::string ext = std::filesystem::path(path).extension().string();
+  for (char& c : ext) {
+    c = static_cast<char>(
+        std::tolower(static_cast<unsigned char>(c)));
+  }
   if (ext.empty() || kHeaderExtensions.count(ext) != 0) return "-xc++-header";
   return "-xc++";
 }

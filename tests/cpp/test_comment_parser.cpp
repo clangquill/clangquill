@@ -180,7 +180,12 @@ TEST_CASE("a group command takes its line, not the paragraph below it",
     CHECK(g.id != "documents");
   }
 
-  const Field* brief = field(fields_of(m, fn->usr), "brief");
+  // fields_of returns by value: field() must be called on a named vector, not
+  // on that temporary directly, or the pointer it returns dangles the moment
+  // this statement ends (#266 -- the empty/garbage brief only ever showed up
+  // downstream of exactly this pattern).
+  auto fs = fields_of(m, fn->usr);
+  const Field* brief = field(fs, "brief");
   REQUIRE(brief != nullptr);
   CAPTURE(brief->value);
   CHECK(brief->value.find("documents the") != std::string::npos);
