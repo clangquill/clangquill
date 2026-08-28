@@ -1855,6 +1855,72 @@ def test_warnings_or_worse_drops_notes() -> None:
     assert [record.text for record in pipeline.warnings_or_worse(records)] == ["warn", "fatal"]
 
 
+def _carry_forward(
+    previous: list[pipeline.Diagnostic],
+    records: list[pipeline.Diagnostic],
+    *,
+    partial_deps: dict[str, list[str]] | None = None,
+    dropped: list[str] | None = None,
+) -> list[pipeline.Diagnostic]:
+    return pipeline._carry_forward_diagnostics(  # noqa: SLF001
+        previous,
+        partial_deps if partial_deps is not None else {},
+        dropped if dropped is not None else [],
+        records,
+    )
+
+
+def test_carry_forward_keeps_a_diagnostic_from_an_untouched_file() -> None:
+    previous = [pipeline.Diagnostic(severity=3, depth=0, text="b.hpp:1:1: error: bad", file="b.hpp")]
+    fresh = [pipeline.Diagnostic(severity=2, depth=0, text="a.hpp:1:1: warning: meh", file="a.hpp")]
+
+    carried = _carry_forward(previous, fresh, partial_deps={"a.hpp": ["a.hpp"]})
+
+    assert [record.text for record in carried] == [
+        "b.hpp:1:1: error: bad",
+        "a.hpp:1:1: warning: meh",
+    ]
+
+
+def test_carry_forward_supersedes_a_diagnostic_from_a_reparsed_file() -> None:
+    previous = [pipeline.Diagnostic(severity=3, depth=0, text="a.hpp:1:1: error: bad", file="a.hpp")]
+
+    assert _carry_forward(previous, [], partial_deps={"a.hpp": ["a.hpp"]}) == []
+
+
+def test_carry_forward_does_not_duplicate_a_location_less_diagnostic() -> None:
+    # Issue #302: a command-line warning has no file, so the path check can
+    # never supersede it — without the identity check every partial reparse
+    # would keep the carried copy *and* append the re-emitted one, growing the
+    # stored list (and the replayed warnings) by one per incremental build.
+    command_line = pipeline.Diagnostic(severity=2, depth=0, text="warning: argument unused: '-lfoo'")
+    previous = [command_line]
+
+    carried = _carry_forward(previous, [command_line], partial_deps={"a.hpp": ["a.hpp"]})
+
+    assert carried == [command_line]
+
+
+def test_carry_forward_collapses_location_less_duplicates_from_an_older_cache() -> None:
+    # A cache written before the fix above already carries the repeats; the
+    # next incremental build has to fold them back into one rather than
+    # replaying the accumulated list forever.
+    command_line = pipeline.Diagnostic(severity=2, depth=0, text="warning: argument unused: '-lfoo'")
+    previous = [command_line, command_line, command_line]
+
+    assert _carry_forward(previous, [command_line], partial_deps={"a.hpp": ["a.hpp"]}) == [command_line]
+    assert _carry_forward(previous, [], partial_deps={"a.hpp": ["a.hpp"]}) == [command_line]
+
+
+def test_carry_forward_keeps_distinct_location_less_diagnostics() -> None:
+    unused = pipeline.Diagnostic(severity=2, depth=0, text="warning: argument unused: '-lfoo'")
+    deprecated = pipeline.Diagnostic(severity=2, depth=0, text="warning: '-std=c++11' is deprecated")
+
+    carried = _carry_forward([unused, deprecated], [unused], partial_deps={"a.hpp": ["a.hpp"]})
+
+    assert carried == [deprecated, unused]
+
+
 def test_write_diagnostics_log_orders_and_indents_records(tmp_path: Path) -> None:
     records = [
         pipeline.Diagnostic(severity=3, depth=0, text="a.hpp:1:1: error: bad"),
