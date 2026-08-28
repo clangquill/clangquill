@@ -13,6 +13,7 @@ iterating the dataclass rather than repeating each name.
 
 from __future__ import annotations
 
+import math
 from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -219,8 +220,14 @@ class Config:
         if self.tu_batch < 0:
             msg = f"{CONFIG_PREFIX}tu_batch must be >= 0 (0 = auto, 1 = one TU per input), got {self.tu_batch}"
             raise ConfigError(msg)
-        if self.cache_lock_timeout <= 0:
-            msg = f"{CONFIG_PREFIX}cache_lock_timeout must be > 0 seconds, got {self.cache_lock_timeout}"
+        if not math.isfinite(self.cache_lock_timeout) or self.cache_lock_timeout <= 0:
+            # NaN and +inf both pass a bare `<= 0` check (NaN compares false to
+            # everything; +inf is not <= 0 either) and would leave build_lock's
+            # deadline unreachable, i.e. an indefinite wait -- exactly what a
+            # timeout exists to rule out.
+            msg = (
+                f"{CONFIG_PREFIX}cache_lock_timeout must be a finite number > 0 seconds, got {self.cache_lock_timeout}"
+            )
             raise ConfigError(msg)
         return self
 

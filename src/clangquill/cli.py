@@ -130,6 +130,13 @@ def build(  # noqa: PLR0913
         Path | None,
         typer.Option("--cache-dir", help="Keep the SQLite IR here instead of a temp file."),
     ] = None,
+    cache_lock_timeout: Annotated[
+        float,
+        typer.Option(
+            "--cache-lock-timeout",
+            help="Seconds to wait for another build's lock on --cache-dir before giving up.",
+        ),
+    ] = 300.0,
     include_undocumented: Annotated[  # noqa: FBT002 - typer renders this as a --flag/--no-flag option
         bool,
         typer.Option("--include-undocumented/--no-undocumented", help="Emit symbols lacking a doc comment."),
@@ -191,6 +198,7 @@ def build(  # noqa: PLR0913
         template_dirs=[str(p) for p in template_dir or []],
         templates=_parse_template_overrides(template or []),
         cache_dir=str(cache_dir) if cache_dir else None,
+        cache_lock_timeout=cache_lock_timeout,
         include_undocumented=include_undocumented,
         extract_anonymous_namespaces=extract_anonymous_namespaces,
         comment_parser=comment_parser,

@@ -23,6 +23,7 @@ contract; see ``docs/guides/configuration.md``), only concurrent writers.
 
 from __future__ import annotations
 
+import math
 import os
 import socket
 import time
@@ -43,6 +44,13 @@ LOCK_NAME = ".clangquill-build.lock"
 
 #: How often to retry a non-blocking lock attempt while waiting.
 _POLL_INTERVAL_S = 0.1
+
+#: Byte 0 is the range `msvcrt.locking` actually locks on Windows, which makes
+#: that byte unreadable through any other handle while held (Windows
+#: byte-range locks are mandatory, not just advisory between cooperating
+#: lockers). Holder metadata is written from this offset on, so a waiter can
+#: still read it without touching the locked byte.
+_METADATA_OFFSET = 1
 
 
 class BuildLockTimeoutError(RuntimeError):
@@ -87,11 +95,22 @@ def _read_holder(lock_path: Path) -> str:
 
     Reading the file's content is not itself synchronized with the holder
     writing it, so this is advisory diagnostic text, not a source of truth.
+    Seeks past ``_METADATA_OFFSET`` before reading: on Windows the locked
+    byte 0 is unreadable through any other handle while another process holds
+    it, so reading from offset 0 here would itself raise and always report
+    "an unknown process" for the one case (a live holder) this is for.
     """
     try:
-        text = lock_path.read_text(encoding="utf-8").strip()
+        fd = os.open(lock_path, os.O_RDONLY)
     except OSError:
         return "an unknown process"
+    try:
+        os.lseek(fd, _METADATA_OFFSET, os.SEEK_SET)
+        text = os.read(fd, 4096).decode("utf-8", errors="replace").strip()
+    except OSError:
+        return "an unknown process"
+    finally:
+        os.close(fd)
     return text or "an unknown process"
 
 
@@ -104,6 +123,13 @@ def build_lock(cache_dir: Path, *, timeout: float) -> Iterator[None]:
     :class:`BuildLockTimeoutError` naming the process the lockfile's content
     says is holding it.
     """
+    if not math.isfinite(timeout) or timeout <= 0:
+        # NaN and +inf both pass a bare `timeout <= 0` check (NaN compares
+        # false to everything; +inf is not <= 0 either), so either would
+        # never reach the deadline below and wait forever -- exactly what a
+        # timeout exists to rule out.
+        msg = f"cache_lock_timeout must be a finite number > 0, got {timeout!r}"
+        raise ValueError(msg)
     cache_dir.mkdir(parents=True, exist_ok=True)
     lock_path = cache_dir / LOCK_NAME
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
@@ -127,16 +153,17 @@ def build_lock(cache_dir: Path, *, timeout: float) -> Iterator[None]:
             time.sleep(_POLL_INTERVAL_S)
         # Held from here on: record who we are so the next waiter's timeout
         # error (if any) can name us instead of whoever held it before.
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.ftruncate(fd, 0)
+        # Byte 0 is left alone (it is the range actually locked on Windows,
+        # see _METADATA_OFFSET) -- only truncate/write from the offset past it.
+        os.ftruncate(fd, _METADATA_OFFSET)
+        os.lseek(fd, _METADATA_OFFSET, os.SEEK_SET)
         os.write(fd, f"pid {os.getpid()} on {socket.gethostname()}\n".encode())
         os.fsync(fd)
         try:
             yield
         finally:
             with suppress(OSError):
-                os.lseek(fd, 0, os.SEEK_SET)
-                os.ftruncate(fd, 0)
+                os.ftruncate(fd, _METADATA_OFFSET)
     finally:
         _unlock(fd)
         os.close(fd)

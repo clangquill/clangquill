@@ -50,6 +50,7 @@ def test_config_fields_cover_every_documented_value():
         "clangquill_template_dirs",
         "clangquill_templates",
         "clangquill_cache_dir",
+        "clangquill_cache_lock_timeout",
         "clangquill_include_undocumented",
         "clangquill_extract_anonymous_namespaces",
         "clangquill_comment_parser",
@@ -114,6 +115,21 @@ def test_validate_rejects_negative_tu_batch():
 @pytest.mark.parametrize("tu_batch", [0, 1, 32])
 def test_validate_accepts_non_negative_tu_batch(tu_batch: int):
     assert Config(input=["a.hpp"], tu_batch=tu_batch).validate().tu_batch == tu_batch
+
+
+@pytest.mark.parametrize("value", [0, -1, -0.5, float("nan"), float("inf"), float("-inf")])
+def test_validate_rejects_bad_cache_lock_timeout(value: float):
+    # 0/negative would never let build_lock's deadline be reached at all; NaN
+    # and +inf pass a bare `<= 0` check but would leave that deadline
+    # unreachable too -- both mean an indefinite wait, exactly what the
+    # timeout exists to rule out (see #331's review).
+    with pytest.raises(ConfigError, match="cache_lock_timeout"):
+        Config(input=["a.hpp"], cache_lock_timeout=value).validate()
+
+
+@pytest.mark.parametrize("value", [0.1, 1, 300.0, 3600])
+def test_validate_accepts_positive_finite_cache_lock_timeout(value: float):
+    assert Config(input=["a.hpp"], cache_lock_timeout=value).validate().cache_lock_timeout == value
 
 
 def test_validate_returns_self():
