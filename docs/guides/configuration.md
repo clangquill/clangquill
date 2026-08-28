@@ -188,11 +188,15 @@ Things worth knowing:
 - **Notes are not offenders.** A `note:` is the explanatory chain hanging off a
   diagnostic; the diagnostic it explains is what fails the build.
 - **It re-parses everything, every run.** A verdict on the whole input set can
-  only come from a parse of the whole input set: a cached build has no
-  diagnostics at all, and an incremental one has them only for the translation
-  units it re-parsed, so a warning in an untouched header would go unseen.
-  `warnings_as_errors` therefore ignores `cache_dir` for the parse — leave it
-  off for the edit-rebuild loop and turn it on in CI.
+  only come from a parse of the whole input set. An ordinary cached or
+  incremental build does replay the diagnostics it already knows about (a
+  cache-hit `-W` Sphinx build keeps failing on an error it saw before, and an
+  edited file's re-parse does not drop what an untouched one already reported),
+  but only `warnings_as_errors`' own full, all-severities parse can vouch for
+  **warnings** across the whole project — an ordinary run never even captures
+  those unless `diagnostics_log` is also set. `warnings_as_errors` therefore
+  ignores `cache_dir` for the parse — leave it off for the edit-rebuild loop and
+  turn it on in CI.
 - **The set of warnings depends on `tu_batch`**, for the reason given
   [above](#the-diagnostics-log). Pin `tu_batch = 1` if you need a verdict that
   cannot shift with batch composition.
