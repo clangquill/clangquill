@@ -243,6 +243,18 @@ std::string render_inline_markup(const std::string& text) {
       out += text[i++];
       continue;
     }
+    // `\n`/`@n` -- Doxygen's hard line break -- takes no argument, unlike
+    // every other inline command below, so it cannot be found via the
+    // "next space" search those rely on to locate their own end: that search
+    // would swallow whatever word follows it in the sentence. Drop the bare
+    // command in place instead.
+    if (i + 1 < text.size() && (text[i + 1] == 'n' || text[i + 1] == 'N') &&
+        (i + 2 >= text.size() ||
+         (std::isalnum(static_cast<unsigned char>(text[i + 2])) == 0 &&
+          text[i + 2] != '_'))) {
+      i += 2;
+      continue;
+    }
     std::size_t word_end = text.find(' ', i + 1);
     const InlineMarkup* markup =
         word_end == std::string::npos
@@ -286,7 +298,9 @@ std::string render_inline_markup(const std::string& text) {
     out += tail;
     i = next;
   }
-  return out;
+  // Dropping a bare `\n`/`@n` can leave the space before it and the space
+  // after the next word adjacent; collapse that back down to one.
+  return normalize_ws(out);
 }
 
 // Group commands carry cross-symbol bookkeeping (assembled separately from the

@@ -1,0 +1,29 @@
+{
+    "description": "@n (a hard line break with no argument) must not swallow the word that follows it, and a paragraph that ends with a bare @n must not be left with a stray trailing space (see issue #300).",
+    "raw": "/// @brief First line. @n Second line.\n///\n/// This paragraph deliberately ends with a bare @n\n",
+    "expected": {
+        "brief": "First line. Second line.",
+        "detail": [
+            "This paragraph deliberately ends with a bare"
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {},
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": []
+    }
+}

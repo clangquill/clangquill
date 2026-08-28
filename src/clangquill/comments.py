@@ -199,7 +199,10 @@ _VERBATIM_CMDS = frozenset({"code", "verbatim"})
 # Doxygen's inline commands: markup that decorates the next word inside a
 # sentence rather than opening a block, mapped to the MyST that says the same
 # thing. ``@n`` (a hard line break) has no equivalent that survives whitespace
-# normalization, so it is dropped.
+# normalization, so it is dropped -- by ``_N_RE`` rather than through this
+# table, since it is the only one of these that takes no argument. It still
+# needs an entry here so ``_is_inline_command`` recognizes it as inline markup
+# instead of a block command.
 # Values are (prefix, suffix, is_cross_reference).
 _INLINE_MARKUP: dict[str, tuple[str, str, bool]] = {
     "c": ("`", "`", False),
@@ -225,6 +228,12 @@ _CPP_NAME_RE = re.compile(r"^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$")
 _INLINE_RE = re.compile(
     r"""(?<![^\s(\[{"'])[@\\](?P<cmd>\w+)[ ](?P<arg>\S+)(?:[ ]"(?P<title>[^"]*)")?""",
 )
+
+# ``@n``/``\n`` on its own, matched separately because -- unlike every other
+# entry in ``_INLINE_MARKUP`` -- it takes no argument. Folding it into
+# ``_INLINE_RE`` would make its mandatory ``arg`` group swallow the next word
+# in the sentence instead of leaving it alone.
+_N_RE = re.compile(r"""(?<![^\s(\[{"'])[@\\][nN](?=[^\w]|$)""")
 
 # Punctuation that closes the sentence or the clause around the decorated word
 # rather than belonging to it. Doxygen prose is full of ``(see @ref target)``,
@@ -260,18 +269,29 @@ def _render_inline_markup(text: str) -> str:
         if not arg:
             return match[0]
         # A cross-reference the C++ domain could not parse fails the docs build,
-        # so one that does not name a C++ entity becomes a plain code span. Its
-        # quoted title, if any, stays where it was written.
+        # so one that does not name a C++ entity becomes a plain code span.
+        # Reducing it to a non-xref here lets the title handling below decide
+        # its quoted title, if any, the same way it would for a real code span.
         if is_xref and not _CPP_NAME_RE.match(arg):
-            kept_title = "" if title is None else ' "' + title + '"'
-            return f"`{arg}`{tail}{kept_title}"
+            prefix, suffix, is_xref = "`", "`", False
+        kept_title = ""
         if title is not None:
-            if tail:
-                return match[0]
-            arg = f"{title} <{arg}>"
-        return f"{prefix}{arg}{suffix}{tail}"
+            if is_xref:
+                if tail:
+                    return match[0]
+                arg = f"{title} <{arg}>"
+            else:
+                # The quoted-title link text is only Doxygen's for a
+                # cross-reference command; elsewhere the quote is just prose
+                # that happened to follow the decorated word, so it stays
+                # where it was written rather than being folded into the
+                # markup.
+                kept_title = f' "{title}"'
+        return f"{prefix}{arg}{suffix}{tail}{kept_title}"
 
-    return _INLINE_RE.sub(replace, text)
+    text = _N_RE.sub("", text)
+    text = _INLINE_RE.sub(replace, text)
+    return _WS_RUN_RE.sub(" ", text).strip()
 
 
 # Command aliases collapsed onto a canonical model field/handler.
