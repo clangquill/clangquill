@@ -145,13 +145,27 @@ model::Symbol group_symbol(const std::string& usr, const std::string& file) {
   return s;
 }
 
-// A `\defgroup`-backed group row: a real title plus prose.
+// A `\defgroup`-backed group row: a real title plus prose, and the definition
+// flag only a `\defgroup` block sets.
 model::Group titled_group() {
   model::Group g;
   g.id = "geometry";
   g.title = "Geometry helpers";
   g.brief = "Points and vectors.";
   g.detail = "The long version.";
+  g.is_definition = true;
+  return g;
+}
+
+// What an `\addtogroup geom` block with prose but no title of its own parses
+// to: title == id like a stub, but carrying a brief — so the row is neither a
+// definition nor recognisable as empty.
+model::Group addtogroup_group() {
+  model::Group g;
+  g.id = "geometry";
+  g.title = "geometry";
+  g.brief = "Prose from an addtogroup block.";
+  g.detail = "More of it.";
   return g;
 }
 
@@ -639,6 +653,191 @@ TEST_CASE("SqliteStore never downgrades a group row to a stub", "[store]") {
 
     std::remove(path.c_str());
   }
+}
+
+TEST_CASE("SqliteStore never lets an \\addtogroup block outrank a definition",
+          "[store]") {
+  // An `\addtogroup` block with prose parses to title == id plus a non-empty
+  // brief, so the old whole-row guard ("not a bare stub") waved it through and
+  // let it overwrite the `\defgroup` block's title *and* prose. Order must not
+  // decide the outcome: within one write the module's group list is the
+  // concatenation of the per-batch lists.
+  for (bool addtogroup_first : {true, false}) {
+    INFO("addtogroup_first = " << addtogroup_first);
+
+    model::ParsedModule m;
+    model::SourceFile f;
+    f.path = "/tmp/gd.hpp";
+    f.sha256 = std::string(64, 'a');
+    m.files.push_back(f);
+    m.symbols.push_back(group_symbol("c:@F@gd", "/tmp/gd.hpp"));
+    if (addtogroup_first) {
+      m.groups.push_back(addtogroup_group());
+      m.groups.push_back(titled_group());
+    } else {
+      m.groups.push_back(titled_group());
+      m.groups.push_back(addtogroup_group());
+    }
+    m.group_members.push_back(membership("c:@F@gd"));
+
+    std::string path = temp_db_path();
+    {
+      store::SqliteStore writer(path);
+      REQUIRE_NOTHROW(writer.write(m, store::Meta::current()));
+    }
+
+    {
+      store::SqliteStore reader(path);
+      model::ParsedModule got = reader.read();
+
+      REQUIRE(got.groups.size() == 1);
+      CHECK(got.groups[0].title == "Geometry helpers");
+      CHECK(got.groups[0].brief == "Points and vectors.");
+      CHECK(got.groups[0].detail == "The long version.");
+      CHECK(got.groups[0].is_definition);
+    }
+
+    std::remove(path.c_str());
+  }
+}
+
+TEST_CASE("SqliteStore keeps a definition when only the addtogroup file is "
+          "re-parsed",
+          "[store]") {
+  // The incremental mirror of the case above: the `\defgroup` block is in a
+  // file this write never reads, so the module carries only the `\addtogroup`
+  // row for the group.
+  model::ParsedModule original;
+
+  model::SourceFile a;
+  a.path = "/tmp/ge.hpp";
+  a.sha256 = std::string(64, 'a');
+  original.files.push_back(a);
+
+  original.symbols.push_back(group_symbol("c:@F@ge", "/tmp/ge.hpp"));
+  original.groups.push_back(titled_group());
+  original.group_members.push_back(membership("c:@F@ge"));
+
+  std::string path = temp_db_path();
+  {
+    store::SqliteStore writer(path);
+    writer.write(original, store::Meta::current());
+  }
+
+  model::ParsedModule reparse;
+  model::SourceFile a2;
+  a2.path = "/tmp/ge.hpp";
+  a2.sha256 = std::string(64, 'b');
+  reparse.files.push_back(a2);
+  reparse.symbols.push_back(group_symbol("c:@F@ge", "/tmp/ge.hpp"));
+  reparse.groups.push_back(addtogroup_group());
+  reparse.group_members.push_back(membership("c:@F@ge"));
+
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(
+        writer.write_tus(reparse, store::Meta::current(), {"/tmp/ge.hpp"}));
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  REQUIRE(got.groups.size() == 1);
+  CHECK(got.groups[0].title == "Geometry helpers");
+  CHECK(got.groups[0].brief == "Points and vectors.");
+  CHECK(got.groups[0].detail == "The long version.");
+
+  std::remove(path.c_str());
+}
+
+TEST_CASE("SqliteStore lets a non-definition fill what a definition leaves "
+          "empty",
+          "[store]") {
+  // Refusing the downgrade is not the same as freezing the row: Doxygen merges
+  // `\addtogroup` documentation into the group, so a field the `\defgroup`
+  // block never filled is still the addtogroup block's to contribute.
+  model::ParsedModule m;
+  model::SourceFile f;
+  f.path = "/tmp/gf.hpp";
+  f.sha256 = std::string(64, 'a');
+  m.files.push_back(f);
+  m.symbols.push_back(group_symbol("c:@F@gf", "/tmp/gf.hpp"));
+
+  model::Group titled_only;
+  titled_only.id = "geometry";
+  titled_only.title = "Geometry helpers";
+  titled_only.is_definition = true;
+  m.groups.push_back(titled_only);
+  m.groups.push_back(addtogroup_group());
+  m.group_members.push_back(membership("c:@F@gf"));
+
+  std::string path = temp_db_path();
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(writer.write(m, store::Meta::current()));
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  REQUIRE(got.groups.size() == 1);
+  CHECK(got.groups[0].title == "Geometry helpers");
+  CHECK(got.groups[0].brief == "Prose from an addtogroup block.");
+  CHECK(got.groups[0].detail == "More of it.");
+  CHECK(got.groups[0].is_definition);
+
+  std::remove(path.c_str());
+}
+
+TEST_CASE("SqliteStore still updates a group from its own re-parsed defgroup",
+          "[store]") {
+  // The guard must not outlaw the ordinary edit: re-parsing the file that
+  // carries the `\defgroup` block has to land the block's new title and prose,
+  // including a field the edit emptied.
+  model::ParsedModule original;
+  model::SourceFile a;
+  a.path = "/tmp/gg.hpp";
+  a.sha256 = std::string(64, 'a');
+  original.files.push_back(a);
+  original.symbols.push_back(group_symbol("c:@F@gg", "/tmp/gg.hpp"));
+  original.groups.push_back(titled_group());
+  original.group_members.push_back(membership("c:@F@gg"));
+
+  std::string path = temp_db_path();
+  {
+    store::SqliteStore writer(path);
+    writer.write(original, store::Meta::current());
+  }
+
+  model::ParsedModule reparse;
+  model::SourceFile a2;
+  a2.path = "/tmp/gg.hpp";
+  a2.sha256 = std::string(64, 'b');
+  reparse.files.push_back(a2);
+  reparse.symbols.push_back(group_symbol("c:@F@gg", "/tmp/gg.hpp"));
+  model::Group edited;
+  edited.id = "geometry";
+  edited.title = "Geometry, renamed";
+  edited.brief = "Now about points only.";
+  edited.is_definition = true;
+  reparse.groups.push_back(edited);
+  reparse.group_members.push_back(membership("c:@F@gg"));
+
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(
+        writer.write_tus(reparse, store::Meta::current(), {"/tmp/gg.hpp"}));
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  REQUIRE(got.groups.size() == 1);
+  CHECK(got.groups[0].title == "Geometry, renamed");
+  CHECK(got.groups[0].brief == "Now about points only.");
+  CHECK(got.groups[0].detail.empty());
+
+  std::remove(path.c_str());
 }
 
 TEST_CASE("SqliteStore write_tus drops dependencies that left the closure",

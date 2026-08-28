@@ -10,7 +10,7 @@ namespace clangquill::store {
 /// @brief On-disk schema version.
 ///
 /// Bump when the DDL below changes in a backward-incompatible way.
-inline constexpr int kSchemaVersion = 3;
+inline constexpr int kSchemaVersion = 4;
 
 /// @brief Full schema for the intermediate SQLite artifact.
 ///
@@ -119,12 +119,17 @@ CREATE INDEX IF NOT EXISTS idx_comment_fields_sym ON comment_fields(symbol_usr);
 -- every field) once per build.
 CREATE INDEX IF NOT EXISTS idx_comment_fields_name ON comment_fields(name);
 
+-- `is_definition` marks a row contributed by a `\defgroup` block, as opposed to
+-- an `\addtogroup` block or the stub an `\ingroup` reference emits. The write
+-- upsert reads it to decide which side of a conflict owns each field: only a
+-- definition may overwrite a definition's title and prose.
 CREATE TABLE IF NOT EXISTS groups (
   id              TEXT PRIMARY KEY,
   title           TEXT NOT NULL DEFAULT '',
   brief           TEXT NOT NULL DEFAULT '',
   detail          TEXT NOT NULL DEFAULT '',
-  parent_group_id TEXT
+  parent_group_id TEXT,
+  is_definition   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS group_members (

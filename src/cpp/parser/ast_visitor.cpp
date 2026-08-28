@@ -833,15 +833,81 @@ bool structural_kind_matches(const std::string& cmd, model::SymbolKind k) {
   return false;
 }
 
+// One `\defgroup` / `\addtogroup` block, accumulated on its own before being
+// folded into the group row it names. Kept apart from that row because which of
+// the two owns each field depends on whether this block *defines* the group,
+// and a block that arrives second must not simply overwrite what is there.
+struct GroupBlock {
+  std::string id;
+  std::string title;
+  std::string brief;
+  std::string detail;
+  std::string parent;
+  bool defining = false;  ///< Written `\defgroup`, not `\addtogroup`.
+  bool open = false;      ///< A block is being read; prose lines belong to it.
+};
+
+// Folds one group block into the row it names, with the precedence the store's
+// upsert applies across writes (see the groups upsert in sqlite_store.cpp):
+// a definition replaces a definition, a definition beats an `\addtogroup`
+// block on every field it fills, and anything at all fills a field the row
+// leaves unset (a stub title == id, an empty brief or detail, no parent).
+// Without this, an `\addtogroup` block scanned before the `\defgroup` block
+// left the group titled with its raw id (issue #301).
+void merge_group_block(model::Group& g, const GroupBlock& b) {
+  const bool replaces = b.defining && g.is_definition;
+  const bool upgrades = b.defining && !g.is_definition;
+  if (replaces || g.title == g.id || (upgrades && b.title != b.id)) {
+    g.title = b.title;
+  }
+  if (replaces) {
+    g.brief = b.brief;
+    g.detail = b.detail;
+  } else {
+    if (g.brief.empty() || (upgrades && !b.brief.empty())) g.brief = b.brief;
+    if (g.detail.empty() || (upgrades && !b.detail.empty())) {
+      g.detail = b.detail;
+    }
+  }
+  if (replaces || g.parent_group_id.empty() ||
+      (upgrades && !b.parent.empty())) {
+    g.parent_group_id = b.parent;
+  }
+  g.is_definition = g.is_definition || b.defining;
+}
+
 void scan_group_definitions(const std::string& raw, const std::string& file,
                             VisitCtx& ctx) {
   std::string line;
-  model::Group* current = nullptr;
+  GroupBlock block;
   // A blank line inside a group block ends a paragraph. Remembered rather than
   // appended straight away, so a block that trails off in blank lines (or ends
   // right after its brief) leaves no dangling separator behind.
   bool paragraph_break = false;
   std::size_t i = 0;
+  // Ends the block being read and merges it into its group row, creating that
+  // row when nothing has referenced the group yet.
+  auto close_block = [&ctx, &block, &paragraph_break]() {
+    if (!block.open) return;
+    model::Group* target = nullptr;
+    if (ctx.seen_groups->insert(block.id).second) {
+      model::Group fresh;
+      fresh.id = block.id;
+      fresh.title = block.id;
+      ctx.mod->groups.push_back(std::move(fresh));
+      target = &ctx.mod->groups.back();
+    } else {
+      for (auto& g : ctx.mod->groups) {
+        if (g.id == block.id) {
+          target = &g;
+          break;
+        }
+      }
+    }
+    if (target != nullptr) merge_group_block(*target, block);
+    block = GroupBlock{};
+    paragraph_break = false;
+  };
   // Strips one comment decoration from the front of a line, and no more:
   // consuming every leading `/ * ! <` would eat a line's own markdown, turning
   // `**Bold** start` into `Bold** start`.
@@ -895,28 +961,19 @@ void scan_group_definitions(const std::string& raw, const std::string& file,
         std::string title = rest.substr(id.size());
         std::size_t ta = title.find_first_not_of(" \t");
         title = ta == std::string::npos ? id : title.substr(ta);
-        if (ctx.seen_groups->insert(id).second) {
-          model::Group g;
-          g.id = id;
-          g.title = title;
-          ctx.mod->groups.push_back(std::move(g));
-          current = &ctx.mod->groups.back();
-        } else {
-          current = nullptr;
-          for (auto& g : ctx.mod->groups) {
-            if (g.id == id) {
-              current = &g;
-              break;
-            }
-          }
-        }
-      } else if (cmd == "ingroup" && current != nullptr) {
-        current->parent_group_id = first_token(rest);
+        // A second group command ends the block above it, prose and all.
+        close_block();
+        block.id = std::move(id);
+        block.title = std::move(title);
+        block.defining = cmd == "defgroup";
+        block.open = true;
+      } else if (cmd == "ingroup" && block.open) {
+        block.parent = first_token(rest);
       } else if (is_structural(cmd) && ctx.structural != nullptr) {
         // The prose below belongs to the entity this block names, not to a
-        // group defined earlier in the same block — clearing `current` also
+        // group defined earlier in the same block — closing the block also
         // stops it leaking into that group's description.
-        current = nullptr;
+        close_block();
         std::string target = structural_name(rest);
         if (!target.empty()) {
           ctx.structural->push_back({file, cmd, std::move(target), raw});
@@ -924,21 +981,21 @@ void scan_group_definitions(const std::string& raw, const std::string& file,
       }
       return;
     }
-    if (current == nullptr) return;
+    if (!block.open) return;
     if (l.empty()) {
       paragraph_break = true;
       return;
     }
-    if (current->brief.empty()) {
-      current->brief = l;
+    if (block.brief.empty()) {
+      block.brief = l;
     } else {
       // Paragraph breaks are content in a Markdown generator, so a
       // multi-paragraph description keeps its blank lines instead of
       // collapsing into one run-on line.
-      if (!current->detail.empty()) {
-        current->detail += paragraph_break ? "\n\n" : " ";
+      if (!block.detail.empty()) {
+        block.detail += paragraph_break ? "\n\n" : " ";
       }
-      current->detail += l;
+      block.detail += l;
     }
     paragraph_break = false;
   };
@@ -952,6 +1009,8 @@ void scan_group_definitions(const std::string& raw, const std::string& file,
     }
     ++i;
   }
+  // The comment ends the block it was still reading.
+  close_block();
 }
 
 unsigned token_line(CXTranslationUnit tu, CXToken token, bool end) {
