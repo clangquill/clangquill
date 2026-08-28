@@ -33,6 +33,22 @@ const model::Symbol* find(const model::ParsedModule& m, const std::string& qn) {
   return nullptr;
 }
 
+model::ParsedModule parse_fixture(const std::string& name) {
+  parser::ParseOptions opts;
+  parser::Parser p(opts);
+  model::ParsedModule mod;
+  p.parse_file(std::string(CLANGQUILL_FIXTURE_DIR) + "/" + name, mod);
+  return mod;
+}
+
+const model::Group* find_group(const model::ParsedModule& m,
+                               const std::string& id) {
+  for (const auto& g : m.groups) {
+    if (g.id == id) return &g;
+  }
+  return nullptr;
+}
+
 }  // namespace
 
 TEST_CASE("parser maps concepts and macros to new kinds", "[m7]") {
@@ -155,6 +171,30 @@ TEST_CASE("parser assembles Doxygen groups and members", "[m7]") {
     }
   }
   CHECK(add_in_math);
+}
+
+TEST_CASE("group prose keeps its markdown and its paragraphs", "[m7]") {
+  // Two defects of the `\\defgroup` scanner met here. Stripping every leading
+  // `/ * ! <` ate a line's own markdown, so an undecorated block-comment line
+  // opening with `**Bold**` arrived as `Bold**`. And joining description lines
+  // with a space collapsed a multi-paragraph description into one run-on line —
+  // in a Markdown generator, a paragraph break is content.
+  auto m = parse_fixture("group_prose.hpp");
+
+  const model::Group* prose = find_group(m, "prose");
+  REQUIRE(prose != nullptr);
+  CHECK(prose->title == "Prose formatting");
+  CHECK(prose->brief == "**Bold** opens the description.");
+  CHECK(prose->detail ==
+        "A second paragraph, which must stay a paragraph of its own. It runs "
+        "across two source lines.\n\n*Emphasis* opens a third.");
+
+  // A star-decorated block still loses exactly its decoration.
+  const model::Group* decorated = find_group(m, "decorated");
+  REQUIRE(decorated != nullptr);
+  CHECK(decorated->title == "Decorated block");
+  CHECK(decorated->brief == "Star-decorated lines still lose their decoration.");
+  CHECK(decorated->detail.empty());
 }
 
 TEST_CASE("parser extracts parameters and references for function templates",
