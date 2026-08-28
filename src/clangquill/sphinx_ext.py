@@ -24,6 +24,7 @@ from sphinx.errors import ExtensionError
 from sphinx.util import logging
 
 from clangquill import __version__, _core
+from clangquill._lock import BuildLockTimeoutError
 from clangquill.config import CONFIG_FIELDS, CONFIG_PREFIX, Config, ConfigError
 from clangquill.generator import write_if_changed
 from clangquill.pipeline import COMPILE_COMMANDS_NAME, build, prune_stale, warnings_or_worse
@@ -145,12 +146,21 @@ def _run(app: Sphinx) -> None:
         return
     try:
         result = build(config, base_dir=app.srcdir)
-    except (ConfigError, FileNotFoundError, StoreVersionError, sqlite3.DatabaseError) as exc:
+    except (
+        ConfigError,
+        FileNotFoundError,
+        StoreVersionError,
+        sqlite3.DatabaseError,
+        BuildLockTimeoutError,
+    ) as exc:
         # Anticipated user-input failures (a bad clangquill_* value, an input
         # pattern matching nothing) become a clean build error instead of a
         # raw traceback. So does an unreadable IR the build could not recover
         # from itself — a cached one is discarded and re-parsed, but a database
-        # named explicitly, or damaged mid-build, still has to be reported.
+        # named explicitly, or damaged mid-build, still has to be reported. So
+        # does another build still holding the cache_dir lock past the
+        # configured timeout (see clangquill._lock) — the user needs the plain
+        # "another build is running" message, not a raw traceback either.
         msg = f"clangquill: {exc}"
         raise ExtensionError(msg) from exc
     # Remembered for the build-finished hook so a throwaway IR can be removed.

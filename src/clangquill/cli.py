@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Annotated
 import typer
 
 from clangquill import __version__, _core
+from clangquill._lock import BuildLockTimeoutError
 from clangquill.config import GROUP_BY_CHOICES, Config, ConfigError
 from clangquill.pipeline import build as run_pipeline
 from clangquill.pipeline import warnings_or_worse
@@ -129,6 +130,13 @@ def build(  # noqa: PLR0913
         Path | None,
         typer.Option("--cache-dir", help="Keep the SQLite IR here instead of a temp file."),
     ] = None,
+    cache_lock_timeout: Annotated[
+        float,
+        typer.Option(
+            "--cache-lock-timeout",
+            help="Seconds to wait for another build's lock on --cache-dir before giving up.",
+        ),
+    ] = 300.0,
     include_undocumented: Annotated[  # noqa: FBT002 - typer renders this as a --flag/--no-flag option
         bool,
         typer.Option("--include-undocumented/--no-undocumented", help="Emit symbols lacking a doc comment."),
@@ -190,6 +198,7 @@ def build(  # noqa: PLR0913
         template_dirs=[str(p) for p in template_dir or []],
         templates=_parse_template_overrides(template or []),
         cache_dir=str(cache_dir) if cache_dir else None,
+        cache_lock_timeout=cache_lock_timeout,
         include_undocumented=include_undocumented,
         extract_anonymous_namespaces=extract_anonymous_namespaces,
         comment_parser=comment_parser,
@@ -222,7 +231,7 @@ def build(  # noqa: PLR0913
 
     try:
         result = run_pipeline(config, base_dir=Path.cwd())
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, BuildLockTimeoutError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     if result.db_is_temporary:

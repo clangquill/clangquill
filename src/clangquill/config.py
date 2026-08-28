@@ -13,6 +13,7 @@ iterating the dataclass rather than repeating each name.
 
 from __future__ import annotations
 
+import math
 from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -30,6 +31,27 @@ GROUP_BY_CHOICES = ("symbol", "file", "class", "namespace")
 # ``bool`` is an ``int`` subclass, but an int config field is never a flag.
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_finite_positive(value: float) -> bool:
+    """Whether ``value`` is a finite number > 0.
+
+    ``math.isfinite`` converts its argument to a C double, which raises
+    ``OverflowError`` -- not ``False`` -- for an ``int`` too large to
+    represent as one (``cache_lock_timeout`` is user input, so nothing rules
+    out an absurd value arriving as a plain ``int``); treat that the same as
+    "not finite" rather than letting a raw ``OverflowError`` escape past the
+    documented :class:`ConfigError`.
+    """
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        return False
+    return finite and value > 0
 
 
 def _is_str(value: object) -> bool:
@@ -68,6 +90,7 @@ _TYPE_CHECKS: tuple[tuple[str, Callable[[object], bool], str], ...] = (
     ("compile_commands", _is_optional_str, "a string or None"),
     ("clang_resource_dir", _is_optional_str, "a string or None"),
     ("cache_dir", _is_optional_str, "a string or None"),
+    ("cache_lock_timeout", _is_number, "a number"),
     ("comment_parser", _is_optional_str, "a string or None"),
     ("path_base", _is_optional_str, "a string or None"),
     ("diagnostics_log", _is_optional_str, "a string or None"),
@@ -144,6 +167,13 @@ class Config:
     #: caching: each build re-parses into a throwaway temp file and rewrites
     #: every page.
     cache_dir: str | None = None
+    #: Seconds an incremental build waits for another build already holding
+    #: the single-writer lock on ``cache_dir`` before giving up (see
+    #: :mod:`clangquill._lock`). Only one build may run against a given
+    #: ``cache_dir`` at a time; concurrent readers of its IR are unaffected.
+    #: Ignored when ``cache_dir`` is ``None``, since a stateless build has
+    #: nothing to lock.
+    cache_lock_timeout: float = 300.0
     #: Emit pages/sections for symbols that carry no documentation comment.
     include_undocumented: bool = True
     #: Comment-parser override (a registered name or a dotted import path).
@@ -206,6 +236,15 @@ class Config:
             raise ConfigError(msg)
         if self.tu_batch < 0:
             msg = f"{CONFIG_PREFIX}tu_batch must be >= 0 (0 = auto, 1 = one TU per input), got {self.tu_batch}"
+            raise ConfigError(msg)
+        if not _is_finite_positive(self.cache_lock_timeout):
+            # NaN and +inf both pass a bare `<= 0` check (NaN compares false to
+            # everything; +inf is not <= 0 either) and would leave build_lock's
+            # deadline unreachable, i.e. an indefinite wait -- exactly what a
+            # timeout exists to rule out.
+            msg = (
+                f"{CONFIG_PREFIX}cache_lock_timeout must be a finite number > 0 seconds, got {self.cache_lock_timeout}"
+            )
             raise ConfigError(msg)
         return self
 

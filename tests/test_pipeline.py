@@ -6,6 +6,9 @@ import json
 import os
 import sqlite3
 import sys
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,7 +22,7 @@ from clangquill.pipeline import COMPILE_COMMANDS_NAME, MANIFEST_NAME, build
 from clangquill.store import Store
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
+    from collections.abc import Collection, Iterator, Mapping
 
 
 def _store_symbols(db_path: Path) -> list[object]:
@@ -242,6 +245,73 @@ def test_incremental_detects_an_edit_made_during_the_parse(
 
     assert result.parsed
     assert "gadget" in (project / "api" / "demo.md").read_text()
+
+
+@requires_libclang
+def test_two_concurrent_builds_are_serialized_by_the_cache_lock(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two ``build()`` calls sharing a ``cache_dir`` must never run at once.
+
+    Without the lock added for #311 both threads could interleave the parse,
+    the bookkeeping-DB write and the render/output steps of an incremental
+    build (none of which is protected by a cross-store transaction). Slows
+    the first build's parse down to widen the window a race would need, then
+    asserts from the lock's own acquire/release events (not from timing
+    alone, which a race could pass by luck) that they never overlapped —
+    and that both builds still produced the correct, consistent output.
+    """
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+
+    events: list[str] = []
+    events_lock = threading.Lock()
+    real_build_lock = pipeline.build_lock
+
+    @contextmanager
+    def recording_build_lock(cache_dir: Path, *, timeout: float) -> Iterator[None]:
+        with real_build_lock(cache_dir, timeout=timeout):
+            with events_lock:
+                events.append("acquired")
+            yield
+            with events_lock:
+                events.append("released")
+
+    monkeypatch.setattr(pipeline, "build_lock", recording_build_lock)
+
+    real_parse = _core.parse_to_sqlite
+
+    def slow_parse(inputs: list[str], db: str, opt: object) -> object:
+        time.sleep(0.2)
+        return real_parse(inputs, db, opt)
+
+    monkeypatch.setattr(_core, "parse_to_sqlite", slow_parse)
+
+    results: list[object] = []
+    errors: list[BaseException] = []
+
+    def run_build() -> None:
+        try:
+            results.append(build(config, base_dir=project))
+        except BaseException as exc:  # noqa: BLE001 - surfaced via `errors` below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run_build) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors
+    assert len(results) == 2
+    # Every "acquired" is immediately followed by its own "released" before
+    # the next "acquired" — i.e. the two builds' locked sections never
+    # overlapped, regardless of which one the OS scheduled first.
+    assert events == ["acquired", "released", "acquired", "released"]
+
+    with Store.open(project / ".cache" / "clangquill.sqlite") as store:
+        assert {s.qualified_name for s in store.symbols()} >= {"demo::Widget", "demo::twice"}
+    assert "Widget" in (project / "api" / "demo.md").read_text()
 
 
 @requires_libclang

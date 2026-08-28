@@ -170,10 +170,10 @@ def test_build_plumbs_every_cli_option(tmp_path: Path):
     """One build exercising every option that only ever reached ``Config`` directly in a test.
 
     ``--jobs``, ``--tu-batch``, ``--std``, ``-I``, ``-D``, ``--cache-dir``,
-    ``--group-by``, ``--include-undocumented``, ``--comment-parser``,
-    ``--compile-arg`` and ``--clang-resource-dir`` were never passed through the
-    typer CLI anywhere, so a mistyped option name or a bad callback could ship
-    unnoticed.
+    ``--cache-lock-timeout``, ``--group-by``, ``--include-undocumented``,
+    ``--comment-parser``, ``--compile-arg`` and ``--clang-resource-dir`` were
+    never passed through the typer CLI anywhere, so a mistyped option name or
+    a bad callback could ship unnoticed.
     """
     extra_dir = tmp_path / "extra"
     extra_dir.mkdir()
@@ -229,6 +229,8 @@ def test_build_plumbs_every_cli_option(tmp_path: Path):
             str(tmp_path / "not-a-real-resource-dir"),
             "--cache-dir",
             str(cache_dir),
+            "--cache-lock-timeout",
+            "60",
             "--group-by",
             "namespace",
             "--no-undocumented",
