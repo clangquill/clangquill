@@ -261,6 +261,60 @@ TEST_CASE("an enum records its fixed underlying type", "[parser]") {
   CHECK(integer_type("Direction") == nullptr);
 }
 
+TEST_CASE("an alias records its underlying type", "[parser]") {
+  // What an alias *is* is the whole content of the declaration, but only
+  // `typedef` recorded it: every `using` form -- and so every member alias of
+  // a class template, the spelling the standard library and its imitators use
+  // -- rendered as a bare name with nothing after the `=`.
+  auto m = parse_fixture("aliases.hpp");
+
+  auto underlying = [&](const std::string& qn) -> const model::Reference* {
+    const auto* sym = find(m, qn);
+    if (sym == nullptr) return nullptr;
+    for (const auto& r : m.references) {
+      if (r.from_usr == sym->usr && r.kind == model::RefKind::UnderlyingType) {
+        return &r;
+      }
+    }
+    return nullptr;
+  };
+
+  const auto* distance = underlying("al::Distance");
+  REQUIRE(distance != nullptr);
+  CHECK(distance->to_spelling == "double");
+
+  // A target that names a symbol resolves to it, so the alias can link.
+  const auto* widget = find(m, "al::Widget");
+  REQUIRE(widget != nullptr);
+  const auto* handle = underlying("al::Handle");
+  REQUIRE(handle != nullptr);
+  CHECK(handle->to_spelling == "Widget");
+  CHECK(handle->is_resolved);
+  CHECK(handle->to_usr == widget->usr);
+
+  const auto* buffer = underlying("al::Buffer");
+  REQUIRE(buffer != nullptr);
+  CHECK(buffer->to_spelling == "char[64]");
+
+  // A dependent target names no symbol anywhere, so the written spelling is
+  // the only thing the declaration has to say -- and worth saying.
+  const auto* type = underlying("al::Traits::type");
+  REQUIRE(type != nullptr);
+  CHECK(type->to_spelling == "T");
+  CHECK_FALSE(type->is_resolved);
+
+  const auto* through = underlying("al::Traits::through");
+  REQUIRE(through != nullptr);
+  CHECK(through->to_spelling == "typename Pair<T, int>::first");
+
+  // An alias template is a CXCursor_TypeAliasTemplateDecl, which is not a
+  // TypedefNameDecl: asking it for an underlying type answers CXType_Invalid,
+  // and the alias proper is the TypeAliasDecl child it wraps.
+  const auto* ptr = underlying("al::Ptr");
+  REQUIRE(ptr != nullptr);
+  CHECK(ptr->to_spelling == "T *");
+}
+
 TEST_CASE("declarations inside extern \"C\" reach the IR", "[parser]") {
   // extern "C" { ... } is CXCursor_LinkageSpec, which map_kind has no case for
   // and which visit() used to prune -- along with everything declared inside
