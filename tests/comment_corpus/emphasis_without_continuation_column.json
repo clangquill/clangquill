@@ -1,0 +1,29 @@
+{
+    "description": "A /* ... */ block need not use the '*' continuation column at all. Only a lone '*' is the marker, so emphasis opening a line is content in a block comment too -- the case the other marker fixtures leave untested, since each of them either has no '*' in that position or is a /// comment.",
+    "raw": "/**\n Brief line.\n\n **bold** and *emphasis* text\n */\n",
+    "expected": {
+        "brief": "Brief line.",
+        "detail": [
+            "**bold** and *emphasis* text"
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {},
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": []
+    }
+}
