@@ -334,16 +334,34 @@ _DETAIL_CMDS = frozenset({"details", "par"})
 # unperformed copy separately (see ``ast_visitor.cpp``).
 _COPY_CMDS = frozenset({"copydoc", "copybrief", "copydetails"})
 
-# Everything a copy command's argument can carry beyond the name: Doxygen
-# accepts a whole declaration, so ``DenseCoeffsBase<Derived>::coeff(Index) const``
-# has to come down to ``DenseCoeffsBase::coeff`` -- the only shape that can be
-# pointed at, and the only one the C++ domain resolves.
-_COPY_ARGS_RE = re.compile(r"<[^<>]*>|\(.*")
-
 
 def _copy_target(text: str) -> str:
-    """Reduce a copy command's argument to the qualified name it points at."""
-    name = _COPY_ARGS_RE.sub("", text).split(maxsplit=1)
+    """Reduce a copy command's argument to the qualified name it points at.
+
+    Doxygen accepts a whole declaration after a copy command, so the argument
+    can carry template arguments, a parameter list and trailing qualifiers --
+    ``DenseCoeffsBase<Derived,ReadOnlyAccessors>::coeff(Index,Index) const``
+    has to come down to ``DenseCoeffsBase::coeff``, the only shape that can be
+    pointed at and the only one the C++ domain resolves.
+
+    Template arguments are dropped by counting ``<``/``>`` depth rather than by
+    substituting an innermost ``<...>``, so a nested list -- Eigen's
+    ``Matrix<Scalar,Rows,Cols>::Base<Derived<T>>`` shape -- comes out whole
+    instead of leaving the outer brackets behind. This mirrors ``copy_target``
+    in ``src/cpp/parser/doxygen_comment_parser.cpp`` command for command; the
+    two parsers must agree here (see ``tests/comment_corpus``).
+    """
+    head = text.split("(", 1)[0]
+    out = []
+    depth = 0
+    for ch in head:
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth = max(depth - 1, 0)
+        elif depth == 0:
+            out.append(ch)
+    name = "".join(out).split(maxsplit=1)
     return name[0].removeprefix("::") if name else ""
 
 

@@ -120,6 +120,17 @@ def test_copy_commands_degrade_to_a_cross_reference() -> None:
     assert model.custom == {}
 
 
+def test_copy_target_drops_nested_template_arguments() -> None:
+    """A nested argument list has to go whole: `Outer<Inner>::at` resolves nowhere.
+
+    Reducing the target by substituting an innermost `<...>` leaves the outer
+    brackets standing, so the cross-reference degrades to a code span instead
+    of pointing at the entity the copy named (issue #320).
+    """
+    model = doxygen_parse("/** @copydoc Outer<Inner<T, U>, N>::at(std::size_t) */")
+    assert model.see == ["Outer::at"]
+
+
 def test_doxygen_parse_joins_a_second_brief() -> None:
     """Doxygen joins repeated @brief text; dropping it lost half the summary."""
     model = doxygen_parse("/// @brief First half.\n/// @brief Second half.\n")
