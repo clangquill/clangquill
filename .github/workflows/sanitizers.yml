@@ -1,0 +1,109 @@
+---
+name: sanitizers
+# The Catch2 suite under ThreadSanitizer and AddressSanitizer+UBSan
+# (issue 314). The streaming parse's publish/consume protocol, its
+# back-pressure waits, the per-worker parser + shared sink and the
+# mutex-guarded file-hash cache were argued deadlock- and race-free by
+# reading; this job makes that argument continuously checked — the
+# parallel-parse determinism tests in tests/cpp/test_parser.cpp run under
+# TSAN here at every firing. Sanitizer builds are several times slower
+# than the plain Debug build, so they run weekly (plus on demand) rather
+# than on every push.
+on:
+  schedule:
+    # Weekly, Monday early UTC morning; the minute is deliberately off the
+    # top of the hour to dodge the GitHub cron rush.
+    - cron: 23 5 * * 1
+  workflow_dispatch:
+  # Label a PR `ci-sanitizers` to get the matrix on its head as well —
+  # meant for changes that touch the C++ threading. `labeled` starts the
+  # first run; `synchronize` keeps an already-labeled PR covered on later
+  # pushes.
+  pull_request:
+    types: [labeled, synchronize]
+# Cancel a stale PR run when new commits land; let scheduled runs finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  ctest-sanitize:
+    # Scheduled and manual runs always fire; PR events only when the PR
+    # carries the opt-in label.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'ci-sanitizers')
+    name: C++ unit tests (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    # TSAN runs the parse-heavy tests many times slower than the plain
+    # build; bound the job so a deadlock TSAN itself cannot see (e.g. a
+    # lost condition-variable wakeup) fails the run instead of burning the
+    # 6h GitHub Actions default.
+    timeout-minutes: 90
+    strategy:
+      # One sanitizer's finding must not hide the other's.
+      fail-fast: false
+      matrix:
+        include:
+          - name: tsan
+            # -O1 keeps the 5-15x TSAN slowdown tolerable without
+            # optimizing away the interleavings; frame pointers keep the
+            # reports readable.
+            sanitizer_flags: -fsanitize=thread -O1 -fno-omit-frame-pointer
+          - name: asan-ubsan
+            # -fno-sanitize-recover turns every UBSan finding into a test
+            # failure instead of a log line ctest would scroll past.
+            sanitizer_flags: >-
+              -fsanitize=address,undefined -fno-sanitize-recover=all -O1
+              -fno-omit-frame-pointer
+    env:
+      # sqlite.org 403s vcpkg's default downloader, so distfiles go through
+      # a browser-User-Agent script (SHA512 is still checked by vcpkg).
+      X_VCPKG_ASSET_SOURCES: >-
+        clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
+        {url} {sha512} {dst}
+      # Everything vcpkg builds (sqlite3, Catch2) and libclang itself is
+      # uninstrumented: races and leaks internal to libclang/libLLVM are
+      # not ours to fix, so TSAN and LSan each read a suppression list
+      # instead of being loosened globally, and ASan's container-overflow
+      # check — documented to false-positive in mixed builds — is off.
+      TSAN_OPTIONS: >-
+        halt_on_error=1 second_deadlock_stack=1
+        suppressions=${{ github.workspace }}/tools/ci/tsan-suppressions.txt
+      ASAN_OPTIONS: detect_container_overflow=0:strict_string_checks=1
+      LSAN_OPTIONS: >-
+        suppressions=${{ github.workspace }}/tools/ci/lsan-suppressions.txt
+      UBSAN_OPTIONS: print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v7.0.1
+        # Same toolchain as the plain ctest job: build tools and libclang
+        # from apt; sqlite3, nlohmann-json and catch2 come from vcpkg,
+        # which the CMake build bootstraps itself
+        # (cmake/VcpkgBootStrap.cmake).
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build libclang-dev
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install nanobind (build-time dependency)
+        run: python -m pip install nanobind
+        # The sanitizer must be on the link line too, or the runtime never
+        # loads. The nanobind module is built with the same flags but only
+        # linked, never imported, here — ctest runs the Catch2 binary.
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCLANGQUILL_WITH_LIBCLANG=ON
+          -DCLANGQUILL_BUILD_TESTS=ON
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="${{ matrix.sanitizer_flags }}"
+          -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.sanitizer_flags }}"
+          -DCMAKE_SHARED_LINKER_FLAGS="${{ matrix.sanitizer_flags }}"
+          -DPython_EXECUTABLE="$(which python)"
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

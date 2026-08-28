@@ -1,0 +1,14 @@
+# ThreadSanitizer suppressions for the sanitizer CI job
+# (.github/workflows/sanitizers.yml). Only third-party modules belong here.
+#
+# libclang and libLLVM are uninstrumented, so TSAN can see their memory
+# accesses only through the libc interceptors (memcpy, memcmp, ...) and
+# cannot see their internal synchronization at all — e.g. the LLVM option
+# registry's StringMap, touched from the crash-recovery threads libclang
+# spawns per parse, reports as a race between two worker parses.
+# `called_from_lib` drops interceptor reports whose caller sits in these
+# libraries without ignoring any access made by clangquill's own
+# (instrumented) code, so real races in the streaming parse still fail
+# the job.
+called_from_lib:libclang
+called_from_lib:libLLVM

@@ -1,0 +1,7 @@
+# LeakSanitizer suppressions for the sanitizer CI job
+# (.github/workflows/sanitizers.yml). Only third-party frames belong here:
+# libclang is uninstrumented and its one-time allocations (target/option
+# registries, crash-recovery state) are not clangquill's to fix. Leaks in
+# clangquill's own code must keep failing the job.
+leak:libclang
+leak:libLLVM
