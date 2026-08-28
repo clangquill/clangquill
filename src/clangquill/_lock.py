@@ -123,7 +123,15 @@ def build_lock(cache_dir: Path, *, timeout: float) -> Iterator[None]:
     :class:`BuildLockTimeoutError` naming the process the lockfile's content
     says is holding it.
     """
-    if not math.isfinite(timeout) or timeout <= 0:
+    try:
+        finite = math.isfinite(timeout)
+    except OverflowError:
+        # An int too large to represent as a C double (math.isfinite's
+        # implementation converts to one) -- Config.validate() should have
+        # already rejected this, but this check exists precisely for the
+        # case that gate is bypassed, so it has to handle the same input.
+        finite = False
+    if not finite or timeout <= 0:
         # NaN and +inf both pass a bare `timeout <= 0` check (NaN compares
         # false to everything; +inf is not <= 0 either), so either would
         # never reach the deadline below and wait forever -- exactly what a

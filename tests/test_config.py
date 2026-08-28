@@ -117,12 +117,15 @@ def test_validate_accepts_non_negative_tu_batch(tu_batch: int):
     assert Config(input=["a.hpp"], tu_batch=tu_batch).validate().tu_batch == tu_batch
 
 
-@pytest.mark.parametrize("value", [0, -1, -0.5, float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("value", [0, -1, -0.5, float("nan"), float("inf"), float("-inf"), 10**400])
 def test_validate_rejects_bad_cache_lock_timeout(value: float):
     # 0/negative would never let build_lock's deadline be reached at all; NaN
     # and +inf pass a bare `<= 0` check but would leave that deadline
     # unreachable too -- both mean an indefinite wait, exactly what the
-    # timeout exists to rule out (see #331's review).
+    # timeout exists to rule out. 10**400 is an int too large to convert to a
+    # C double at all -- math.isfinite(10**400) raises OverflowError rather
+    # than returning False, which must not escape past ConfigError either
+    # (see #331's review).
     with pytest.raises(ConfigError, match="cache_lock_timeout"):
         Config(input=["a.hpp"], cache_lock_timeout=value).validate()
 

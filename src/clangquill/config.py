@@ -37,6 +37,23 @@ def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _is_finite_positive(value: float) -> bool:
+    """Whether ``value`` is a finite number > 0.
+
+    ``math.isfinite`` converts its argument to a C double, which raises
+    ``OverflowError`` -- not ``False`` -- for an ``int`` too large to
+    represent as one (``cache_lock_timeout`` is user input, so nothing rules
+    out an absurd value arriving as a plain ``int``); treat that the same as
+    "not finite" rather than letting a raw ``OverflowError`` escape past the
+    documented :class:`ConfigError`.
+    """
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        return False
+    return finite and value > 0
+
+
 def _is_str(value: object) -> bool:
     return isinstance(value, str)
 
@@ -220,7 +237,7 @@ class Config:
         if self.tu_batch < 0:
             msg = f"{CONFIG_PREFIX}tu_batch must be >= 0 (0 = auto, 1 = one TU per input), got {self.tu_batch}"
             raise ConfigError(msg)
-        if not math.isfinite(self.cache_lock_timeout) or self.cache_lock_timeout <= 0:
+        if not _is_finite_positive(self.cache_lock_timeout):
             # NaN and +inf both pass a bare `<= 0` check (NaN compares false to
             # everything; +inf is not <= 0 either) and would leave build_lock's
             # deadline unreachable, i.e. an indefinite wait -- exactly what a

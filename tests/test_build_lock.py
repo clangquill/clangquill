@@ -106,10 +106,12 @@ def test_lock_creates_cache_dir_if_missing(tmp_path: Path) -> None:
     assert cache_dir.is_dir()
 
 
-@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf"), 10**400])
 def test_lock_rejects_a_timeout_that_could_never_be_reached(tmp_path: Path, timeout: float) -> None:
     # Config.validate() is the primary gate (see tests/test_config.py), but
     # build_lock itself must not silently wait forever if that gate is ever
-    # bypassed -- NaN and +inf both pass a bare `timeout <= 0` check.
+    # bypassed -- NaN and +inf both pass a bare `timeout <= 0` check, and
+    # 10**400 (too large to convert to a C double at all) makes
+    # math.isfinite() raise OverflowError rather than returning False.
     with pytest.raises(ValueError, match="cache_lock_timeout"), build_lock(tmp_path, timeout=timeout):
         pass
