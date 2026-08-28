@@ -112,6 +112,23 @@ CommentParser = Callable[[str], CommentModel]
 
 It takes the raw comment text (markers included) and returns a `CommentModel`.
 
+Because the comment text still carries its markers, a parser has to strip them
+itself, and a leading `*` is only sometimes one. The bundled Doxygen parser
+treats it as a Javadoc continuation marker in a `/* ... */` block, where the
+column exists, and only when the `*` stands alone -- followed by whitespace or
+the end of the line. Everywhere else it is the author's Markdown: a `///` block
+repeats its marker on every line and has no continuation column, so `/// * item`
+is a bullet, and `**bold**` opening a line glues the `*` to the word it
+decorates in either style. All of it survives into the model intact.
+
+The Doxygen parser exists twice -- the C++ raw scanner in
+`parser/doxygen_comment_parser.cpp` and the pure-Python
+{py:func}`~clangquill.comments.doxygen_parse` that is the reference
+implementation for this seam. `tests/comment_corpus/*.json` is the corpus that
+keeps them honest: both test suites assert the same model against it, so a
+grammar change landing on only one side fails on the other. Add a case there
+whenever you touch marker stripping, paragraph breaks, or command routing.
+
 ## Selecting a parser
 
 A parser override is resolved (in {py:func}`clangquill.comments.resolve_override`)
