@@ -125,6 +125,9 @@ def test_extraction_flags_a_file_only_doxygen_documented(
 
     check, stats = verify.check_extraction(_ctx(source, ir_path.parent), xml_dir)
     assert not check.passed
+    # Forward slashes on every platform: the path is a comparison key and a
+    # reported value, never one to open, so a host-dependent separator would
+    # only make two runs' reports incomparable.
     assert "other/lonely.hpp" in stats["missed_files"]
     assert any("other/lonely.hpp" in line for line in check.detail)
 

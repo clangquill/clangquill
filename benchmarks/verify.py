@@ -206,12 +206,17 @@ def _relative_to_root(raw: str, root: Path) -> str | None:
     forced-include prologue leaves ``./x/y.h`` in the IR, and resolving that
     against wherever ``verify.py`` was launched from yields a path outside the
     project — dropping every symbol in it from the comparison.
+
+    The result is spelled with forward slashes on every platform. It is a key in
+    the per-file comparison and a value in the JSON artifact, never a path to
+    open, so a separator that changes with the host would make two runs' reports
+    incomparable for no gain.
     """
     path = Path(raw)
     if not path.is_absolute():
         path = root / path
     try:
-        return str(path.resolve().relative_to(root))
+        return path.resolve().relative_to(root).as_posix()
     except ValueError:
         return None
 
