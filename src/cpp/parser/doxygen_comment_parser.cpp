@@ -498,15 +498,24 @@ bool is_copy_command(const std::string& name) {
 // `DenseCoeffsBase<Derived,ReadOnlyAccessors>::coeff(Index,Index) const`. Only
 // a plain name can be pointed at, and only a plain name is a cross-reference
 // the C++ domain resolves.
+//
+// Template arguments go by `<`/`>` depth so a nested list is dropped whole, and
+// the parameter list ends the name only at depth zero: the `(` of a
+// function-type template argument, `Registry<std::function<void(int)>>::add`,
+// belongs to the argument being dropped, and cutting there would strip the
+// member the copy named. `_copy_target` in `src/clangquill/comments.py` is the
+// same reduction; the shared corpus (`tests/comment_corpus`) keeps the two in
+// step.
 std::string copy_target(const std::string& text) {
-  std::string head = text.substr(0, text.find('('));
   std::string out;
   int depth = 0;
-  for (char ch : head) {
+  for (char ch : text) {
     if (ch == '<') {
       ++depth;
     } else if (ch == '>') {
       if (depth > 0) --depth;
+    } else if (ch == '(' && depth == 0) {
+      break;
     } else if (depth == 0) {
       out += ch;
     }
