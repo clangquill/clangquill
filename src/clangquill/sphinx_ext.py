@@ -177,7 +177,7 @@ def _run(app: Sphinx) -> None:
         # previous run's file alone, so there is nothing to point at.
         logger.info(
             "clangquill: wrote %d diagnostic(s) to %s",
-            len(result.diagnostic_records),
+            result.diagnostics_log_count,
             result.diagnostics_log,
         )
     # Errors only, and only the top-level message — unchanged by

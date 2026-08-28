@@ -338,6 +338,159 @@ TEST_CASE("successive write_part calls accumulate one batch at a time",
   std::remove(path.c_str());
 }
 
+TEST_CASE(
+    "write_part does not cascade-delete an earlier batch's comment or "
+    "enumerator rows for a USR a later batch re-declares",
+    "[store]") {
+  // Regression test for issue #316: `insert_rows`'s symbols statement used to
+  // be INSERT OR REPLACE, and under `PRAGMA foreign_keys=ON` REPLACE is
+  // delete+insert -- so a later batch writing a symbols row for a USR an
+  // earlier batch already wrote cascade-deleted that earlier batch's child
+  // rows (comments, enumerators, ...) for the USR, each committed in its own
+  // write_part transaction. Mirrors the issue's failure scenario: a
+  // documented opaque forward declaration in one header, the (undocumented)
+  // definition in another, landing in separate batches.
+  std::string path = temp_db_path();
+
+  model::SourceFile fwd_file;
+  fwd_file.path = "/tmp/fwd.hpp";
+  fwd_file.sha256 = std::string(64, 'a');
+  fwd_file.size_bytes = 11;
+
+  model::SourceFile def_file;
+  def_file.path = "/tmp/foo.hpp";
+  def_file.sha256 = std::string(64, 'b');
+  def_file.size_bytes = 22;
+
+  // Batch A: a documented forward declaration of `Foo`, plus a documented
+  // forward-declared enum whose enumerators only show up once the definition
+  // is parsed.
+  model::ParsedModule batch_a;
+  batch_a.files.push_back(fwd_file);
+
+  model::Symbol foo_fwd;
+  foo_fwd.usr = "c:@S@Foo";
+  foo_fwd.kind = model::SymbolKind::Class;
+  foo_fwd.spelling = "Foo";
+  foo_fwd.qualified_name = "Foo";
+  foo_fwd.display_name = "Foo";
+  foo_fwd.is_definition = false;
+  foo_fwd.is_documented = true;
+  foo_fwd.location.file_path = fwd_file.path;
+  batch_a.symbols.push_back(foo_fwd);
+
+  model::RawComment foo_comment;
+  foo_comment.symbol_usr = "c:@S@Foo";
+  foo_comment.text = "/// Opaque handle.";
+  batch_a.comments.push_back(foo_comment);
+
+  model::Symbol color_fwd;
+  color_fwd.usr = "c:@E@Color";
+  color_fwd.kind = model::SymbolKind::Enum;
+  color_fwd.spelling = "Color";
+  color_fwd.qualified_name = "Color";
+  color_fwd.display_name = "Color";
+  color_fwd.is_definition = false;
+  color_fwd.location.file_path = fwd_file.path;
+  batch_a.symbols.push_back(color_fwd);
+
+  // Batch B: the (undocumented) definitions, in a different file/batch.
+  model::ParsedModule batch_b;
+  batch_b.files.push_back(def_file);
+
+  model::Symbol foo_def;
+  foo_def.usr = "c:@S@Foo";
+  foo_def.kind = model::SymbolKind::Class;
+  foo_def.spelling = "Foo";
+  foo_def.qualified_name = "Foo";
+  foo_def.display_name = "Foo";
+  foo_def.is_definition = true;
+  foo_def.is_documented = false;
+  foo_def.location.file_path = def_file.path;
+  batch_b.symbols.push_back(foo_def);
+
+  model::Symbol color_def;
+  color_def.usr = "c:@E@Color";
+  color_def.kind = model::SymbolKind::Enum;
+  color_def.spelling = "Color";
+  color_def.qualified_name = "Color";
+  color_def.display_name = "Color";
+  color_def.is_definition = true;
+  color_def.location.file_path = def_file.path;
+  batch_b.symbols.push_back(color_def);
+
+  model::Enumerator red;
+  red.usr = "c:@E@Color@Red";
+  red.enum_usr = "c:@E@Color";
+  red.name = "Red";
+  red.value = 0;
+  batch_b.enumerators.push_back(red);
+
+  // Batch C: a third, later batch that re-declares `Color` yet again, as a
+  // plain (non-defining, undocumented) forward declaration in a third file --
+  // e.g. another header that only needs an opaque `enum Color;`. Its symbols
+  // row for `c:@E@Color` still fires the same ON CONFLICT path as batch B's
+  // did, so this exercises that the enumerator survives *every* later write
+  // to the same USR, not just the one that happened to promote it, and that
+  // a plain declaration can never claw back a definition's own fields.
+  model::SourceFile fwd2_file;
+  fwd2_file.path = "/tmp/fwd2.hpp";
+  fwd2_file.sha256 = std::string(64, 'c');
+  fwd2_file.size_bytes = 9;
+
+  model::ParsedModule batch_c;
+  batch_c.files.push_back(fwd2_file);
+
+  model::Symbol color_fwd2;
+  color_fwd2.usr = "c:@E@Color";
+  color_fwd2.kind = model::SymbolKind::Enum;
+  color_fwd2.spelling = "Color";
+  color_fwd2.qualified_name = "Color";
+  color_fwd2.display_name = "Color";
+  color_fwd2.is_definition = false;
+  color_fwd2.location.file_path = fwd2_file.path;
+  batch_c.symbols.push_back(color_fwd2);
+
+  {
+    store::SqliteStore writer(path);
+    // Three separate write_part calls, hence three separate committed
+    // transactions -- exactly the streamed path the issue describes.
+    writer.write_part(batch_a, store::Meta::current());
+    writer.write_part(batch_b, store::Meta::current());
+    writer.write_part(batch_c, store::Meta::current());
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  // The comment batch A committed must survive batch B's REPLACE of the same
+  // USR's symbols row.
+  REQUIRE(got.comments.size() == 1);
+  CHECK(got.comments[0].symbol_usr == "c:@S@Foo");
+
+  // Likewise the enumerator, cascaded off the enum's symbols row -- and still
+  // there after batch C's unrelated re-declaration touches that row again.
+  REQUIRE(got.enumerators.size() == 1);
+  CHECK(got.enumerators[0].usr == "c:@E@Color@Red");
+
+  // The definition promotes is_definition, and is_documented never regresses
+  // even though the definition's own batch didn't see the comment. Batch C's
+  // plain forward declaration neither un-defines `Color` nor claws its
+  // location back from the definition's own file.
+  REQUIRE(got.symbols.size() == 2);
+  for (const auto& s : got.symbols) {
+    if (s.usr == "c:@S@Foo") {
+      CHECK(s.is_definition);
+      CHECK(s.is_documented);
+    } else if (s.usr == "c:@E@Color") {
+      CHECK(s.is_definition);
+      CHECK(s.location.file_path == def_file.path);
+    }
+  }
+
+  std::remove(path.c_str());
+}
+
 TEST_CASE("clear before a streamed parse drops the previous one", "[store]") {
   // write_part accumulates, so a streamed full parse gets the replacing
   // semantics of write by clearing once before it hands over the first batch.

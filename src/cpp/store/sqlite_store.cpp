@@ -204,11 +204,76 @@ void SqliteStore::drop_vanished_files(
 void SqliteStore::insert_rows(const model::ParsedModule& module,
                               const FileIds& file_ids) {
   {
+    // Upsert, never INSERT OR REPLACE. REPLACE is delete+insert, and under
+    // `PRAGMA foreign_keys=ON` deleting a `symbols` row cascades onto
+    // `function_parameters`, `template_parameters`, `enumerators`,
+    // `references_`, `comments` and `comment_fields` — so a later batch
+    // merely re-declaring a USR an earlier batch already wrote would wipe
+    // that earlier batch's child rows for it, and they only come back if the
+    // later batch's TU happened to produce equivalent ones (issue #316).
+    // `write`'s single transaction dodges this by inserting every symbol
+    // before any child row, so a duplicate's REPLACE always fires against an
+    // empty child set; `write_part` commits one transaction per batch and
+    // has no such ordering to lean on.
+    //
+    // The DO UPDATE also picks a winner instead of plain last-write-wins,
+    // mirroring the in-TU dedup in ast_visitor.cpp (`is_def` supersedes a
+    // prior forward declaration but a forward declaration never supersedes a
+    // definition already on record): `is_definition` and `is_documented` are
+    // monotonic (once true, always true — a later batch's narrower view of
+    // the same USR should never un-flag either), and every other column
+    // keeps the existing definition's data rather than being overwritten by
+    // a later non-definition. Two definitions of the same USR (unusual) or
+    // two plain declarations both take the latest, same as before.
     Stmt s(db_,
-           "INSERT OR REPLACE INTO symbols(usr, parent_usr, kind, spelling, "
+           "INSERT INTO symbols(usr, parent_usr, kind, spelling, "
            "qualified_name, display_name, signature, type_repr, access, "
            "storage, is_definition, is_documented, content_hash, file_id, "
-           "line, col) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);");
+           "line, col) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+           "ON CONFLICT(usr) DO UPDATE SET "
+           "parent_usr = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.parent_usr "
+           "ELSE excluded.parent_usr END, "
+           "kind = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.kind "
+           "ELSE excluded.kind END, "
+           "spelling = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.spelling "
+           "ELSE excluded.spelling END, "
+           "qualified_name = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.qualified_name "
+           "ELSE excluded.qualified_name END, "
+           "display_name = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.display_name "
+           "ELSE excluded.display_name END, "
+           "signature = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.signature "
+           "ELSE excluded.signature END, "
+           "type_repr = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.type_repr "
+           "ELSE excluded.type_repr END, "
+           "access = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.access "
+           "ELSE excluded.access END, "
+           "storage = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.storage "
+           "ELSE excluded.storage END, "
+           "is_definition = MAX(symbols.is_definition, "
+           "excluded.is_definition), "
+           "is_documented = MAX(symbols.is_documented, "
+           "excluded.is_documented), "
+           "content_hash = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.content_hash "
+           "ELSE excluded.content_hash END, "
+           "file_id = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.file_id "
+           "ELSE excluded.file_id END, "
+           "line = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.line "
+           "ELSE excluded.line END, "
+           "col = CASE WHEN symbols.is_definition = 1 AND "
+           "excluded.is_definition = 0 THEN symbols.col "
+           "ELSE excluded.col END;");
     for (const auto& sym : module.symbols) {
       s.reset();
       s.bind(1, sym.usr);

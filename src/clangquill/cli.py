@@ -232,7 +232,7 @@ def build(  # noqa: PLR0913
     typer.echo(f"Parsed {result.symbol_count} symbol(s) from {result.file_count} file(s).")
     typer.echo(f"Wrote {len(result.pages)} page(s) to {result.output_dir}.")
     if result.diagnostics_log is not None:
-        typer.echo(f"Wrote {len(result.diagnostic_records)} diagnostic(s) to {result.diagnostics_log}.")
+        typer.echo(f"Wrote {result.diagnostics_log_count} diagnostic(s) to {result.diagnostics_log}.")
     if not warnings_as_errors:
         # Default reporting: errors only, one line each. Warnings stay off the
         # console because a header that warns still documents fine.

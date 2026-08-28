@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -1405,6 +1406,26 @@ def test_resolve_inputs_still_globs_when_no_literal_file_exists(tmp_path: Path) 
     assert resolved == sorted(str(p.resolve()) for p in [tmp_path / "a.h", tmp_path / "b.h"])
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="case-insensitive-filesystem semantics only apply on Windows")
+def test_resolve_inputs_normalizes_case_on_windows(tmp_path: Path) -> None:
+    # NTFS is case-insensitive but case-preserving. ``BuildCache.deps_only_from``
+    # and ``tu_inputs`` (cache.py) key straight off these resolved strings, so if
+    # two spellings of the same input resolved to two different strings here, the
+    # same physical translation unit would look like two distinct inputs to the
+    # cache's per-TU dependency map -- silently breaking stale-row pruning across
+    # a rebuild that happened to spell an input differently than the one before it
+    # (issue 313). ``Path.resolve()`` is what keeps this safe: on Windows it asks
+    # the OS for the file's one true on-disk spelling, whichever case the caller
+    # used to name it.
+    header = tmp_path / "Foo.hpp"
+    header.write_text("// foo\n")
+
+    resolved_matching_case = pipeline._resolve_inputs(["Foo.hpp"], tmp_path)  # noqa: SLF001
+    resolved_other_case = pipeline._resolve_inputs(["FOO.HPP"], tmp_path)  # noqa: SLF001
+
+    assert resolved_matching_case == resolved_other_case == [str(header.resolve())]
+
+
 @requires_libclang
 def test_temp_db_cleaned_up_when_generation_fails(
     project: Path,
@@ -1903,6 +1924,37 @@ def test_a_partial_reparse_clears_a_diagnostic_from_a_dropped_include(project: P
     assert second.diagnostics == []
 
 
+@requires_libclang
+def test_diagnostics_log_count_matches_the_log_not_the_project_wide_replay(project: Path) -> None:
+    # Issue #319: diagnostic_records is the whole project's picture (including
+    # diagnostics carried forward from untouched inputs on an incremental
+    # reparse), but the log only ever holds this run's own parse. The count
+    # reported alongside "wrote N diagnostic(s) to <log>" has to come from what
+    # was actually written to the log, not from diagnostic_records.
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    (project / "beta.hpp").write_text(
+        '#warning "beta is on its way out"\n/// beta ns\nnamespace beta { /// g\nint g(); }\n',
+    )
+    config = Config(
+        input=["alpha.hpp", "beta.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        diagnostics_log="parse.log",
+    )
+    build(config, base_dir=project)
+
+    (project / "alpha.hpp").write_text("/// alpha ns edited\nnamespace alpha { /// f\nint f(); }\n")
+    result = build(config, base_dir=project)
+
+    # This run only reparsed the (clean) edited alpha.hpp, so nothing new to log.
+    assert result.diagnostics_log_count == 0
+    log_text = (project / "parse.log").read_text(encoding="utf-8")
+    assert "beta is on its way out" not in log_text
+
+    # But the project-wide picture still carries beta's still-standing warning.
+    assert any("beta is on its way out" in record.text for record in result.diagnostic_records)
+
+
 def test_severity_counts_omits_severities_that_never_occurred() -> None:
     records = [
         pipeline.Diagnostic(severity=3, depth=0, text="a.hpp:1:1: error: bad"),
@@ -1923,6 +1975,21 @@ def test_warnings_or_worse_drops_notes() -> None:
     ]
 
     assert [record.text for record in pipeline.warnings_or_worse(records)] == ["warn", "fatal"]
+
+
+def test_diagnostic_texts_drops_nested_records_even_at_error_severity() -> None:
+    records = [
+        pipeline.Diagnostic(severity=3, depth=0, text="a.hpp:1:1: error: bad"),
+        pipeline.Diagnostic(severity=3, depth=2, text="a.hpp:1:1: error: recovered nested"),
+        pipeline.Diagnostic(severity=1, depth=1, text="a.hpp:1:1: note: here"),
+        pipeline.Diagnostic(severity=2, depth=0, text="a.hpp:2:1: warning: meh"),
+        pipeline.Diagnostic(severity=4, depth=0, text="b.hpp:1:1: fatal: worse"),
+    ]
+
+    assert pipeline._diagnostic_texts(records) == [  # noqa: SLF001
+        "a.hpp:1:1: error: bad",
+        "b.hpp:1:1: fatal: worse",
+    ]
 
 
 def _carry_forward(

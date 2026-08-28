@@ -156,9 +156,15 @@ class BuildResult:
     #: print. Unaffected by ``diagnostics_log``, so enabling the log never
     #: changes what a build reports on the console.
     diagnostics: list[str] = field(default_factory=list)
-    #: Every diagnostic captured this run, in parse order, notes flattened
-    #: behind their parent. Empty unless ``clangquill_diagnostics_log`` asked
-    #: for full capture.
+    #: The whole project's diagnostic picture, not just what this run parsed:
+    #: on an incremental build it replays diagnostics from translation units
+    #: this run never touched (see issue #207), so warnings-as-errors still
+    #: fails on a problem this run didn't re-detect. That replay only ever
+    #: kept warning-or-worse severity, so notes are dropped whenever any of
+    #: the project is served from the cache; a build with no cache at all
+    #: parses everything fresh and keeps notes flattened behind their parent.
+    #: Empty unless ``clangquill_diagnostics_log`` or ``warnings_as_errors``
+    #: asked for full capture.
     diagnostic_records: list[Diagnostic] = field(default_factory=list)
     #: How many diagnostics of each severity this run captured, keyed by the
     #: :data:`SEVERITY_NAMES` word and holding only non-zero entries. Derived
@@ -169,6 +175,12 @@ class BuildResult:
     #: none was configured, or because a fully cached build deliberately left
     #: the previous run's log in place.
     diagnostics_log: Path | None = None
+    #: How many records this run wrote to :attr:`diagnostics_log` — exactly
+    #: ``len(records)`` at the point the log was written, so it matches the
+    #: file's contents even when :attr:`diagnostic_records` covers a wider
+    #: (project-wide) or narrower (notes-dropped) set. Meaningless when
+    #: :attr:`diagnostics_log` is ``None``, since nothing was written this run.
+    diagnostics_log_count: int = 0
     #: Whether libclang re-parsed this run (``False`` = served from the cache).
     parsed: bool = True
     #: Output filenames actually (re)written this run (incremental builds only
@@ -427,7 +439,7 @@ def _diagnostic_texts(records: list[Diagnostic]) -> list[str]:
     Used to rebuild :attr:`BuildResult.diagnostics` from cached records on a
     cache-hit build, so it stays exactly what a live parse would have reported.
     """
-    return [record.text for record in records if record.severity >= ERROR_SEVERITY]
+    return [record.text for record in records if record.severity >= ERROR_SEVERITY and record.depth == 0]
 
 
 def _diagnostics_to_json(records: list[Diagnostic]) -> list[dict[str, object]]:
@@ -587,6 +599,25 @@ def write_diagnostics_log(
         staged.replace(path)
     finally:
         staged.unlink(missing_ok=True)
+
+
+def _write_diagnostics_log_if_any(
+    path: Path | None,
+    records: list[Diagnostic],
+    *,
+    inputs: int,
+    partial: int | None = None,
+) -> int:
+    """Write ``records`` to ``path`` via :func:`write_diagnostics_log` unless ``path`` is ``None``.
+
+    Returns how many records were written — ``0`` when nothing was, since
+    ``path`` was ``None``. That return value is what :attr:`BuildResult.diagnostics_log_count`
+    is set from, so it always matches the log file's own contents exactly.
+    """
+    if path is None:
+        return 0
+    write_diagnostics_log(path, records, inputs=inputs, partial=partial)
+    return len(records)
 
 
 def _template_files_hash(template_dirs: list[str]) -> dict[str, str]:
@@ -834,15 +865,15 @@ def _full_build(
 
     log_path = _diagnostics_log_path(config, base)
     records: list[Diagnostic] = []
+    log_count = 0
     succeeded = False
     try:
         result = _core.parse_to_sqlite(inputs, str(db_path), _parse_options(config, base, compile_db))
         records = _records(result)
-        if log_path is not None:
-            # Written before the render, not after: a log of the parse that
-            # preceded a render crash is exactly what you want to read when
-            # working out why the render crashed.
-            write_diagnostics_log(log_path, records, inputs=len(inputs))
+        # Written before the render, not after: a log of the parse that
+        # preceded a render crash is exactly what you want to read when
+        # working out why the render crashed.
+        log_count = _write_diagnostics_log_if_any(log_path, records, inputs=len(inputs))
         with Store.open(db_path) as store:
             pages = _make_generator(config, base, store).generate(
                 output_dir,
@@ -870,6 +901,7 @@ def _full_build(
         diagnostic_records=records,
         diagnostic_counts=severity_counts(records),
         diagnostics_log=log_path,
+        diagnostics_log_count=log_count,
         parsed=True,
         pages_written=sorted(written),
         pages_deleted=deleted,
@@ -1002,8 +1034,7 @@ def _incremental_build(  # noqa: PLR0913
         # overwriting a good log with an empty one would report silence where
         # there were problems. Same reasoning as ``_noop_result``.
         written_log = log_path if parsed and log_path is not None else None
-        if written_log is not None:
-            write_diagnostics_log(written_log, records, inputs=len(inputs), partial=reparsed)
+        written_log_count = _write_diagnostics_log_if_any(written_log, records, inputs=len(inputs), partial=reparsed)
 
         with Store.open(ir_path) as store:
             snapshot = {f.path: (f.sha256, f.size_bytes) for f in store.files()}
@@ -1050,6 +1081,7 @@ def _incremental_build(  # noqa: PLR0913
         diagnostic_records=full_diagnostics,
         diagnostic_counts=severity_counts(full_diagnostics),
         diagnostics_log=written_log,
+        diagnostics_log_count=written_log_count,
         parsed=parsed,
         pages_written=written,
         pages_deleted=deleted,
