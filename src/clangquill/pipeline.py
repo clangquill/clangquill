@@ -426,7 +426,7 @@ def _diagnostic_texts(records: list[Diagnostic]) -> list[str]:
     Used to rebuild :attr:`BuildResult.diagnostics` from cached records on a
     cache-hit build, so it stays exactly what a live parse would have reported.
     """
-    return [record.text for record in records if record.severity >= ERROR_SEVERITY]
+    return [record.text for record in records if record.severity >= ERROR_SEVERITY and record.depth == 0]
 
 
 def _diagnostics_to_json(records: list[Diagnostic]) -> list[dict[str, object]]:
