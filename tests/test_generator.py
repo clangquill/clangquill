@@ -1161,7 +1161,11 @@ def test_enum_nested_in_class_template_has_no_qualifying_head(spec_gen: Generato
     # docs/development/cross-references.md and issue #336.
     from clangquill.store import SymbolKind  # noqa: PLC0415
 
-    mode = next(s for s in spec_store.symbols() if s.kind == SymbolKind.ENUM and s.spelling == "Mode")
+    mode = next(
+        s
+        for s in spec_store.symbols()
+        if s.kind == SymbolKind.ENUM and s.qualified_name == "demo::ContainerFactory::Mode"
+    )
     assert spec_gen.signature(mode) == "demo::ContainerFactory::Mode"
 
 
