@@ -17,6 +17,13 @@ namespace clangquill::store {
 
 namespace {
 
+// The prefix every unique_sibling_path() candidate for `target` starts with,
+// so reclaim_stale_temp_siblings() can recognise one left behind by an
+// earlier run.
+std::string temp_sibling_prefix(const std::filesystem::path& target) {
+  return target.filename().string() + ".tmp";
+}
+
 // A path next to `target` that does not currently exist, so the temporary
 // database @ref write_streamed_full_parse builds can later be renamed onto
 // `target` atomically (same directory => same filesystem, which a rename
@@ -24,10 +31,10 @@ namespace {
 std::filesystem::path unique_sibling_path(const std::filesystem::path& target) {
   namespace fs = std::filesystem;
   const fs::path dir = target.has_parent_path() ? target.parent_path() : fs::path(".");
+  const std::string prefix = temp_sibling_prefix(target);
   std::random_device entropy;
   for (int attempt = 0; attempt < 64; ++attempt) {
-    const fs::path candidate =
-        dir / (target.filename().string() + ".tmp" + std::to_string(entropy()));
+    const fs::path candidate = dir / (prefix + std::to_string(entropy()));
     std::error_code ec;
     if (!fs::exists(candidate, ec)) return candidate;
   }
@@ -47,6 +54,33 @@ void remove_stale_sidecars(const std::filesystem::path& path) {
   for (const char* suffix : {"-wal", "-shm", "-journal"}) {
     std::error_code ec;
     std::filesystem::remove(path.string() + suffix, ec);
+  }
+}
+
+// Removes leftover temp-staging siblings of `target` matching the
+// unique_sibling_path() naming scheme: `<target filename>.tmp` followed by
+// nothing but digits. A process killed mid-parse never reaches the
+// catch-block cleanup in write_streamed_full_parse (SIGKILL doesn't unwind
+// the stack), so without this every interrupted run leaves another randomly
+// named file behind that nothing else ever reclaims. Best-effort: a listing
+// or removal failure is ignored, since this is opportunistic cleanup that the
+// parse about to run never depends on -- and only files matching the exact
+// naming scheme are touched, never anything merely sharing the prefix.
+void reclaim_stale_temp_siblings(const std::filesystem::path& target) {
+  namespace fs = std::filesystem;
+  const fs::path dir = target.has_parent_path() ? target.parent_path() : fs::path(".");
+  const std::string prefix = temp_sibling_prefix(target);
+  std::error_code dir_ec;
+  for (const auto& entry : fs::directory_iterator(dir, dir_ec)) {
+    const std::string name = entry.path().filename().string();
+    if (name.rfind(prefix, 0) != 0) continue;
+    const std::string suffix = name.substr(prefix.size());
+    if (suffix.empty() || suffix.find_first_not_of("0123456789") != std::string::npos) {
+      continue;
+    }
+    std::error_code rm_ec;
+    fs::remove(entry.path(), rm_ec);
+    remove_stale_sidecars(entry.path());
   }
 }
 
@@ -654,6 +688,7 @@ void write_streamed_full_parse(const std::string& path, const Meta& meta,
                                const std::function<void(const BatchSink&)>& produce) {
   namespace fs = std::filesystem;
   const fs::path target(path);
+  reclaim_stale_temp_siblings(target);
   const fs::path tmp = unique_sibling_path(target);
   try {
     {

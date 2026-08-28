@@ -527,6 +527,76 @@ TEST_CASE(
   std::remove(path.c_str());
 }
 
+TEST_CASE(
+    "write_streamed_full_parse reclaims a temp-staging sibling a killed run "
+    "left behind",
+    "[store]") {
+  // A process killed mid-parse never reaches write_streamed_full_parse's own
+  // catch-block cleanup (SIGKILL doesn't unwind the stack), so the file it
+  // was staging into survives under its random <target>.tmp<N> name. Without
+  // reclaiming it on a later run against the same target, every interrupted
+  // parse would add another one that nothing ever cleans up.
+  std::string path = temp_db_path();
+  const std::string stale_sibling = path + ".tmp846913";
+  {
+    std::ofstream stale(stale_sibling, std::ios::binary);
+    stale << "leftover staging database from a killed run";
+  }
+  REQUIRE(std::filesystem::exists(stale_sibling));
+
+  model::SourceFile fresh;
+  fresh.path = "/tmp/fresh.hpp";
+  fresh.sha256 = std::string(64, 'f');
+  model::ParsedModule batch;
+  batch.files.push_back(fresh);
+  batch.symbols.push_back(group_symbol("c:@F@fresh", fresh.path));
+
+  store::write_streamed_full_parse(
+      path, store::Meta::current(),
+      [&](const store::BatchSink& sink) { sink(model::ParsedModule(batch)); });
+
+  CHECK_FALSE(std::filesystem::exists(stale_sibling));
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+  REQUIRE(got.symbols.size() == 1);
+  CHECK(got.symbols[0].usr == "c:@F@fresh");
+
+  std::remove(path.c_str());
+}
+
+TEST_CASE(
+    "write_streamed_full_parse leaves an unrelated file merely sharing its "
+    "target's prefix alone",
+    "[store]") {
+  // The reclaim sweep matches on <target filename>.tmp followed by nothing
+  // but digits, precisely so it can never mistake an unrelated file for one
+  // of its own -- even one crafted to share the exact same prefix.
+  std::string path = temp_db_path();
+  const std::string look_alike = path + ".tmp-but-not-ours.txt";
+  {
+    std::ofstream f(look_alike, std::ios::binary);
+    f << "not a staging database";
+  }
+  REQUIRE(std::filesystem::exists(look_alike));
+
+  model::SourceFile fresh;
+  fresh.path = "/tmp/fresh.hpp";
+  fresh.sha256 = std::string(64, 'f');
+  model::ParsedModule batch;
+  batch.files.push_back(fresh);
+  batch.symbols.push_back(group_symbol("c:@F@fresh", fresh.path));
+
+  store::write_streamed_full_parse(
+      path, store::Meta::current(),
+      [&](const store::BatchSink& sink) { sink(model::ParsedModule(batch)); });
+
+  CHECK(std::filesystem::exists(look_alike));
+
+  std::remove(path.c_str());
+  std::remove(look_alike.c_str());
+}
+
 TEST_CASE("SqliteStore write_tus replaces only the re-parsed file's rows",
           "[store]") {
   // Two files in the IR: one to re-parse, one that must survive untouched.

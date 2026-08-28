@@ -153,9 +153,13 @@ using BatchSink = std::function<void(model::ParsedModule&&)>;
 /// This is what gives a streamed full parse — which, unlike @ref write, has no
 /// single transaction to roll back — the same all-or-nothing guarantee for the
 /// *target path*: an exception from `produce` (a hard parse failure, a
-/// constraint violation) or the process being killed mid-parse discards the
-/// temporary file and leaves `path` exactly as it was, rather than holding a
-/// mix of an old IR's rows and however many batches had landed (#317).
+/// constraint violation) leaves `path` exactly as it was, discarding the
+/// temporary file, rather than holding a mix of an old IR's rows and however
+/// many batches had landed (#317). The process being killed mid-parse leaves
+/// `path` untouched the same way, but since that skips the exception-cleanup
+/// below entirely, the abandoned temporary file itself lingers until the next
+/// call against the same `path` reclaims it (see below) rather than being
+/// deleted right away.
 ///
 /// SQLite's own sidecar files are handled alongside the main one, since the
 /// rename above moves only that: the temporary database is checkpointed and
@@ -164,7 +168,11 @@ using BatchSink = std::function<void(model::ParsedModule&&)>;
 /// and any `-wal`/`-shm`/`-journal` left next to `path` by an earlier,
 /// abnormally terminated write are cleared before the swap, since a stale one
 /// would otherwise sit next to the freshly replaced database and could be
-/// replayed onto it by the next reader.
+/// replayed onto it by the next reader. Every call also opens by sweeping up
+/// any temp-staging sibling of `path` left behind by an earlier, killed run
+/// (recognised by the same naming scheme @ref write_streamed_full_parse's own
+/// temporary file uses), so an interrupted parse does not accumulate an
+/// abandoned file forever.
 ///
 /// @param path Filesystem path of the target database.
 /// @param meta Metadata stored alongside every batch.
