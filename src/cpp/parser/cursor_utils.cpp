@@ -1,5 +1,6 @@
 #include "parser/cursor_utils.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <system_error>
@@ -449,6 +450,17 @@ std::optional<std::array<unsigned long long, 3>> file_identity(CXFile file) {
   return std::array<unsigned long long, 3>{id.data[0], id.data[1], id.data[2]};
 }
 
+std::string path_lookup_key(const std::string& path) {
+#if defined(_WIN32)
+  std::string key = path;
+  std::transform(key.begin(), key.end(), key.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return key;
+#else
+  return path;
+#endif
+}
+
 bool in_file(CXCursor c, const std::unordered_set<std::string>& main_files,
              const FileIdSet& main_ids, bool trust_main_file) {
   CXSourceLocation loc = clang_getCursorLocation(c);
@@ -464,9 +476,13 @@ bool in_file(CXCursor c, const std::unordered_set<std::string>& main_files,
   if (file == nullptr) return false;
   // Identity first: the same file reached under two spellings is one file, and
   // only this notices. The name match stays as a fallback for a spelling
-  // libclang never resolved to a file of its own.
+  // libclang never resolved to a file of its own -- folded case-insensitively
+  // on Windows so that fallback does not itself fail on the very spelling
+  // mismatch (`Foo.h` vs `foo.h`) identity was just unable to resolve.
   if (auto id = file_identity(file); id && main_ids.count(*id) > 0) return true;
-  return main_files.count(to_string(clang_getFileName(file))) > 0;
+  const std::string key = path_lookup_key(to_string(clang_getFileName(file)));
+  return std::any_of(main_files.begin(), main_files.end(),
+                     [&key](const std::string& mf) { return path_lookup_key(mf) == key; });
 }
 
 }  // namespace clangquill::parser
