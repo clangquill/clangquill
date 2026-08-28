@@ -1,0 +1,31 @@
+# Makes the coverage.yml/cpp_tests.yml split explicit: pytest uploads under
+# flag `python`, ctest under flag `cpp` (see the "Collect coverage"/"Upload
+# coverage" steps in each workflow). Without this file codecov falls back to
+# one blended project status covering both flags, which hides a regression in
+# either report behind an improvement in the other.
+#
+# `informational: true` reports each flag's status without failing the check:
+# fork PRs skip the upload entirely (no CODECOV_TOKEN), so a hard-failing
+# status here would block every fork contribution on missing data rather than
+# on an actual coverage regression.
+coverage:
+  status:
+    project:
+      default: false
+      python:
+        flags: [python]
+        informational: true
+      cpp:
+        flags: [cpp]
+        informational: true
+    patch:
+      default: false
+      python:
+        flags: [python]
+        informational: true
+      cpp:
+        flags: [cpp]
+        informational: true
+
+comment:
+  layout: "header, flags, diff, files"

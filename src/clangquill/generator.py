@@ -1461,10 +1461,12 @@ class Generator:
         A record page lists them, so it depends on *their* comments and not only
         on its own. Nothing else in the dependency walk follows an incoming
         edge, and without these a `\relates` added or removed would leave the
-        record's page cached and stale.
+        record's page cached and stale. Not restricted to record kinds:
+        ``gen.related()`` itself carries no such restriction, and only the
+        bundled ``class.md.jinja`` happens to call it solely on records -- a
+        declared custom template calling it from a non-record page must have
+        that dependency covered by the wide fingerprint it opted into.
         """
-        if symbol.kind not in _RECORD_KINDS:
-            return []
         return [
             _DEP_FIELD_SEP.join(("L", symbol.usr, fn.usr, fn.qualified_name, fn.content_hash))
             for fn in self.related(symbol)
