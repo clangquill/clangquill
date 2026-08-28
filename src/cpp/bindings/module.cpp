@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "core/version.hpp"
 #include "model/diagnostic.hpp"
@@ -57,6 +58,7 @@ struct PyParseOptions {
   std::optional<std::string> compile_commands_dir;
   bool keep_going = true;
   bool capture_all_diagnostics = false;
+  bool extract_anonymous_namespaces = false;
   int jobs = 0;
   int tu_batch = 0;
 };
@@ -100,9 +102,20 @@ clangquill::parser::ParseOptions to_core_options(const PyParseOptions& opt) {
   po.compile_commands_dir = opt.compile_commands_dir;
   po.keep_going = opt.keep_going;
   po.capture_all_diagnostics = opt.capture_all_diagnostics;
+  po.extract_anonymous_namespaces = opt.extract_anonymous_namespaces;
   po.jobs = opt.jobs;
   po.tu_batch = opt.tu_batch;
   return po;
+}
+
+void collect_diagnostics(ParseResult& res,
+                         const clangquill::model::ParsedModule& mod) {
+  res.diagnostic_records = mod.diagnostics;
+  for (const auto& d : mod.diagnostics) {
+    if (d.depth == 0 && d.severity >= clangquill::model::kSeverityError) {
+      res.diagnostics.push_back(d.text);
+    }
+  }
 }
 
 ParseResult result_from_module(const clangquill::model::ParsedModule& mod) {
@@ -110,12 +123,7 @@ ParseResult result_from_module(const clangquill::model::ParsedModule& mod) {
   res.symbol_count = static_cast<int>(mod.symbols.size());
   res.reference_count = static_cast<int>(mod.references.size());
   res.file_count = static_cast<int>(mod.files.size());
-  res.diagnostic_records = mod.diagnostics;
-  for (const auto& d : mod.diagnostics) {
-    if (d.depth == 0 && d.severity >= clangquill::model::kSeverityError) {
-      res.diagnostics.push_back(d.text);
-    }
-  }
+  collect_diagnostics(res, mod);
   return res;
 }
 #endif
@@ -135,10 +143,15 @@ ParseResult parse_inputs(const std::vector<std::string>& inputs,
   // the cache can attribute every dependency to the input that pulled it in.
   std::vector<std::vector<std::string>> tu_files;
   std::vector<bool> tu_ok;
-  clangquill::model::ParsedModule mod = clangquill::parser::parse_files(
-      inputs, to_core_options(opt), &tu_files, &tu_ok);
+  ParseResult res;
 
   if (replace_only) {
+    // The incremental path needs the whole module in hand before it writes: it
+    // decides which existing rows to delete from the complete set of files the
+    // re-parse reached. It is a handful of translation units, so holding their
+    // IR costs little.
+    clangquill::model::ParsedModule mod = clangquill::parser::parse_files(
+        inputs, to_core_options(opt), &tu_files, &tu_ok);
     // Bail before writing on any hard parse failure: otherwise that file's
     // existing rows would be deleted and replaced with nothing, wiping good
     // documentation.
@@ -148,17 +161,40 @@ ParseResult parse_inputs(const std::vector<std::string>& inputs,
                                  inputs[i]);
       }
     }
-  }
-
-  clangquill::store::SqliteStore store(db_path);
-  if (replace_only) {
+    clangquill::store::SqliteStore store(db_path);
     store.write_tus(mod, clangquill::store::Meta::current(), inputs,
                     dropped_candidates);
+    res = result_from_module(mod);
   } else {
-    store.write(mod, clangquill::store::Meta::current());
+    // A full parse streams instead: every batch is written as it is parsed, so
+    // peak memory is a couple of batches rather than the whole project's IR,
+    // and the database I/O overlaps with the parsing of the batches behind it.
+    // The batches arrive in canonical order on this thread, so the rows land in
+    // the same sequence whatever the job count, and the counts below add up the
+    // same totals the merged module used to report.
+    clangquill::store::SqliteStore store(db_path);
+    const clangquill::store::Meta meta = clangquill::store::Meta::current();
+    // The batches accumulate, so the replacing semantics a one-shot `write`
+    // has — this binding may be pointed at a database an earlier parse filled
+    // (#203) — come from clearing once, here, before the first batch lands.
+    store.clear();
+    std::unordered_set<std::string> files_seen;
+    auto sink = [&](clangquill::model::ParsedModule&& part) {
+      res.symbol_count += static_cast<int>(part.symbols.size());
+      res.reference_count += static_cast<int>(part.references.size());
+      // Counted here rather than from the rows: batches re-parse the shared
+      // `#include` closure, and the file count has always been the distinct
+      // paths across the whole parse.
+      for (const auto& file : part.files) files_seen.insert(file.path);
+      store.write_part(part, meta);
+    };
+    const clangquill::model::ParsedModule diagnostics_only =
+        clangquill::parser::parse_files(inputs, to_core_options(opt), &tu_files,
+                                        &tu_ok, sink);
+    res.file_count = static_cast<int>(files_seen.size());
+    collect_diagnostics(res, diagnostics_only);
   }
 
-  ParseResult res = result_from_module(mod);
   res.tu_inputs = inputs;
   res.tu_dep_ids.resize(inputs.size());
   // Shared closures are interned here rather than copied per input: one map
@@ -247,6 +283,8 @@ NB_MODULE(_core, m) {
       .def_rw("keep_going", &PyParseOptions::keep_going)
       .def_rw("capture_all_diagnostics",
               &PyParseOptions::capture_all_diagnostics)
+      .def_rw("extract_anonymous_namespaces",
+              &PyParseOptions::extract_anonymous_namespaces)
       .def_rw("jobs", &PyParseOptions::jobs)
       .def_rw("tu_batch", &PyParseOptions::tu_batch);
 

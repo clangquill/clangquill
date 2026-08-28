@@ -29,6 +29,9 @@ def test_defaults_match_issue_contract():
     assert cfg.root_document == "index"
     assert cfg.jobs == 0
     assert cfg.tu_batch == 0
+    # Anonymous-namespace contents are internal linkage, so they are hidden
+    # unless asked for -- the same default Doxygen ships.
+    assert cfg.extract_anonymous_namespaces is False
 
 
 def test_config_fields_cover_every_documented_value():
@@ -48,6 +51,7 @@ def test_config_fields_cover_every_documented_value():
         "clangquill_templates",
         "clangquill_cache_dir",
         "clangquill_include_undocumented",
+        "clangquill_extract_anonymous_namespaces",
         "clangquill_comment_parser",
         "clangquill_group_by",
         "clangquill_path_base",

@@ -1002,6 +1002,63 @@ def test_parse_fingerprint_tracks_compile_commands_file(tmp_path: Path) -> None:
     assert before != after
 
 
+ANONYMOUS_NS_FIXTURE = """
+namespace demo {
+/// Public API a caller can name.
+inline int visible() { return 1; }
+namespace {
+/// An internal helper: internal linkage, one translation unit only.
+inline int hidden_helper() { return 2; }
+}
+}
+"""
+
+
+@requires_libclang
+def test_anonymous_namespace_contents_are_hidden_by_default(tmp_path: Path) -> None:
+    # Internal linkage is not API: without the opt-in nothing from the
+    # anonymous namespace is rendered — least of all under ``demo::``, where
+    # eliding the unnamed scope used to put it.
+    (tmp_path / "anon.hpp").write_text(ANONYMOUS_NS_FIXTURE)
+    build(Config(input=["anon.hpp"], output_dir="api"), base_dir=tmp_path)
+
+    page = (tmp_path / "api" / "demo.md").read_text()
+    assert "demo::visible" in page
+    assert "hidden_helper" not in page
+
+
+@requires_libclang
+def test_opting_in_renders_anonymous_contents_under_the_scope(tmp_path: Path) -> None:
+    # With the opt-in they are documented, qualified by ``@anonymous`` — the
+    # Sphinx C++ domain's spelling for an anonymous entity, so the emitted
+    # declaration still parses — and never under ``demo::`` alone.
+    (tmp_path / "anon.hpp").write_text(ANONYMOUS_NS_FIXTURE)
+    build(
+        Config(input=["anon.hpp"], output_dir="api", extract_anonymous_namespaces=True),
+        base_dir=tmp_path,
+    )
+
+    page = (tmp_path / "api" / "demo.md").read_text()
+    assert "demo::@anonymous::hidden_helper" in page
+    assert "demo::hidden_helper" not in page
+
+
+def test_parse_options_and_fingerprint_carry_anonymous_namespaces(tmp_path: Path) -> None:
+    # The knob reaches the core parse options, and it changes which symbols the
+    # parse extracts at all -- so a cached IR built with the other setting must
+    # not be served for it.
+    off = Config(input=["a.hpp"])
+    on = Config(input=["a.hpp"], extract_anonymous_namespaces=True)
+
+    assert pipeline._parse_options(off, tmp_path).extract_anonymous_namespaces is False  # noqa: SLF001
+    assert pipeline._parse_options(on, tmp_path).extract_anonymous_namespaces is True  # noqa: SLF001
+    assert pipeline._parse_fingerprint(off, tmp_path, ["a.hpp"]) != pipeline._parse_fingerprint(  # noqa: SLF001
+        on,
+        tmp_path,
+        ["a.hpp"],
+    )
+
+
 @requires_libclang
 def test_compile_commands_is_read_once_per_build(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The database was resolved (and re-parsed) once for the up-front check,

@@ -1,11 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -73,6 +75,48 @@ TEST_CASE("parser extracts symbols and hierarchy", "[parser]") {
   const auto* shape = find(m, "geo::Shape");
   REQUIRE(shape != nullptr);
   CHECK(area->parent_usr == shape->usr);
+}
+
+TEST_CASE("anonymous-namespace contents are not published as API", "[parser]") {
+  // An anonymous namespace has internal linkage: what it holds belongs to one
+  // translation unit and cannot be named, called or linked against from
+  // anywhere else. Extracting it published internals -- and, because the
+  // anonymous scope has no spelling to contribute, published them under the
+  // *enclosing* namespace's name, indistinguishable from real API. Doxygen
+  // hides them by default (EXTRACT_ANON_NSPACES = NO); so do we.
+  auto m = parse_fixture("anonymous_ns.hpp");
+
+  CHECK(find(m, "demo::visible") != nullptr);
+  CHECK(find(m, "demo::hidden_helper") == nullptr);
+  CHECK(find(m, "demo::kHiddenLimit") == nullptr);
+  CHECK(find(m, "demo::HiddenTag") == nullptr);
+  // Nothing from inside the scope, at any depth: the walk does not descend.
+  for (const auto& sym : m.symbols) {
+    CHECK(sym.qualified_name.find("Hidden") == std::string::npos);
+    CHECK(sym.qualified_name.find("hidden") == std::string::npos);
+  }
+}
+
+TEST_CASE("opting in names the anonymous namespace a symbol came from",
+          "[parser]") {
+  // With the opt-in the internals are documented -- but qualified by the scope
+  // they actually live in, spelled the way the Sphinx C++ domain spells an
+  // anonymous entity, so they are never mistaken for members of the enclosing
+  // namespace and the declaration the generator emits still parses.
+  parser::ParseOptions opts;
+  opts.extract_anonymous_namespaces = true;
+  model::ParsedModule m;
+  REQUIRE(parser::Parser(opts).parse_file(
+      std::string(CLANGQUILL_FIXTURE_DIR) + "/anonymous_ns.hpp", m));
+
+  CHECK(find(m, "demo::visible") != nullptr);
+  CHECK(find(m, "demo::@anonymous::hidden_helper") != nullptr);
+  CHECK(find(m, "demo::@anonymous::kHiddenLimit") != nullptr);
+  CHECK(find(m, "demo::@anonymous::HiddenTag") != nullptr);
+  CHECK(find(m, "demo::@anonymous::HiddenTag::hidden_field") != nullptr);
+  // Never at the enclosing scope, which is where they used to land.
+  CHECK(find(m, "demo::hidden_helper") == nullptr);
+  CHECK(find(m, "demo::HiddenTag") == nullptr);
 }
 
 TEST_CASE("parser resolves base-class references", "[parser]") {
@@ -376,6 +420,78 @@ TEST_CASE("parse_files is deterministic regardless of job count", "[parser]") {
   for (const auto& f : a.files) pa.push_back(f.path);
   for (const auto& f : b.files) pb.push_back(f.path);
   CHECK(pa == pb);
+}
+
+TEST_CASE("a streamed parse hands over the IR the merge would have held",
+          "[parser]") {
+  // With a sink the batches are handed over one at a time instead of piling up
+  // in one module, so nothing may go missing on the way.
+  auto inputs = all_inputs();
+  parser::ParseOptions opts;
+  opts.jobs = 4;
+  opts.tu_batch = 1;
+
+  std::vector<model::ParsedModule> streamed;
+  const auto rest = parser::parse_files(
+      inputs, opts, nullptr, nullptr,
+      [&](model::ParsedModule&& part) { streamed.push_back(std::move(part)); });
+
+  std::set<std::string> usrs;
+  std::set<std::string> paths;
+  std::size_t references = 0;
+  for (const auto& part : streamed) {
+    for (const auto& s : part.symbols) usrs.insert(s.usr);
+    for (const auto& f : part.files) paths.insert(f.path);
+    references += part.references.size();
+    // Diagnostics are deduplicated across batches, so they stay behind.
+    CHECK(part.diagnostics.empty());
+  }
+
+  const auto merged = parser::parse_files(inputs, opts);
+  CHECK(usrs == symbol_usrs(merged));
+  CHECK(paths == file_paths(merged));
+  CHECK(references == merged.references.size());
+  CHECK(rest.symbols.empty());
+  CHECK(diagnostic_texts(rest) == diagnostic_texts(merged));
+}
+
+TEST_CASE("a streamed parse arrives in the same order at any job count",
+          "[parser]") {
+  // The batches reach the sink in canonical order rather than in the order the
+  // threads happen to finish, so the rows a caller writes land in a sequence
+  // that does not depend on the job count.
+  auto inputs = all_inputs();
+
+  auto stream = [&inputs](int jobs) {
+    parser::ParseOptions opts;
+    opts.jobs = jobs;
+    opts.tu_batch = 1;
+    std::vector<std::vector<std::string>> per_part;
+    parser::parse_files(inputs, opts, nullptr, nullptr,
+                        [&](model::ParsedModule&& part) {
+                          std::vector<std::string> usrs;
+                          for (const auto& s : part.symbols) usrs.push_back(s.usr);
+                          per_part.push_back(std::move(usrs));
+                        });
+    return per_part;
+  };
+
+  CHECK(stream(1) == stream(4));
+}
+
+TEST_CASE("an exception from the sink leaves the parse", "[parser]") {
+  // The workers have to be joined before it does, so a throwing sink must
+  // neither deadlock nor take the process down with a live thread.
+  auto inputs = all_inputs();
+  parser::ParseOptions opts;
+  opts.jobs = 4;
+  opts.tu_batch = 1;
+
+  CHECK_THROWS_AS(parser::parse_files(inputs, opts, nullptr, nullptr,
+                                      [](model::ParsedModule&&) {
+                                        throw std::runtime_error("no room");
+                                      }),
+                  std::runtime_error);
 }
 
 TEST_CASE("umbrella batching extracts the same symbols as per-file parsing",
@@ -1514,6 +1630,14 @@ TEST_CASE("a diagnostic shared by several batches is merged once", "[parser]") {
   // dedup entirely.
   CHECK(include_stacks == 1);
 
+  // Streaming the batches out one at a time does not weaken the dedup: the
+  // sink sees no diagnostics and parse_files still returns the single copy.
+  model::ParsedModule streamed = parser::parse_files(
+      {(dir / "a.hpp").string(), (dir / "b.hpp").string()}, opts, nullptr,
+      nullptr,
+      [](model::ParsedModule&& part) { CHECK(part.diagnostics.empty()); });
+  CHECK(diagnostic_texts(streamed) == diagnostic_texts(mod));
+
   fs::remove_all(dir);
 }
 
@@ -1543,16 +1667,29 @@ namespace {
 // The whole `failed to parse` group: the record itself plus every note nested
 // under it, joined so a test can assert on the report as a reader sees it.
 // Renders `arg` the way the report's copy-pasteable command tail does: an
-// argument holding a backslash — every absolute path on Windows — comes back
-// shell-quoted with its backslashes escaped (see join_args in parser.cpp).
+// argument carrying anything a shell would act on — a backslash, as every
+// absolute path on Windows does, or a `$` — comes back single-quoted (see
+// shell_quote in parser.cpp).
 std::string as_logged(const std::string& arg) {
-  if (arg.find_first_of(" \t\"'\\") == std::string::npos) return arg;
-  std::string quoted = "\"";
+  static const std::string kUnquotedChars = "@%+=:,./-_";
+  bool needs_quotes = arg.empty();
   for (char c : arg) {
-    if (c == '"' || c == '\\') quoted += '\\';
-    quoted += c;
+    if (std::isalnum(static_cast<unsigned char>(c)) == 0 &&
+        kUnquotedChars.find(c) == std::string::npos) {
+      needs_quotes = true;
+      break;
+    }
   }
-  return quoted + "\"";
+  if (!needs_quotes) return arg;
+  std::string quoted = "'";
+  for (char c : arg) {
+    if (c == '\'') {
+      quoted += "'\\''";
+    } else {
+      quoted += c;
+    }
+  }
+  return quoted + "'";
 }
 
 std::string failure_report(const model::ParsedModule& m) {
@@ -1601,6 +1738,43 @@ TEST_CASE("a missing input reports why libclang refused it", "[parser]") {
     if (d.depth > 0) CHECK(d.severity == model::kSeverityNote);
   }
   CHECK(top_level == 1);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("the logged command tail survives a paste into a shell", "[parser]") {
+  // The report advertises the argv as something a reader can paste back, so it
+  // has to be quoted the way a POSIX shell reads it. Double quotes are not
+  // enough: `$`, a backtick and `!` keep their meaning inside them, so a
+  // define carrying a command substitution used to come back as a command the
+  // paste would *run*. Single quotes leave nothing special, with `'` spliced.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-parse-fail-quoting";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+
+  const std::string substitution = "-DGREETING=$(id)";
+  const std::string backticks = "-DSTAMP=`date`";
+  const std::string apostrophe = "-DNAME=it's";
+
+  parser::ParseOptions opts;
+  opts.capture_all_diagnostics = true;
+  opts.extra_args = {substitution, backticks, apostrophe};
+  model::ParsedModule mod;
+  CHECK_FALSE(parser::Parser(opts).parse_file((dir / "gone.hpp").string(), mod));
+
+  const std::string report = failure_report(mod);
+  CHECK(report.find("'" + substitution + "'") != std::string::npos);
+  CHECK(report.find("'" + backticks + "'") != std::string::npos);
+  CHECK(report.find("'-DNAME=it'\\''s'") != std::string::npos);
+  // Nothing survives outside quotes: a bare `$(` or backtick in the tail is
+  // exactly the paste hazard this guards against.
+  CHECK(report.find("\"" + substitution) == std::string::npos);
+  CHECK(report.find("\"" + backticks) == std::string::npos);
+
+  // Ordinary flags stay unquoted, so the common tail reads as it always did.
+  CHECK(report.find("-std=c++20") != std::string::npos);
+  CHECK(report.find("'-std=c++20'") == std::string::npos);
 
   fs::remove_all(dir);
 }

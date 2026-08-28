@@ -133,6 +133,13 @@ def build(  # noqa: PLR0913
         bool,
         typer.Option("--include-undocumented/--no-undocumented", help="Emit symbols lacking a doc comment."),
     ] = True,
+    extract_anonymous_namespaces: Annotated[  # noqa: FBT002 - typer renders this as a --flag/--no-flag option
+        bool,
+        typer.Option(
+            "--extract-anonymous-namespaces/--no-extract-anonymous-namespaces",
+            help="Document what anonymous namespaces contain (internal linkage; hidden by default).",
+        ),
+    ] = False,
     comment_parser: Annotated[
         str | None,
         typer.Option("--comment-parser", help="Comment-parser override (name or dotted path)."),
@@ -184,6 +191,7 @@ def build(  # noqa: PLR0913
         templates=_parse_template_overrides(template or []),
         cache_dir=str(cache_dir) if cache_dir else None,
         include_undocumented=include_undocumented,
+        extract_anonymous_namespaces=extract_anonymous_namespaces,
         comment_parser=comment_parser,
         group_by=group_by,
         toctree_maxdepth=toctree_maxdepth,

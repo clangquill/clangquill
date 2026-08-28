@@ -53,6 +53,7 @@ struct VisitCtx {
   std::vector<StructuralBlock>* structural;
   const ICommentParser* comment_parser;
   const FileIdSet* main_ids;
+  bool extract_anonymous_namespaces;
 };
 
 std::pair<std::string, unsigned> cursor_file_line(CXCursor c) {
@@ -836,17 +837,38 @@ void scan_group_definitions(const std::string& raw, const std::string& file,
                             VisitCtx& ctx) {
   std::string line;
   model::Group* current = nullptr;
+  // A blank line inside a group block ends a paragraph. Remembered rather than
+  // appended straight away, so a block that trails off in blank lines (or ends
+  // right after its brief) leaves no dangling separator behind.
+  bool paragraph_break = false;
   std::size_t i = 0;
-  auto clean = [](std::string s) {
+  // Strips one comment decoration from the front of a line, and no more:
+  // consuming every leading `/ * ! <` would eat a line's own markdown, turning
+  // `**Bold** start` into `Bold** start`.
+  auto strip_decoration = [](const std::string& s) {
+    std::size_t m = 0;
+    if (s.compare(0, 2, "/*") == 0) {
+      m = 2;
+      if (m < s.size() && (s[m] == '*' || s[m] == '!')) ++m;
+    } else if (s.compare(0, 2, "//") == 0) {
+      m = 2;
+      if (m < s.size() && (s[m] == '/' || s[m] == '!')) ++m;
+    } else if (!s.empty() && s[0] == '*') {
+      // The continuation marker of a block comment. Only when it stands alone:
+      // `**Bold**` and `*italic*` open a line with markdown, not decoration,
+      // and a `*/` terminator is left for the trailing strip below.
+      if (s.size() == 1 || s[1] == ' ' || s[1] == '\t' || s[1] == '\r') m = 1;
+    }
+    // The `<` of an after-member comment (`///<`, `/**<`) belongs to the
+    // decoration it follows.
+    if (m > 0 && m < s.size() && s[m] == '<') ++m;
+    return s.substr(m);
+  };
+
+  auto clean = [&strip_decoration](std::string s) {
     std::size_t a = s.find_first_not_of(" \t\r");
     if (a == std::string::npos) return std::string{};
-    s = s.substr(a);
-    std::size_t m = 0;
-    while (m < s.size() &&
-           (s[m] == '/' || s[m] == '*' || s[m] == '!' || s[m] == '<')) {
-      ++m;
-    }
-    s = s.substr(m);
+    s = strip_decoration(s.substr(a));
     // Trim trailing whitespace first so a trailing `*/` is stripped even when
     // followed by spaces or a carriage return (e.g. ` * text */ `).
     std::size_t b = s.find_last_not_of(" \t\r");
@@ -902,14 +924,23 @@ void scan_group_definitions(const std::string& raw, const std::string& file,
       }
       return;
     }
-    if (current != nullptr && !l.empty()) {
-      if (current->brief.empty()) {
-        current->brief = l;
-      } else {
-        if (!current->detail.empty()) current->detail += ' ';
-        current->detail += l;
-      }
+    if (current == nullptr) return;
+    if (l.empty()) {
+      paragraph_break = true;
+      return;
     }
+    if (current->brief.empty()) {
+      current->brief = l;
+    } else {
+      // Paragraph breaks are content in a Markdown generator, so a
+      // multi-paragraph description keeps its blank lines instead of
+      // collapsing into one run-on line.
+      if (!current->detail.empty()) {
+        current->detail += paragraph_break ? "\n\n" : " ";
+      }
+      current->detail += l;
+    }
+    paragraph_break = false;
   };
 
   while (i <= raw.size()) {
@@ -1113,6 +1144,17 @@ CXChildVisitResult visit(CXCursor c, CXCursor /*parent*/, CXClientData data) {
   // reason rather than emitting a symbol under a name that is not one.
   if (is_deduction_guide(c)) return CXChildVisit_Continue;
 
+  // An anonymous namespace has internal linkage: what it holds belongs to one
+  // translation unit and cannot be named, called or linked against from
+  // anywhere else, so it is not API. Doxygen hides it by default
+  // (EXTRACT_ANON_NSPACES = NO) and so do we -- skipped without descending, so
+  // the internals inside stay out too. The option puts them back, and
+  // qualified_name then names the scope (`@anonymous`) rather than eliding it.
+  if (clang_getCursorKind(c) == CXCursor_Namespace &&
+      !ctx.extract_anonymous_namespaces && spelling(c).empty()) {
+    return CXChildVisit_Continue;
+  }
+
   model::SymbolKind kind = map_kind(clang_getCursorKind(c));
   if (kind == model::SymbolKind::Unknown) return CXChildVisit_Continue;
 
@@ -1220,14 +1262,16 @@ void attach_structural_blocks(VisitCtx& ctx,
 }  // namespace
 
 void visit_translation_unit(CXCursor tu_cursor, const std::string& main_file,
-                            model::ParsedModule& out) {
+                            model::ParsedModule& out,
+                            const VisitOptions& options) {
   visit_translation_unit(tu_cursor, std::vector<std::string>{main_file},
-                         /*trust_main_file=*/true, out);
+                         /*trust_main_file=*/true, out, options);
 }
 
 void visit_translation_unit(CXCursor tu_cursor,
                             const std::vector<std::string>& main_files,
-                            bool trust_main_file, model::ParsedModule& out) {
+                            bool trust_main_file, model::ParsedModule& out,
+                            const VisitOptions& options) {
   CXTranslationUnit tu = clang_Cursor_getTranslationUnit(tu_cursor);
 
   std::unordered_set<std::string> seen_symbols;
@@ -1256,6 +1300,7 @@ void visit_translation_unit(CXCursor tu_cursor,
   ctx.structural = &structural;
   ctx.comment_parser = &comment_parser;
   ctx.main_ids = &main_ids;
+  ctx.extract_anonymous_namespaces = options.extract_anonymous_namespaces;
 
   // Capture free-floating `\defgroup` blocks first so groups carry their title
   // and description before any `\ingroup` membership creates a stub for them.
