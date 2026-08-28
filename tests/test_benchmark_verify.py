@@ -224,3 +224,30 @@ def test_xref_health_counts_targets_that_name_no_parsed_symbol(
     assert health["targets"] == 4
     assert health["unresolved"] == 2
     assert sorted(health["examples"]) == ["geo::AlsoMissing", "geo::NoSuchThing"]
+
+
+def test_xref_health_keeps_operator_targets_whole(
+    fixture_db: Path,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # An operator name carries the same angle brackets an explicit
+    # `title <target>` uses. Splitting on them turns `ns::operator<=>` into `=`
+    # and `ns::operator>` into `ns::operator` -- undercounting the links and
+    # reporting targets nobody wrote as unresolved.
+    verify = _load_verify(monkeypatch)
+    ir_path = _write_ir_copy(fixture_db, tmp_path)
+    myst = tmp_path / "api"
+    myst.mkdir()
+    operators = ["geo::operator<", "geo::operator<=", "geo::operator<=>", "geo::operator>", "geo::operator->"]
+    (myst / "geo.md").write_text(
+        " ".join(f"{{cpp:any}}`{name}`" for name in operators)
+        + " and a titled {cpp:any}`the title <geo::operator==>`.\n",
+        encoding="utf-8",
+    )
+
+    health = verify.xref_health(myst, ir_path)
+    assert health["targets"] == len(operators) + 1
+    # None of them is in the fixture IR, so each is reported under its own name
+    # rather than collapsed onto a mangled prefix.
+    assert sorted(health["examples"]) == sorted([*operators, "geo::operator=="])

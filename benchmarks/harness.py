@@ -237,21 +237,21 @@ def prepare_repo(cfg: RepoConfig, work_dir: Path, *, fresh_clone: bool) -> RepoC
     source = work_dir / cfg.name
     if fresh_clone:
         wipe(source)
-    if not source.exists():
+    reused = source.exists()
+    if not reused:
         print(f"  cloning {cfg.repo} -> {source}")
         run_git(["clone", "--filter=blob:none", cfg.repo, str(source)], work_dir)
 
     resolved_ref = cfg.ref
     if cfg.ref:
-        checkout = run_git(["checkout", "--force", cfg.ref], source, check=False)
-        if checkout.returncode != 0:
-            # A clone from an earlier run predates a ref added or moved since,
-            # and a shallow blob filter does not backfill it. Fetch once and
-            # retry before deciding the ref does not exist: without this a
-            # re-baselined config silently benchmarks whatever the stale clone
-            # happened to hold.
+        if reused:
+            # A clone from an earlier run predates a ref added or *moved* since,
+            # and a blob filter does not backfill it. Checking out a stale local
+            # branch or tag would succeed, so the fetch has to come first: a
+            # re-baselined config would otherwise benchmark whatever the old
+            # clone held while the report labels it with the configured ref.
             run_git(["fetch", "--tags", "--force", "origin"], source, check=False)
-            checkout = run_git(["checkout", "--force", cfg.ref], source, check=False)
+        checkout = run_git(["checkout", "--force", cfg.ref], source, check=False)
         if checkout.returncode != 0:
             print(f"  WARNING: ref {cfg.ref!r} not found for {cfg.name}; using default branch", file=sys.stderr)
             # Actually move HEAD to the remote default; a failed checkout leaves

@@ -189,20 +189,79 @@ def test_reset_state_leaves_an_unpatched_target_alone(tmp_path: Path, monkeypatc
     target = ctx.source_dir / "header.h"
     target.write_text("#pragma once\n/// my own uncommitted edit\n", encoding="utf-8")
 
+    pristine = target.read_text(encoding="utf-8")
     checkouts: list[list[str]] = []
-    monkeypatch.setattr(
-        benchmark,
-        "run_git",
-        lambda args, cwd, check=True: checkouts.append(args) or SimpleNamespace(returncode=0),  # noqa: ARG005
-    )
+
+    def fake_git(args: list[str], cwd: Path, check: bool = True) -> SimpleNamespace:  # noqa: ARG001, FBT001, FBT002
+        """Stand in for ``git checkout --``: record the call, restore the file."""
+        checkouts.append(args)
+        target.write_text(pristine, encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(benchmark, "run_git", fake_git)
     benchmark.reset_state(ctx)
     assert checkouts == []
-    assert "my own uncommitted edit" in target.read_text(encoding="utf-8")
+    assert target.read_text(encoding="utf-8") == pristine
 
     # ... and does fire once the marker really is there.
     benchmark.apply_patch(ctx)
     benchmark.reset_state(ctx)
     assert checkouts == [["checkout", "--", "header.h"]]
+    assert target.read_text(encoding="utf-8") == pristine
+
+
+def test_reset_state_raises_when_a_leaked_patch_cannot_be_reverted(tmp_path: Path, monkeypatch) -> None:
+    # The recovery checkout used to be `check=False` with its result ignored, so
+    # a locked index left the marker in place and every scenario after it
+    # measured an already-patched tree. It has to stop the run instead.
+    harness = _load("harness", monkeypatch)
+    benchmark = _load("benchmark", monkeypatch)
+    ctx = _patch_ctx(tmp_path, harness, files=["header.h"])
+    (ctx.source_dir / "header.h").write_text("#pragma once\n", encoding="utf-8")
+    benchmark.apply_patch(ctx)
+
+    monkeypatch.setattr(
+        benchmark,
+        "run_git",
+        lambda args, cwd, check=True: SimpleNamespace(returncode=1),  # noqa: ARG005
+    )
+    with pytest.raises(RuntimeError, match="could not be reverted"):
+        benchmark.reset_state(ctx)
+
+
+def test_a_duplicate_patch_target_is_rejected(tmp_path: Path, monkeypatch) -> None:
+    # The second record's "original" would already carry the snippet, so
+    # restoring it last would leave the patch in the tree -- the leak the whole
+    # byte-restoring revert exists to prevent.
+    harness = _load("harness", monkeypatch)
+    benchmark = _load("benchmark", monkeypatch)
+    ctx = _patch_ctx(tmp_path, harness, files=["header.h", "header.h"])
+    (ctx.source_dir / "header.h").write_text("#pragma once\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate benchmark patch target"):
+        benchmark.apply_patch(ctx)
+
+
+def test_a_reused_clone_is_fetched_before_its_pinned_ref_is_checked_out(tmp_path: Path, monkeypatch) -> None:
+    # A stale local branch or tag checks out fine, so fetching only after a
+    # failed checkout never fires for a ref that *moved*: the run would
+    # benchmark the old commit under the configured ref's label.
+    harness = _load("harness", monkeypatch)
+    work = tmp_path / "work"
+    (work / "fixture").mkdir(parents=True)  # a clone from an earlier run
+    cfg = harness.RepoConfig(name="fixture", repo="https://example.invalid/fixture.git", ref="v1.2.3")
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        harness,
+        "run_git",
+        lambda args, cwd, check=True: calls.append(args) or SimpleNamespace(returncode=0, stdout="abc123\n"),  # noqa: ARG005
+    )
+    harness.prepare_repo(cfg, work, fresh_clone=False)
+
+    assert calls[0][0] == "fetch", calls
+    assert calls[1][:2] == ["checkout", "--force"], calls
+    assert "clone" not in [args[0] for args in calls]
 
 
 # --------------------------------------------------------------------------- #

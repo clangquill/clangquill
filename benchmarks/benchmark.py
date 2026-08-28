@@ -226,11 +226,20 @@ def apply_patch(ctx: RepoContext, files: list[str] | None = None) -> list[Patche
     records so :func:`revert_patch` can put them back exactly.
     """
     patched: list[Patched] = []
+    seen: set[Path] = set()
     for rel in ctx.config.patch_files if files is None else files:
         target = ctx.source_dir / rel
         if not target.is_file():
             print(f"  WARNING: patch target {rel!r} missing in {ctx.config.name}", file=sys.stderr)
             continue
+        if target in seen:
+            # The second record's "original" would already carry the snippet, and
+            # restoring it last would leave the patch in the tree -- exactly the
+            # leak :func:`revert_patch` exists to prevent. A config listing a
+            # target twice is a mistake, so say so rather than absorb it.
+            message = f"duplicate benchmark patch target in {ctx.config.name}: {rel}"
+            raise ValueError(message)
+        seen.add(target)
         original = target.read_bytes()
         with target.open("a", encoding="utf-8") as fh:
             fh.write(PATCH_SNIPPET)
@@ -268,7 +277,8 @@ def reset_state(ctx: RepoContext) -> None:
     ``git checkout``. That last-resort cleanup fires only for a file that
     actually still carries :data:`PATCH_MARKER`, so a ``local`` run cannot
     discard the operator's own uncommitted work on a file that merely happens to
-    be a patch target.
+    be a patch target -- and a checkout that does not take is fatal, since every
+    scenario after it would measure an already-patched tree.
     """
     for path in (ctx.sphinx_src, ctx.sphinx_out, ctx.cache_dir, ctx.doxygen_out("xml"), ctx.doxygen_out("html")):
         wipe(path)
@@ -280,6 +290,9 @@ def reset_state(ctx: RepoContext) -> None:
             continue
         print(f"  reverting a benchmark patch left behind in {rel}", file=sys.stderr)
         run_git(["checkout", "--", rel], ctx.source_dir, check=False)
+        if PATCH_MARKER in target.read_text(encoding="utf-8", errors="replace"):
+            message = f"a benchmark patch left behind in {rel} could not be reverted"
+            raise RuntimeError(message)
 
 
 # --------------------------------------------------------------------------- #

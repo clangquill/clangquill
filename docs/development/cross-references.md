@@ -118,7 +118,8 @@ This lives in `is_cpp_name`/`split_xref_target`, implemented twice — in
 
 The fixture gate above proves the shapes clangquill *can* emit resolve. It says
 nothing about a real project, where a `\ref` may point at a symbol in a header
-that was never parsed. `benchmarks/verify.py` reports an `unresolved_xrefs`
-count per project for that: the number of `{cpp:any}` targets in the generated
-pages that no generated declaration defines. It is a health signal, not a gate —
+that was never parsed. `benchmarks/verify.py` reports an unresolved-reference
+count per project for that — `xrefs["unresolved"]` in the JSON artifact, and the
+"unresolved xrefs" column of the Markdown report: the number of `{cpp:any}`
+targets in the generated pages that no generated declaration defines. It is a health signal, not a gate —
 a project that documents links into third-party headers will always have some.

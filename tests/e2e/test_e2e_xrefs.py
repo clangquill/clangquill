@@ -33,8 +33,6 @@ import pytest
 
 from clangquill import _core
 
-from .sphinx_warnings import project_warnings
-
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -146,11 +144,12 @@ class _Build:
     """One ``sphinx-build -n -W`` run and the verdict it reached."""
 
     out: Path
-    #: Every warning the project is answerable for. Since Sphinx 8,
-    #: ``warningiserror`` no longer raises on the first warning -- the build runs
-    #: to the end and reports itself failed through ``app.statuscode`` -- so a
-    #: test that only watches for an exception passes over every warning it meant
-    #: to catch.
+    #: Sphinx's exit status. Since Sphinx 8, ``warningiserror`` no longer raises
+    #: on the first warning: the build runs to the end and reports itself failed
+    #: here, so a test that only watches for an exception passes over every
+    #: warning it meant to catch.
+    statuscode: int
+    #: Every warning Sphinx emitted, verbatim.
     warnings: list[str]
     #: ``(role, target)`` of every unresolved reference Sphinx reported.
     missing: list[tuple[str, str]]
@@ -158,10 +157,16 @@ class _Build:
 
 def _build(src: Path, build_root: Path) -> _Build:
     from sphinx.application import Sphinx  # noqa: PLC0415
+    from sphinx.util.docutils import docutils_namespace  # noqa: PLC0415
 
     build_root.mkdir(parents=True, exist_ok=True)
     warnings_path = build_root / "warnings.txt"
-    with warnings_path.open("w", encoding="utf-8") as warning_file:
+    # ``docutils_namespace`` isolates docutils' *global* node/directive/role
+    # registries for this build. Without it, the second and later Sphinx
+    # applications in one interpreter re-register Sphinx's own nodes and warn
+    # about it — harness noise that would fail every warnings-as-errors
+    # assertion below for reasons the project cannot act on.
+    with warnings_path.open("w", encoding="utf-8") as warning_file, docutils_namespace():
         app = Sphinx(
             str(src),
             str(src),
@@ -173,10 +178,12 @@ def _build(src: Path, build_root: Path) -> _Build:
             warning=warning_file,
         )
         app.build()
+        statuscode = app.statuscode
     text = warnings_path.read_text(encoding="utf-8")
     return _Build(
         out=build_root / "out",
-        warnings=project_warnings(text),
+        statuscode=statuscode,
+        warnings=[line for line in text.splitlines() if line.strip()],
         missing=[(m["role"], m["target"]) for m in _MISSING_RE.finditer(text)],
     )
 
@@ -208,6 +215,7 @@ def test_generated_cross_references_all_resolve(tmp_path: Path) -> None:
     build = _build(src, tmp_path / "strict")
     assert build.missing == []
     assert build.warnings == []  # no other warning either -- this is ``-n -W``
+    assert build.statuscode == 0
 
     # A fixture that stopped generating links would satisfy the assertions above
     # by writing nothing, so require the hard shapes to be present as targets.
@@ -278,4 +286,4 @@ void dangling();
     src = _make_project(tmp_path, ignore=KNOWN_UNRESOLVABLE, extra_header=dangling)
     build = _build(src, tmp_path / "strict")
     assert ("cpp:any", "xr::NoSuchSymbol") in build.missing
-    assert build.warnings  # and so the warnings-as-errors build fails
+    assert build.statuscode == 1  # and so the warnings-as-errors build fails

@@ -323,9 +323,24 @@ def clangquill_extraction(ir_path: Path, source_root: Path) -> tuple[dict[str, i
     return per_file, total, documented_names
 
 
-# One ``{cpp:any}`` role in a generated MyST page. The generator emits no other
-# cross-reference role, so this is every inter-symbol link in the output.
-CPP_ANY_RE = re.compile(r"\{cpp:any\}`(?:[^`<]*<)?([^`<>]+)>?`")
+# One ``{cpp:any}`` role in a generated MyST page, captured whole. The generator
+# emits no other cross-reference role, so this is every inter-symbol link in the
+# output. The body is *not* split here: an operator target carries the same angle
+# brackets an explicit ``title <target>`` uses, and a regex that tries to tell
+# them apart mangles ``operator<``, ``operator<=>`` and ``operator->``.
+CPP_ANY_RE = re.compile(r"\{cpp:any\}`([^`]+)`")
+
+
+def xref_target(body: str) -> str:
+    """Return the target of a role body, dropping an explicit ``title <target>``.
+
+    Only the ``" <"`` separator marks a title, and only when the body closes with
+    the matching ``>``; an operator name has no space before its brackets, so
+    ``ns::operator<=>`` comes back whole.
+    """
+    if body.endswith(">") and " <" in body:
+        return body.rsplit(" <", 1)[1][:-1]
+    return body
 
 
 def xref_health(myst_dir: Path, ir_path: Path) -> dict:
@@ -365,7 +380,8 @@ def xref_health(myst_dir: Path, ir_path: Path) -> dict:
                 resolvable.add(without_enum_scope(symbol.qualified_name))
     targets: Counter[str] = Counter()
     for page in sorted(myst_dir.rglob("*.md")):
-        targets.update(CPP_ANY_RE.findall(page.read_text(encoding="utf-8", errors="replace")))
+        text = page.read_text(encoding="utf-8", errors="replace")
+        targets.update(xref_target(body) for body in CPP_ANY_RE.findall(text))
     unresolved = Counter({t: n for t, n in targets.items() if t not in resolvable})
     return {
         "targets": sum(targets.values()),

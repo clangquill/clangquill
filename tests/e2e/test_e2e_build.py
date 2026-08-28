@@ -24,8 +24,6 @@ import pytest
 
 from clangquill import _core
 
-from .sphinx_warnings import project_warnings
-
 if TYPE_CHECKING:
     from sphinx.environment import BuildEnvironment
 
@@ -97,6 +95,7 @@ def _build(
     confoverrides: dict[str, Any] | None = None,
 ) -> _Build:
     from sphinx.application import Sphinx  # noqa: PLC0415
+    from sphinx.util.docutils import docutils_namespace  # noqa: PLC0415
 
     build_root.mkdir(parents=True, exist_ok=True)
     read: list[str] = []
@@ -107,7 +106,12 @@ def _build(
         seen["status"] = env.config_status
         seen["extra"] = env.config_status_extra
 
-    with (build_root / "warnings.txt").open("w", encoding="utf-8") as warning_file:
+    # ``docutils_namespace`` isolates docutils' *global* node/directive/role
+    # registries for this build. Without it, the second and later Sphinx
+    # applications in one interpreter re-register Sphinx's own nodes and warn
+    # about it — harness noise that would fail the assertion below for a reason
+    # the project cannot act on.
+    with (build_root / "warnings.txt").open("w", encoding="utf-8") as warning_file, docutils_namespace():
         app = Sphinx(
             str(src),
             str(src),
@@ -122,14 +126,14 @@ def _build(
         )
         app.connect("env-before-read-docs", record)
         app.build()
+        statuscode = app.statuscode
 
     # Since Sphinx 8, ``warningiserror`` no longer raises on the first warning:
     # the build runs to the end and reports itself failed through ``statuscode``.
     # Without an assertion here the flag above would be decorative and every
     # warning the build emits -- a bad directive, a mis-rendered signature --
     # would pass unnoticed.
-    warnings = project_warnings((build_root / "warnings.txt").read_text(encoding="utf-8"))
-    assert warnings == []
+    assert statuscode == 0, (build_root / "warnings.txt").read_text(encoding="utf-8")
 
     return _Build(
         out=build_root / "out",
