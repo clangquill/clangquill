@@ -174,6 +174,12 @@ def _build(src: Path, build_root: Path) -> _Build:
             str(build_root / "doctree"),
             "html",
             warningiserror=True,
+            # Sphinx 6 and 7 raise on the *first* warning unless this is set, so
+            # without it ``app.build()`` can exit before either assertion below
+            # reads a warning or a status code. Sphinx 8 made keep-going the
+            # only behaviour and ignores the flag; ``pyproject`` still allows
+            # ``sphinx>=6``, so pass it.
+            keep_going=True,
             status=None,
             warning=warning_file,
         )

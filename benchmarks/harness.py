@@ -246,12 +246,23 @@ def prepare_repo(cfg: RepoConfig, work_dir: Path, *, fresh_clone: bool) -> RepoC
     if cfg.ref:
         if reused:
             # A clone from an earlier run predates a ref added or *moved* since,
-            # and a blob filter does not backfill it. Checking out a stale local
-            # branch or tag would succeed, so the fetch has to come first: a
-            # re-baselined config would otherwise benchmark whatever the old
-            # clone held while the report labels it with the configured ref.
-            run_git(["fetch", "--tags", "--force", "origin"], source, check=False)
-        checkout = run_git(["checkout", "--force", cfg.ref], source, check=False)
+            # and a blob filter does not backfill it.
+            fetch = run_git(["fetch", "--tags", "--force", "origin"], source, check=False)
+            if fetch.returncode != 0:
+                # Not fatal -- the clone may already hold the pinned commit, and
+                # an offline re-run is worth allowing -- but the label has to say
+                # so, or a published number claims a ref nothing verified.
+                print(f"  WARNING: could not fetch origin for {cfg.name}; the clone may be stale", file=sys.stderr)
+                resolved_ref = f"{cfg.ref} (origin unreachable; clone may be stale)"
+        # Prefer the remote-tracking ref. ``git fetch`` refreshes
+        # ``origin/<branch>`` but leaves an existing local ``<branch>`` where it
+        # was, so checking out the bare name would select the stale commit while
+        # the report labels it with the configured ref. A tag or a commit sha has
+        # no ``origin/`` form, so those fall through to the bare name -- already
+        # refreshed by the ``--tags --force`` fetch above.
+        checkout = run_git(["checkout", "--force", f"origin/{cfg.ref}"], source, check=False)
+        if checkout.returncode != 0:
+            checkout = run_git(["checkout", "--force", cfg.ref], source, check=False)
         if checkout.returncode != 0:
             print(f"  WARNING: ref {cfg.ref!r} not found for {cfg.name}; using default branch", file=sys.stderr)
             # Actually move HEAD to the remote default; a failed checkout leaves

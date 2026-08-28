@@ -225,21 +225,28 @@ def apply_patch(ctx: RepoContext, files: list[str] | None = None) -> list[Patche
     for ``incremental-leaf``. The pre-patch bytes ride along in the returned
     records so :func:`revert_patch` can put them back exactly.
     """
-    patched: list[Patched] = []
+    # Resolved, and checked before the first write: two spellings of one file
+    # (``header.h`` and ``dir/../header.h``) would patch it twice, and the second
+    # record's "original" would already carry the snippet -- so restoring it last
+    # would leave the patch in the tree, exactly the leak :func:`revert_patch`
+    # exists to prevent. Raising mid-loop would leave the targets before it
+    # patched and unrecorded, so nothing could put them back either.
+    targets: list[Path] = []
     seen: set[Path] = set()
     for rel in ctx.config.patch_files if files is None else files:
         target = ctx.source_dir / rel
         if not target.is_file():
             print(f"  WARNING: patch target {rel!r} missing in {ctx.config.name}", file=sys.stderr)
             continue
-        if target in seen:
-            # The second record's "original" would already carry the snippet, and
-            # restoring it last would leave the patch in the tree -- exactly the
-            # leak :func:`revert_patch` exists to prevent. A config listing a
-            # target twice is a mistake, so say so rather than absorb it.
+        canonical = target.resolve()
+        if canonical in seen:
             message = f"duplicate benchmark patch target in {ctx.config.name}: {rel}"
             raise ValueError(message)
-        seen.add(target)
+        seen.add(canonical)
+        targets.append(target)
+
+    patched: list[Patched] = []
+    for target in targets:
         original = target.read_bytes()
         with target.open("a", encoding="utf-8") as fh:
             fh.write(PATCH_SNIPPET)

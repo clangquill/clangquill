@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fnmatch
 import importlib
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -229,39 +230,139 @@ def test_reset_state_raises_when_a_leaked_patch_cannot_be_reverted(tmp_path: Pat
         benchmark.reset_state(ctx)
 
 
-def test_a_duplicate_patch_target_is_rejected(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("spelling", ["header.h", "sub/../header.h"], ids=["exact", "alias"])
+def test_a_duplicate_patch_target_is_rejected_before_anything_is_written(
+    spelling: str,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     # The second record's "original" would already carry the snippet, so
     # restoring it last would leave the patch in the tree -- the leak the whole
-    # byte-restoring revert exists to prevent.
+    # byte-restoring revert exists to prevent. Two spellings of one file are the
+    # same hazard as a literal repeat, and the check has to come before the first
+    # write: a raise mid-loop would leave the targets before it patched with no
+    # record to restore them from.
     harness = _load("harness", monkeypatch)
     benchmark = _load("benchmark", monkeypatch)
-    ctx = _patch_ctx(tmp_path, harness, files=["header.h", "header.h"])
-    (ctx.source_dir / "header.h").write_text("#pragma once\n", encoding="utf-8")
+    ctx = _patch_ctx(tmp_path, harness, files=["other.h", "header.h", spelling])
+    (ctx.source_dir / "sub").mkdir()
+    pristine = "#pragma once\n"
+    for name in ("header.h", "other.h"):
+        (ctx.source_dir / name).write_text(pristine, encoding="utf-8")
 
     with pytest.raises(ValueError, match="duplicate benchmark patch target"):
         benchmark.apply_patch(ctx)
 
+    for name in ("header.h", "other.h"):
+        assert (ctx.source_dir / name).read_text(encoding="utf-8") == pristine
 
-def test_a_reused_clone_is_fetched_before_its_pinned_ref_is_checked_out(tmp_path: Path, monkeypatch) -> None:
-    # A stale local branch or tag checks out fine, so fetching only after a
-    # failed checkout never fires for a ref that *moved*: the run would
-    # benchmark the old commit under the configured ref's label.
+
+# --------------------------------------------------------------------------- #
+# Pinning a ref
+#
+# These drive the harness's real git calls against a local bare "origin" rather
+# than a mock: the bug below is in what `git checkout` selects, which a mock
+# would have to already model correctly to catch.
+# --------------------------------------------------------------------------- #
+def _git(args: list[str], cwd: Path) -> str:
+    """Run one git command for test setup, failing loudly; return its stdout."""
+    return subprocess.run(  # noqa: S603 - a fixed argv of test-authored arguments
+        ["git", *args],  # noqa: S607 - git off PATH, as `harness.run_git` itself invokes it
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+@pytest.fixture
+def moved_branch(tmp_path: Path) -> tuple[Path, str, str]:
+    """Build a reused clone of a repo whose pinned branch has since moved.
+
+    Returns ``(work_dir, stale_commit, current_commit)``.
+    """
+    origin, seed, work = tmp_path / "origin.git", tmp_path / "seed", tmp_path / "work"
+    work.mkdir()
+    _git(["init", "--bare", "-b", "pinned", str(origin)], tmp_path)
+    _git(["init", "-b", "pinned", str(seed)], tmp_path)
+    _git(["config", "user.email", "harness@example.invalid"], seed)
+    _git(["config", "user.name", "harness"], seed)
+    (seed / "value").write_text("old\n", encoding="utf-8")
+    _git(["add", "value"], seed)
+    _git(["commit", "-m", "initial"], seed)
+    _git(["remote", "add", "origin", str(origin)], seed)
+    _git(["push", "-u", "origin", "pinned"], seed)
+
+    _git(["clone", str(origin), "fixture"], work)  # the clone an earlier run left
+    stale = _git(["rev-parse", "HEAD"], work / "fixture")
+
+    (seed / "value").write_text("new\n", encoding="utf-8")
+    _git(["add", "value"], seed)
+    _git(["commit", "-m", "moved"], seed)
+    _git(["push", "--force", "origin", "pinned"], seed)
+    current = _git(["rev-parse", "HEAD"], seed)
+
+    assert stale != current
+    return work, stale, current
+
+
+def test_a_reused_clone_benchmarks_the_commit_its_config_pins(
+    moved_branch: tuple[Path, str, str],
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # `git fetch` refreshes `origin/<branch>` but leaves an existing local
+    # `<branch>` where it was, so fetching and then checking out the bare name
+    # still lands on the stale commit -- and labels it with the configured ref.
+    # Only asserting the resulting commit catches that; an assertion on the order
+    # of the git calls passes either way.
     harness = _load("harness", monkeypatch)
-    work = tmp_path / "work"
-    (work / "fixture").mkdir(parents=True)  # a clone from an earlier run
-    cfg = harness.RepoConfig(name="fixture", repo="https://example.invalid/fixture.git", ref="v1.2.3")
+    work, stale, current = moved_branch
+    cfg = harness.RepoConfig(name="fixture", repo=str(tmp_path / "origin.git"), ref="pinned")
 
-    calls: list[list[str]] = []
-    monkeypatch.setattr(
-        harness,
-        "run_git",
-        lambda args, cwd, check=True: calls.append(args) or SimpleNamespace(returncode=0, stdout="abc123\n"),  # noqa: ARG005
-    )
-    harness.prepare_repo(cfg, work, fresh_clone=False)
+    ctx = harness.prepare_repo(cfg, work, fresh_clone=False)
 
-    assert calls[0][0] == "fetch", calls
-    assert calls[1][:2] == ["checkout", "--force"], calls
-    assert "clone" not in [args[0] for args in calls]
+    assert ctx.commit == current, f"benchmarked the stale commit {stale}"
+    assert ctx.resolved_ref == "pinned"
+
+
+def test_a_reused_clone_says_so_when_origin_cannot_be_reached(
+    moved_branch: tuple[Path, str, str],
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # An unreachable origin is not fatal -- the clone may already hold the pinned
+    # commit, and an offline re-run is worth allowing -- but the recorded label
+    # has to stop claiming a ref nothing verified.
+    harness = _load("harness", monkeypatch)
+    work, stale, _ = moved_branch
+    _git(["remote", "set-url", "origin", str(tmp_path / "gone.git")], work / "fixture")
+    cfg = harness.RepoConfig(name="fixture", repo=str(tmp_path / "origin.git"), ref="pinned")
+
+    ctx = harness.prepare_repo(cfg, work, fresh_clone=False)
+
+    assert ctx.commit == stale  # all the clone has
+    assert "may be stale" in ctx.resolved_ref
+
+
+def test_a_pinned_tag_resolves_without_a_remote_tracking_ref(
+    moved_branch: tuple[Path, str, str],
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # A tag (like a commit sha) has no `origin/<ref>` form, so preferring the
+    # remote-tracking ref has to fall through to the bare name rather than give
+    # up and label the run as having missed its pin.
+    harness = _load("harness", monkeypatch)
+    work, stale, _ = moved_branch
+    _git(["tag", "v1.0", stale], tmp_path / "seed")
+    _git(["push", "origin", "v1.0"], tmp_path / "seed")
+    cfg = harness.RepoConfig(name="fixture", repo=str(tmp_path / "origin.git"), ref="v1.0")
+
+    ctx = harness.prepare_repo(cfg, work, fresh_clone=False)
+
+    assert ctx.commit == stale
+    assert ctx.resolved_ref == "v1.0"
 
 
 # --------------------------------------------------------------------------- #
