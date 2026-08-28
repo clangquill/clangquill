@@ -64,6 +64,17 @@ class SqliteStore {
   /// @param meta Metadata stored alongside the IR.
   void write_part(const model::ParsedModule& module, const Meta& meta);
 
+  /// @brief Checkpoints the WAL fully into the main file and truncates it.
+  ///
+  /// `PRAGMA wal_checkpoint(TRUNCATE)` blocks until every committed frame has
+  /// been written back into the main database file, then empties the `-wal`
+  /// file, so the main file alone becomes a complete, self-contained copy of
+  /// the database. @ref write_streamed_full_parse calls this on its temporary
+  /// database before closing it, so the file it goes on to rename into place
+  /// carries every batch regardless of what cleanup closing the connection
+  /// would otherwise have performed.
+  void checkpoint_and_truncate_wal();
+
   /// @brief Re-writes the re-parsed translation units' rows into an existing DB.
   ///
   /// Replaces only the IR sourced from @p replaced_files (plus any file the
@@ -146,14 +157,14 @@ using BatchSink = std::function<void(model::ParsedModule&&)>;
 /// temporary file and leaves `path` exactly as it was, rather than holding a
 /// mix of an old IR's rows and however many batches had landed (#317).
 ///
-/// The database's own WAL-mode `-wal`/`-shm` sidecar files are handled
-/// alongside the main one: any left next to `path` by an earlier, abnormally
-/// terminated write are cleared before the swap (the rename above only ever
-/// touches the main file, so a stale sidecar pair would otherwise sit next to
-/// the freshly replaced database and could be replayed onto it by the next
-/// reader), and the temporary file's own sidecars — ordinarily gone already,
-/// checkpointed away by its clean close — are swept up too rather than left
-/// behind under the temp name.
+/// SQLite's own sidecar files are handled alongside the main one, since the
+/// rename above moves only that: the temporary database is checkpointed and
+/// its WAL truncated before it is closed, so it carries every batch on its
+/// own regardless of what closing the connection would otherwise clean up;
+/// and any `-wal`/`-shm`/`-journal` left next to `path` by an earlier,
+/// abnormally terminated write are cleared before the swap, since a stale one
+/// would otherwise sit next to the freshly replaced database and could be
+/// replayed onto it by the next reader.
 ///
 /// @param path Filesystem path of the target database.
 /// @param meta Metadata stored alongside every batch.

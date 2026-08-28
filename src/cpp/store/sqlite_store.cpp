@@ -35,13 +35,19 @@ std::filesystem::path unique_sibling_path(const std::filesystem::path& target) {
                            target.string());
 }
 
-// Best-effort removal of `path`'s WAL-mode sidecar files (`-wal` and `-shm`).
-// Safe to call whether or not either exists.
-void remove_wal_sidecars(const std::filesystem::path& path) {
-  std::error_code ec;
-  std::filesystem::remove(path.string() + "-wal", ec);
-  ec.clear();
-  std::filesystem::remove(path.string() + "-shm", ec);
+// Best-effort removal of `path`'s SQLite sidecar files: `-wal`/`-shm` (WAL
+// mode) and `-journal` (rollback mode, in case something other than this
+// store ever wrote `path` directly). Safe to call whether or not any exist.
+//
+// Deleting a `-journal` is only safe when `path`'s *main* file is about to be
+// discarded wholesale, as it always is at every call site below -- a live
+// journal is what lets SQLite roll an interrupted writer's main file back to
+// consistency, which matters only for a main file that is still in use.
+void remove_stale_sidecars(const std::filesystem::path& path) {
+  for (const char* suffix : {"-wal", "-shm", "-journal"}) {
+    std::error_code ec;
+    std::filesystem::remove(path.string() + suffix, ec);
+  }
 }
 
 }  // namespace
@@ -85,6 +91,10 @@ void SqliteStore::write_part(const model::ParsedModule& module,
   FileIds file_ids = upsert_files(module);
   insert_rows(module, file_ids);
   tx.commit();
+}
+
+void SqliteStore::checkpoint_and_truncate_wal() {
+  db_.exec("PRAGMA wal_checkpoint(TRUNCATE);");
 }
 
 void SqliteStore::clear_all() {
@@ -649,24 +659,34 @@ void write_streamed_full_parse(const std::string& path, const Meta& meta,
     {
       // Scoped so the temp database's connection is closed before anything
       // below touches the filesystem -- and, if `produce` throws, before the
-      // temp file is removed in the catch block. A clean close checkpoints
-      // WAL mode's `-wal` file back into the main one and removes both
-      // sidecars, but nothing renames sidecars below, so any that somehow
-      // survived the close would otherwise be orphaned under the temp name
-      // forever; the removal below is defensive.
+      // temp file is removed in the catch block.
       SqliteStore staging(tmp.string());
       produce([&](model::ParsedModule&& part) { staging.write_part(part, meta); });
+      // Force every committed frame out of the WAL and back into the main
+      // file, and truncate the WAL to empty, before the connection closes.
+      // The rename below moves only the main file -- nothing renames a
+      // `-wal` alongside it -- so without this, any batch still sitting in
+      // the WAL rather than the main file would be silently dropped by the
+      // swap, however reliably a plain close would otherwise have cleaned
+      // the WAL up.
+      staging.checkpoint_and_truncate_wal();
     }
-    remove_wal_sidecars(tmp);
-    // A *stale* `-wal`/`-shm` pair can survive next to `target` from an
-    // earlier, abnormally terminated write (exactly the crash this whole
-    // mechanism defends against) -- the rename below only ever touches the
-    // main file, so it would otherwise sit next to the freshly swapped-in
-    // database, and SQLite's WAL recovery on the next open could replay it,
-    // resurrecting old, unrelated rows into what is supposed to be a fresh
-    // parse. Clear it before the swap so the replacement really is just the
-    // fresh file, nothing riding along with it.
-    remove_wal_sidecars(target);
+    // Ordinarily already gone -- a clean close of the sole connection above
+    // gets rid of a fully-checkpointed WAL's sidecars -- but nothing renames
+    // sidecars below, so any that somehow survived would otherwise be
+    // orphaned under the temp name forever; this is defensive.
+    remove_stale_sidecars(tmp);
+    // A *stale* sidecar (or rollback journal) can survive next to `target`
+    // from an earlier, abnormally terminated write -- exactly the crash this
+    // whole mechanism defends against. The rename below only ever touches
+    // the main file, so left in place it would sit next to the freshly
+    // swapped-in database, and SQLite's WAL/journal recovery on the next
+    // open could replay it, resurrecting old, unrelated rows into what is
+    // supposed to be a fresh parse. Clear it before the swap so the
+    // replacement really is just the fresh file, nothing riding along with
+    // it -- safe here specifically because `target`'s main file is about to
+    // be replaced wholesale, not read through its old journal.
+    remove_stale_sidecars(target);
     std::error_code ec;
     fs::rename(tmp, target, ec);
     if (ec) {
@@ -677,7 +697,7 @@ void write_streamed_full_parse(const std::string& path, const Meta& meta,
   } catch (...) {
     std::error_code ec;
     fs::remove(tmp, ec);
-    remove_wal_sidecars(tmp);
+    remove_stale_sidecars(tmp);
     throw;
   }
 }
