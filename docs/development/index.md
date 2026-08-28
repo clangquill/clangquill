@@ -6,7 +6,7 @@ Design decisions and notes for contributors.
 :maxdepth: 1
 
 benchmark-methodology
+cross-references
 adr-0001-libclang-sourcing
 mirror-contracts
-cross-references
 ```

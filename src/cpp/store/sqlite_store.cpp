@@ -1,5 +1,9 @@
 #include "store/sqlite_store.hpp"
 
+#include <filesystem>
+#include <random>
+#include <stdexcept>
+#include <system_error>
 #include <unordered_map>
 
 #include "core/version.hpp"
@@ -10,6 +14,77 @@
 #endif
 
 namespace clangquill::store {
+
+namespace {
+
+// The prefix every unique_sibling_path() candidate for `target` starts with,
+// so reclaim_stale_temp_siblings() can recognise one left behind by an
+// earlier run.
+std::string temp_sibling_prefix(const std::filesystem::path& target) {
+  return target.filename().string() + ".tmp";
+}
+
+// A path next to `target` that does not currently exist, so the temporary
+// database @ref write_streamed_full_parse builds can later be renamed onto
+// `target` atomically (same directory => same filesystem, which a rename
+// across filesystems cannot do).
+std::filesystem::path unique_sibling_path(const std::filesystem::path& target) {
+  namespace fs = std::filesystem;
+  const fs::path dir = target.has_parent_path() ? target.parent_path() : fs::path(".");
+  const std::string prefix = temp_sibling_prefix(target);
+  std::random_device entropy;
+  for (int attempt = 0; attempt < 64; ++attempt) {
+    const fs::path candidate = dir / (prefix + std::to_string(entropy()));
+    std::error_code ec;
+    if (!fs::exists(candidate, ec)) return candidate;
+  }
+  throw std::runtime_error("could not find an unused temporary path next to " +
+                           target.string());
+}
+
+// Best-effort removal of `path`'s SQLite sidecar files: `-wal`/`-shm` (WAL
+// mode) and `-journal` (rollback mode, in case something other than this
+// store ever wrote `path` directly). Safe to call whether or not any exist.
+//
+// Deleting a `-journal` is only safe when `path`'s *main* file is about to be
+// discarded wholesale, as it always is at every call site below -- a live
+// journal is what lets SQLite roll an interrupted writer's main file back to
+// consistency, which matters only for a main file that is still in use.
+void remove_stale_sidecars(const std::filesystem::path& path) {
+  for (const char* suffix : {"-wal", "-shm", "-journal"}) {
+    std::error_code ec;
+    std::filesystem::remove(path.string() + suffix, ec);
+  }
+}
+
+// Removes leftover temp-staging siblings of `target` matching the
+// unique_sibling_path() naming scheme: `<target filename>.tmp` followed by
+// nothing but digits. A process killed mid-parse never reaches the
+// catch-block cleanup in write_streamed_full_parse (SIGKILL doesn't unwind
+// the stack), so without this every interrupted run leaves another randomly
+// named file behind that nothing else ever reclaims. Best-effort: a listing
+// or removal failure is ignored, since this is opportunistic cleanup that the
+// parse about to run never depends on -- and only files matching the exact
+// naming scheme are touched, never anything merely sharing the prefix.
+void reclaim_stale_temp_siblings(const std::filesystem::path& target) {
+  namespace fs = std::filesystem;
+  const fs::path dir = target.has_parent_path() ? target.parent_path() : fs::path(".");
+  const std::string prefix = temp_sibling_prefix(target);
+  std::error_code dir_ec;
+  for (const auto& entry : fs::directory_iterator(dir, dir_ec)) {
+    const std::string name = entry.path().filename().string();
+    if (name.rfind(prefix, 0) != 0) continue;
+    const std::string suffix = name.substr(prefix.size());
+    if (suffix.empty() || suffix.find_first_not_of("0123456789") != std::string::npos) {
+      continue;
+    }
+    std::error_code rm_ec;
+    fs::remove(entry.path(), rm_ec);
+    remove_stale_sidecars(entry.path());
+  }
+}
+
+}  // namespace
 
 Meta Meta::current() {
   Meta m;
@@ -52,10 +127,8 @@ void SqliteStore::write_part(const model::ParsedModule& module,
   tx.commit();
 }
 
-void SqliteStore::clear() {
-  Transaction tx(db_);
-  clear_all();
-  tx.commit();
+void SqliteStore::checkpoint_and_truncate_wal() {
+  db_.exec("PRAGMA wal_checkpoint(TRUNCATE);");
 }
 
 void SqliteStore::clear_all() {
@@ -674,6 +747,59 @@ model::ParsedModule SqliteStore::read() {
   }
 
   return m;
+}
+
+void write_streamed_full_parse(const std::string& path, const Meta& meta,
+                               const std::function<void(const BatchSink&)>& produce) {
+  namespace fs = std::filesystem;
+  const fs::path target(path);
+  reclaim_stale_temp_siblings(target);
+  const fs::path tmp = unique_sibling_path(target);
+  try {
+    {
+      // Scoped so the temp database's connection is closed before anything
+      // below touches the filesystem -- and, if `produce` throws, before the
+      // temp file is removed in the catch block.
+      SqliteStore staging(tmp.string());
+      produce([&](model::ParsedModule&& part) { staging.write_part(part, meta); });
+      // Force every committed frame out of the WAL and back into the main
+      // file, and truncate the WAL to empty, before the connection closes.
+      // The rename below moves only the main file -- nothing renames a
+      // `-wal` alongside it -- so without this, any batch still sitting in
+      // the WAL rather than the main file would be silently dropped by the
+      // swap, however reliably a plain close would otherwise have cleaned
+      // the WAL up.
+      staging.checkpoint_and_truncate_wal();
+    }
+    // Ordinarily already gone -- a clean close of the sole connection above
+    // gets rid of a fully-checkpointed WAL's sidecars -- but nothing renames
+    // sidecars below, so any that somehow survived would otherwise be
+    // orphaned under the temp name forever; this is defensive.
+    remove_stale_sidecars(tmp);
+    // A *stale* sidecar (or rollback journal) can survive next to `target`
+    // from an earlier, abnormally terminated write -- exactly the crash this
+    // whole mechanism defends against. The rename below only ever touches
+    // the main file, so left in place it would sit next to the freshly
+    // swapped-in database, and SQLite's WAL/journal recovery on the next
+    // open could replay it, resurrecting old, unrelated rows into what is
+    // supposed to be a fresh parse. Clear it before the swap so the
+    // replacement really is just the fresh file, nothing riding along with
+    // it -- safe here specifically because `target`'s main file is about to
+    // be replaced wholesale, not read through its old journal.
+    remove_stale_sidecars(target);
+    std::error_code ec;
+    fs::rename(tmp, target, ec);
+    if (ec) {
+      throw std::runtime_error("failed to move parsed database '" + tmp.string() +
+                               "' into place at '" + target.string() +
+                               "': " + ec.message());
+    }
+  } catch (...) {
+    std::error_code ec;
+    fs::remove(tmp, ec);
+    remove_stale_sidecars(tmp);
+    throw;
+  }
 }
 
 }  // namespace clangquill::store

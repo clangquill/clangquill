@@ -1,0 +1,29 @@
+{
+    "description": "A copy command whose target names a nested template scope. The reduction to a pointable name has to count `<`/`>` depth: substituting the innermost `<...>` would leave `Outer<Inner>::at` behind, a garbled name no C++ domain resolves (see issue #320).",
+    "raw": "\n/** @copybrief Outer<Inner<T, U>, N>::at(std::size_t) const noexcept */\n",
+    "expected": {
+        "brief": "",
+        "detail": [],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [
+            "Outer::at"
+        ],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {}
+    }
+}

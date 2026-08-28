@@ -216,11 +216,25 @@ _INLINE_MARKUP: dict[str, tuple[str, str, bool]] = {
     "n": ("", "", False),
 }
 
-# A plain (optionally qualified) C++ name -- what the C++ domain can actually
-# resolve. A ``{cpp:any}`` role over anything else is an "Unparseable C++
-# cross-reference", which a warnings-as-errors docs build turns into a hard
-# failure, so such a target degrades to a code span instead.
-_CPP_NAME_RE = re.compile(r"^[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$")
+# An overloaded operator's name, which the C++ domain indexes and resolves like
+# any other member (``Vec::operator==``) but which is not spelled out of
+# identifier characters. Alternatives are longest-first so ``<<=`` is not read as
+# ``<<`` followed by stray text. The named forms (``operator new``,
+# ``operator co_await``) are deliberately absent: they carry a space, and a
+# Doxygen ``@ref`` argument ends at the first one.
+_CPP_OPERATOR = r"operator(?:<=>|<<=|>>=|->\*|\+\+|--|->|<<|>>|<=|>=|==|!=|&&|\|\||\+=|-=|\*=|/=|%=|\^=|&=|\|=|\(\)|\[\]|[-+*/%^&|~!=<>,])"
+
+# A plain (optionally qualified) C++ name, or such a name ending in an operator
+# -- what the C++ domain can actually resolve. A ``{cpp:any}`` role over anything
+# else is an "Unparseable C++ cross-reference", which a warnings-as-errors docs
+# build turns into a hard failure, so such a target degrades to a code span
+# instead. The leading guard rejects a target that stops at the bare ``operator``
+# keyword, which names nothing: ``@ref Vec::operator bool`` is a conversion
+# operator whose name carries a space, so the argument ends before the type.
+_CPP_NAME_RE = re.compile(
+    rf"^(?!(?:[A-Za-z_]\w*::)*operator$)"
+    rf"(?:[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*(?:::{_CPP_OPERATOR})?|{_CPP_OPERATOR})$",
+)
 
 # A command and the word it decorates, where the command starts a word (so an
 # address like ``user@b.example`` is left alone). The optional quoted string is
@@ -247,6 +261,43 @@ def _is_inline_command(name: str) -> bool:
     return name in _INLINE_MARKUP
 
 
+def split_xref_target(token: str) -> tuple[str, str] | None:
+    """Split ``token`` into a C++ cross-reference target and its trailing punctuation.
+
+    ``_TRAILING`` cannot simply be stripped from the right before the target is
+    checked: ``[]``, ``()`` and ``,`` are sentence punctuation in
+    ``(see @ref parse_files)`` but part of the name in ``@ref Vec::operator[]``.
+    So the longest prefix that is a whole C++ name wins, and only characters from
+    ``_TRAILING`` may follow it. ``None`` means no prefix qualifies, and the
+    caller degrades the reference to a code span.
+    """
+    for cut in range(len(token), 0, -1):
+        if any(c not in _TRAILING for c in token[cut:]):
+            break
+        if _CPP_NAME_RE.match(token[:cut]):
+            return token[:cut], token[cut:]
+    return None
+
+
+def _split_argument(arg: str, *, is_xref: bool) -> tuple[str, str, bool]:
+    """Split a decorated word into ``(text, trailing punctuation, is a target)``.
+
+    A cross-reference command gets the longest-match treatment
+    (:func:`split_xref_target`), which keeps the ``[]`` of ``operator[]``; a word
+    that does not name a C++ entity -- and every non-cross-reference command --
+    simply loses its trailing punctuation, so ``@c foo.`` reads as a code span
+    followed by a full stop.
+    """
+    if is_xref:
+        split = split_xref_target(arg)
+        if split is not None:
+            return split[0], split[1], True
+    tail = ""
+    while arg and arg[-1] in _TRAILING:
+        arg, tail = arg[:-1], arg[-1] + tail
+    return arg, tail, False
+
+
 def _render_inline_markup(text: str) -> str:
     """Rewrite Doxygen's inline commands in ``text`` as MyST markup.
 
@@ -262,18 +313,17 @@ def _render_inline_markup(text: str) -> str:
         prefix, suffix, is_xref = markup
         if not prefix:
             return ""
-        arg, title = match["arg"], match["title"]
-        tail = ""
-        while arg and arg[-1] in _TRAILING:
-            arg, tail = arg[:-1], arg[-1] + tail
-        if not arg:
-            return match[0]
+        title = match["title"]
+        arg, tail, kept_xref = _split_argument(match["arg"], is_xref=is_xref)
         # A cross-reference the C++ domain could not parse fails the docs build,
         # so one that does not name a C++ entity becomes a plain code span.
-        # Reducing it to a non-xref here lets the title handling below decide
-        # its quoted title, if any, the same way it would for a real code span.
-        if is_xref and not _CPP_NAME_RE.match(arg):
-            prefix, suffix, is_xref = "`", "`", False
+        # Reducing it to a non-xref here lets the title handling below decide its
+        # quoted title, if any, the same way it would for a real code span.
+        if is_xref and not kept_xref:
+            prefix, suffix = "`", "`"
+        is_xref = kept_xref
+        if not arg:
+            return match[0]
         kept_title = ""
         if title is not None:
             if is_xref:
@@ -334,16 +384,39 @@ _DETAIL_CMDS = frozenset({"details", "par"})
 # unperformed copy separately (see ``ast_visitor.cpp``).
 _COPY_CMDS = frozenset({"copydoc", "copybrief", "copydetails"})
 
-# Everything a copy command's argument can carry beyond the name: Doxygen
-# accepts a whole declaration, so ``DenseCoeffsBase<Derived>::coeff(Index) const``
-# has to come down to ``DenseCoeffsBase::coeff`` -- the only shape that can be
-# pointed at, and the only one the C++ domain resolves.
-_COPY_ARGS_RE = re.compile(r"<[^<>]*>|\(.*")
-
 
 def _copy_target(text: str) -> str:
-    """Reduce a copy command's argument to the qualified name it points at."""
-    name = _COPY_ARGS_RE.sub("", text).split(maxsplit=1)
+    """Reduce a copy command's argument to the qualified name it points at.
+
+    Doxygen accepts a whole declaration after a copy command, so the argument
+    can carry template arguments, a parameter list and trailing qualifiers --
+    ``DenseCoeffsBase<Derived,ReadOnlyAccessors>::coeff(Index,Index) const``
+    has to come down to ``DenseCoeffsBase::coeff``, the only shape that can be
+    pointed at and the only one the C++ domain resolves.
+
+    Template arguments are dropped by counting ``<``/``>`` depth rather than by
+    substituting an innermost ``<...>``, so a nested list -- Eigen's
+    ``Matrix<Scalar,Rows,Cols>::Base<Derived<T>>`` shape -- comes out whole
+    instead of leaving the outer brackets behind. The parameter list ends the
+    name only at depth zero: the ``(`` of a function-type template argument,
+    ``Registry<std::function<void(int)>>::add``, belongs to the argument being
+    dropped, and cutting there would strip the member the copy named. This
+    mirrors ``copy_target`` in ``src/cpp/parser/doxygen_comment_parser.cpp``
+    command for command; the two parsers must agree here (see
+    ``tests/comment_corpus``).
+    """
+    out = []
+    depth = 0
+    for ch in text:
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth = max(depth - 1, 0)
+        elif ch == "(" and depth == 0:
+            break
+        elif depth == 0:
+            out.append(ch)
+    name = "".join(out).split(maxsplit=1)
     return name[0].removeprefix("::") if name else ""
 
 

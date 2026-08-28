@@ -715,7 +715,22 @@ void extract_friends(CXCursor record, const std::string& usr, VisitCtx& ctx) {
                 // ordinary top-level traversal (a FriendDecl child maps to
                 // Unknown in map_kind and is pruned without descent), so it
                 // gets no symbol unless we give it one here.
-                if (in.has_body) in.func_def = gc;
+                //
+                // clang_isCursorDefinition() is the direct answer to "does
+                // this function have a body", and is trusted first when it
+                // says yes. It is documented (see
+                // friend_decl_has_inline_body() above) to say no here always,
+                // under the SkipFunctionBodies this tool parses with -- but
+                // if a future libclang ever stops truncating a hidden
+                // friend's body, this starts saying yes, and is the
+                // trustworthy answer: in.has_body (that offset probe's
+                // result) exists only to stand in for it. Falling back to it
+                // only when this is false means a libclang change degrades to
+                // using the direct signal instead of quietly trusting a
+                // now-stale offset assumption.
+                bool has_body =
+                    clang_isCursorDefinition(gc) != 0 || in.has_body;
+                if (has_body) in.func_def = gc;
                 return CXChildVisit_Break;
               }
               return CXChildVisit_Continue;
