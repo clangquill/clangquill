@@ -28,6 +28,7 @@ _DOXYGEN_PARSER_CPP = _ROOT / "src" / "cpp" / "parser" / "doxygen_comment_parser
 _CONTENT_HASH_CPP = _ROOT / "src" / "cpp" / "hash" / "content_hash.cpp"
 _GENERATOR_PY = _ROOT / "src" / "clangquill" / "generator.py"
 _SCHEMA_HPP = _ROOT / "src" / "cpp" / "store" / "schema.hpp"
+_MODULE_CPP = _ROOT / "src" / "cpp" / "bindings" / "module.cpp"
 
 
 # --- 1. comment_fields arg encoding: param_arg() (C++) <-> _split_direction (Python) --
@@ -213,7 +214,15 @@ def test_to_fields_json_nested_key_sets_match_their_python_dataclasses() -> None
 # `clangquill::store::kSchemaVersion`, so `_core.SCHEMA_VERSION` cannot drift
 # from the constant by editing the Python side -- there is no second integer
 # to keep in sync. The only way this contract breaks is `module.cpp` binding a
-# stale literal instead of the constant, which this test still catches.
+# stale literal instead of the constant, which this test still catches -- both
+# by pinning the binding's source line and, since a literal could coincidentally
+# equal the constant on the day it was written, by comparing the bound runtime
+# value against the constant too.
+
+
+def test_schema_version_is_bound_from_the_constant_not_a_literal() -> None:
+    text = _MODULE_CPP.read_text(encoding="utf-8")
+    assert 'm.attr("SCHEMA_VERSION") = clangquill::store::kSchemaVersion;' in text
 
 
 def test_schema_version_binding_matches_the_cpp_constant() -> None:
