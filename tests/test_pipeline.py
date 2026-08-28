@@ -1833,6 +1833,37 @@ def test_a_partial_reparse_clears_a_diagnostic_from_a_dropped_include(project: P
     assert second.diagnostics == []
 
 
+@requires_libclang
+def test_diagnostics_log_count_matches_the_log_not_the_project_wide_replay(project: Path) -> None:
+    # Issue #319: diagnostic_records is the whole project's picture (including
+    # diagnostics carried forward from untouched inputs on an incremental
+    # reparse), but the log only ever holds this run's own parse. The count
+    # reported alongside "wrote N diagnostic(s) to <log>" has to come from what
+    # was actually written to the log, not from diagnostic_records.
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    (project / "beta.hpp").write_text(
+        '#warning "beta is on its way out"\n/// beta ns\nnamespace beta { /// g\nint g(); }\n',
+    )
+    config = Config(
+        input=["alpha.hpp", "beta.hpp"],
+        output_dir="api",
+        cache_dir=".cache",
+        diagnostics_log="parse.log",
+    )
+    build(config, base_dir=project)
+
+    (project / "alpha.hpp").write_text("/// alpha ns edited\nnamespace alpha { /// f\nint f(); }\n")
+    result = build(config, base_dir=project)
+
+    # This run only reparsed the (clean) edited alpha.hpp, so nothing new to log.
+    assert result.diagnostics_log_count == 0
+    log_text = (project / "parse.log").read_text(encoding="utf-8")
+    assert "beta is on its way out" not in log_text
+
+    # But the project-wide picture still carries beta's still-standing warning.
+    assert any("beta is on its way out" in record.text for record in result.diagnostic_records)
+
+
 def test_severity_counts_omits_severities_that_never_occurred() -> None:
     records = [
         pipeline.Diagnostic(severity=3, depth=0, text="a.hpp:1:1: error: bad"),
