@@ -127,6 +127,15 @@ def hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def hash_bytes(data: bytes) -> str:
+    """Return the hex SHA-256 of ``data``.
+
+    What :func:`file_sha256` computes, for a caller that has already read the
+    file for another reason and should not read it a second time.
+    """
+    return hashlib.sha256(data).hexdigest()
+
+
 def fingerprint(payload: Mapping[str, object]) -> str:
     """Hash a JSON-able mapping into a stable fingerprint string.
 
@@ -607,5 +616,6 @@ __all__ = [
     "ParseStatus",
     "file_sha256",
     "fingerprint",
+    "hash_bytes",
     "hash_text",
 ]

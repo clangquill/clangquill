@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 from clangquill import _core, cli, pipeline
 from clangquill.cache import BuildCache, file_sha256, hash_text
 from clangquill.config import Config
-from clangquill.pipeline import MANIFEST_NAME, build
+from clangquill.pipeline import COMPILE_COMMANDS_NAME, MANIFEST_NAME, build
 from clangquill.store import Store
 
 if TYPE_CHECKING:
@@ -1000,6 +1000,58 @@ def test_parse_fingerprint_tracks_compile_commands_file(tmp_path: Path) -> None:
     db.write_text('[{"directory": ".", "command": "c++ -DX a.cpp", "file": "a.cpp"}]', encoding="utf-8")
     after = pipeline._parse_fingerprint(config, tmp_path, ["a.hpp"])  # noqa: SLF001
     assert before != after
+
+
+@requires_libclang
+def test_compile_commands_is_read_once_per_build(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The database was resolved (and re-parsed) once for the up-front check,
+    # once for the parse options and once for the parse fingerprint, then read a
+    # fourth time to hash it. A monorepo-sized database makes that noticeable,
+    # and one read answers all four questions.
+    (project / "compile_commands.json").write_text(
+        json.dumps(
+            [
+                {
+                    "directory": str(project),
+                    "file": str(project / "demo.hpp"),
+                    "arguments": ["c++", "-std=c++20", "-c", str(project / "demo.hpp")],
+                },
+            ],
+        ),
+        encoding="utf-8",
+    )
+    config = Config(input=["demo.hpp"], output_dir="api", compile_commands=".", cache_dir=".cache")
+
+    # Every way the file was ever read: as bytes, as text, and through the
+    # separate hashing read.
+    reads: list[str] = []
+    real_read_bytes = Path.read_bytes
+    real_read_text = Path.read_text
+    real_file_sha256 = pipeline.file_sha256
+
+    def spy_read_bytes(self: Path) -> bytes:
+        if self.name == COMPILE_COMMANDS_NAME:
+            reads.append("read_bytes")
+        return real_read_bytes(self)
+
+    def spy_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == COMPILE_COMMANDS_NAME:
+            reads.append("read_text")
+        return real_read_text(self, *args, **kwargs)
+
+    def spy_file_sha256(path: str | Path) -> str:
+        if Path(path).name == COMPILE_COMMANDS_NAME:
+            reads.append("file_sha256")
+        return real_file_sha256(path)
+
+    monkeypatch.setattr(Path, "read_bytes", spy_read_bytes)
+    monkeypatch.setattr(Path, "read_text", spy_read_text)
+    monkeypatch.setattr(pipeline, "file_sha256", spy_file_sha256)
+
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    assert reads == ["read_bytes"]
 
 
 def test_missing_compile_commands_names_every_path_searched(tmp_path: Path) -> None:
