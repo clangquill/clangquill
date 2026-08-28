@@ -119,6 +119,38 @@ TEST_CASE("opting in names the anonymous namespace a symbol came from",
   CHECK(find(m, "demo::HiddenTag") == nullptr);
 }
 
+TEST_CASE("a named namespace inside an anonymous one is internal too",
+          "[parser]") {
+  // The skip is of the whole subtree, so a named namespace nested inside the
+  // anonymous one -- whose own spelling would otherwise carry it back into the
+  // output -- goes with it. At file scope there is no enclosing namespace to
+  // be mistaken for, and eliding the scope published such a helper as a
+  // top-level entity of the library.
+  auto m = parse_fixture("anonymous_ns.hpp");
+
+  CHECK(find(m, "demo::inner") == nullptr);
+  CHECK(find(m, "demo::inner::nested_helper") == nullptr);
+  CHECK(find(m, "file_scope_helper") == nullptr);
+}
+
+TEST_CASE("the anonymous scope is named at every depth it appears", "[parser]") {
+  parser::ParseOptions opts;
+  opts.extract_anonymous_namespaces = true;
+  model::ParsedModule m;
+  REQUIRE(parser::Parser(opts).parse_file(
+      std::string(CLANGQUILL_FIXTURE_DIR) + "/anonymous_ns.hpp", m));
+
+  // A named namespace nested inside the anonymous one keeps its own segment
+  // behind the scope's, rather than reattaching its members to `demo`.
+  CHECK(find(m, "demo::@anonymous::inner::nested_helper") != nullptr);
+  CHECK(find(m, "demo::inner::nested_helper") == nullptr);
+
+  // At file scope the scope is the whole qualification: a bare
+  // `file_scope_helper` would read as a top-level entity of the library.
+  CHECK(find(m, "@anonymous::file_scope_helper") != nullptr);
+  CHECK(find(m, "file_scope_helper") == nullptr);
+}
+
 TEST_CASE("parser resolves base-class references", "[parser]") {
   auto m = parse_fixture("shapes.hpp");
   const auto* circle = find(m, "geo::Circle");
