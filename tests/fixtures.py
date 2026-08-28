@@ -368,7 +368,7 @@ def _build_multifile_db(path: Path) -> None:
         con.execute("INSERT INTO files(id, path, sha256, size_bytes) VALUES(1, 'alpha.hpp', 'aa', 64)")
         con.execute("INSERT INTO files(id, path, sha256, size_bytes) VALUES(2, 'beta.hpp', 'bb', 64)")
 
-        def sym(usr: str, parent: str, kind: int, spelling: str, qname: str, file_id: int) -> None:  # noqa: PLR0913
+        def sym(usr: str, parent: str, kind: SymbolKind, spelling: str, qname: str, file_id: int) -> None:  # noqa: PLR0913
             con.execute(
                 "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, "
                 "display_name, signature, type_repr, access, is_definition, "
@@ -382,12 +382,12 @@ def _build_multifile_db(path: Path) -> None:
         alpha_run = "c:@N@app@S@Alpha@F@run"
         beta = "c:@N@app@S@Beta"
         # The namespace is recorded once, against the file libclang saw first.
-        sym(ns, "", 1, "app", "app", 1)
-        sym(alpha, ns, 2, "Alpha", "app::Alpha", 1)
+        sym(ns, "", SymbolKind.NAMESPACE, "app", "app", 1)
+        sym(alpha, ns, SymbolKind.CLASS, "Alpha", "app::Alpha", 1)
         # A method of Alpha shares Alpha's file: it must render under Alpha, not
         # as a separate top-of-file entry.
-        sym(alpha_run, alpha, 6, "run", "app::Alpha::run", 1)
-        sym(beta, ns, 2, "Beta", "app::Beta", 2)
+        sym(alpha_run, alpha, SymbolKind.METHOD, "run", "app::Alpha::run", 1)
+        sym(beta, ns, SymbolKind.CLASS, "Beta", "app::Beta", 2)
 
         for usr in (ns, alpha, alpha_run, beta):
             con.execute(
@@ -420,7 +420,7 @@ def _build_ns_db(path: Path) -> None:
         def sym(  # noqa: PLR0913
             usr: str,
             parent: str,
-            kind: int,
+            kind: SymbolKind,
             spelling: str,
             qname: str,
             *,
@@ -447,17 +447,25 @@ def _build_ns_db(path: Path) -> None:
         size_t = "c:@N@app@T@Size"
         limit = "c:@N@app@limit"
 
-        sym(app, "", 1, "app", "app")
-        sym(sub, app, 1, "sub", "app::sub")
-        sym(gadget, sub, 2, "Gadget", "app::sub::Gadget")
-        sym(widget, app, 2, "Widget", "app::Widget")
-        sym(make1, app, 5, "make", "app::make", signature="Widget make()", type_repr="Widget ()")
-        sym(make2, app, 5, "make", "app::make", signature="Widget make(int n)", type_repr="Widget (int)")
-        sym(eq, app, 5, "operator==", "app::operator==", signature="bool operator==(Widget, Widget)")
-        sym(shl, app, 5, "operator<<", "app::operator<<", signature="void operator<<(int, int)")
-        sym(mode, app, 11, "Mode", "app::Mode")
-        sym(size_t, app, 13, "Size", "app::Size", type_repr="unsigned long")
-        sym(limit, app, 10, "limit", "app::limit", type_repr="const int")
+        sym(app, "", SymbolKind.NAMESPACE, "app", "app")
+        sym(sub, app, SymbolKind.NAMESPACE, "sub", "app::sub")
+        sym(gadget, sub, SymbolKind.CLASS, "Gadget", "app::sub::Gadget")
+        sym(widget, app, SymbolKind.CLASS, "Widget", "app::Widget")
+        sym(make1, app, SymbolKind.FUNCTION, "make", "app::make", signature="Widget make()", type_repr="Widget ()")
+        sym(
+            make2,
+            app,
+            SymbolKind.FUNCTION,
+            "make",
+            "app::make",
+            signature="Widget make(int n)",
+            type_repr="Widget (int)",
+        )
+        sym(eq, app, SymbolKind.FUNCTION, "operator==", "app::operator==", signature="bool operator==(Widget, Widget)")
+        sym(shl, app, SymbolKind.FUNCTION, "operator<<", "app::operator<<", signature="void operator<<(int, int)")
+        sym(mode, app, SymbolKind.ENUM, "Mode", "app::Mode")
+        sym(size_t, app, SymbolKind.TYPEDEF, "Size", "app::Size", type_repr="unsigned long")
+        sym(limit, app, SymbolKind.VARIABLE, "limit", "app::limit", type_repr="const int")
 
         for usr, brief in (
             (app, "The app namespace."),
@@ -504,7 +512,7 @@ def _build_spec_db(path: Path) -> None:
         def sym(  # noqa: PLR0913
             usr: str,
             parent: str,
-            kind: int,
+            kind: SymbolKind,
             spelling: str,
             qname: str,
             *,
@@ -541,12 +549,12 @@ def _build_spec_db(path: Path) -> None:
         helper = "c:@N@demo@CT@AdaptationHelper"
         helper_ctor = helper + "@F@AdaptationHelper"
 
-        sym(demo, "", 1, "demo", "demo")
+        sym(demo, "", SymbolKind.NAMESPACE, "demo", "demo")
         # Primary template: display_name has no spec args (equals spelling).
         sym(
             cf_primary,
             demo,
-            16,
+            SymbolKind.CLASS_TEMPLATE,
             "ContainerFactory",
             "demo::ContainerFactory",
             display="ContainerFactory",
@@ -556,7 +564,7 @@ def _build_spec_db(path: Path) -> None:
         sym(
             cf_dense,
             demo,
-            16,
+            SymbolKind.CLASS_TEMPLATE,
             "ContainerFactory",
             "demo::ContainerFactory",
             display="ContainerFactory<demo::DenseVector<S>>",
@@ -565,7 +573,7 @@ def _build_spec_db(path: Path) -> None:
         sym(
             cf_field,
             demo,
-            16,
+            SymbolKind.CLASS_TEMPLATE,
             "ContainerFactory",
             "demo::ContainerFactory",
             display="ContainerFactory<demo::FieldVector<S, 4>>",
@@ -576,7 +584,7 @@ def _build_spec_db(path: Path) -> None:
         sym(
             cf_double,
             demo,
-            16,
+            SymbolKind.CLASS_TEMPLATE,
             "ContainerFactory",
             "demo::ContainerFactory",
             display="ContainerFactory<double>",
@@ -585,7 +593,7 @@ def _build_spec_db(path: Path) -> None:
         sym(
             create_dense,
             cf_dense,
-            6,
+            SymbolKind.METHOD,
             "create",
             "demo::ContainerFactory::create",
             signature="static demo::DenseVector<S> create(const size_t size)",
@@ -594,7 +602,7 @@ def _build_spec_db(path: Path) -> None:
         sym(
             create_field,
             cf_field,
-            6,
+            SymbolKind.METHOD,
             "create",
             "demo::ContainerFactory::create",
             signature="static demo::FieldVector<S, 4> create(const size_t size)",
@@ -603,7 +611,7 @@ def _build_spec_db(path: Path) -> None:
         sym(
             create_double,
             cf_double,
-            6,
+            SymbolKind.METHOD,
             "create",
             "demo::ContainerFactory::create",
             signature="static demo::DenseVector<double> create(const size_t size)",
@@ -615,7 +623,7 @@ def _build_spec_db(path: Path) -> None:
         sym(
             "c:@N@demo@is_dense_v",
             demo,
-            10,
+            SymbolKind.VARIABLE,
             "is_dense_v",
             "demo::is_dense_v",
             display="is_dense_v",
@@ -625,7 +633,7 @@ def _build_spec_db(path: Path) -> None:
         sym(
             "c:@N@demo@is_dense_v>#d",
             demo,
-            10,
+            SymbolKind.VARIABLE,
             "is_dense_v",
             "demo::is_dense_v",
             display="is_dense_v<double>",
@@ -637,7 +645,7 @@ def _build_spec_db(path: Path) -> None:
         sym(
             helper,
             demo,
-            16,
+            SymbolKind.CLASS_TEMPLATE,
             "AdaptationHelper",
             "demo::AdaptationHelper",
             display="AdaptationHelper",
@@ -646,7 +654,7 @@ def _build_spec_db(path: Path) -> None:
         sym(
             helper_ctor,
             helper,
-            7,
+            SymbolKind.CONSTRUCTOR,
             "AdaptationHelper",
             "demo::AdaptationHelper::AdaptationHelper",
             signature=(
@@ -700,8 +708,8 @@ def _build_collision_db(path: Path) -> None:
                 "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, "
                 "display_name, signature, type_repr, access, is_definition, "
                 "is_documented, content_hash, file_id, line) "
-                "VALUES(?, '', 5, ?, ?, ?, ?, '', 0, 1, 1, ?, 1, 0)",
-                (usr, name, name, name, f"void {name}()", "hash-" + usr),
+                "VALUES(?, '', ?, ?, ?, ?, ?, '', 0, 1, 1, ?, 1, 0)",
+                (usr, SymbolKind.FUNCTION, name, name, name, f"void {name}()", "hash-" + usr),
             )
         con.commit()
     finally:
@@ -726,7 +734,7 @@ def _build_degraded_db(path: Path) -> None:
         def sym(  # noqa: PLR0913
             usr: str,
             parent: str,
-            kind: int,
+            kind: SymbolKind,
             spelling: str,
             qname: str,
             *,
@@ -742,12 +750,12 @@ def _build_degraded_db(path: Path) -> None:
                 (usr, parent, kind, spelling, qname, spelling, signature, type_repr, "hash-" + usr, line),
             )
 
-        sym("c:@N@Eigen", "", 1, "Eigen", "Eigen")
+        sym("c:@N@Eigen", "", SymbolKind.NAMESPACE, "Eigen", "Eigen")
         # The same mis-extracted name, twice as a variable declaration.
         sym(
             "c:degraded1",
             "c:@N@Eigen",
-            10,
+            SymbolKind.VARIABLE,
             "plogical_shift_right",
             "Eigen::plogical_shift_right",
             type_repr="int",
@@ -756,7 +764,7 @@ def _build_degraded_db(path: Path) -> None:
         sym(
             "c:degraded2",
             "c:@N@Eigen",
-            10,
+            SymbolKind.VARIABLE,
             "plogical_shift_right",
             "Eigen::plogical_shift_right",
             type_repr="int",
@@ -766,15 +774,31 @@ def _build_degraded_db(path: Path) -> None:
         sym(
             "c:degraded3",
             "c:@N@Eigen",
-            13,
+            SymbolKind.TYPEDEF,
             "plogical_shift_right",
             "Eigen::plogical_shift_right",
             type_repr="int",
             line=3,
         )
         # Legitimate overloads: same name, both must stay cpp:function directives.
-        sym("c:@F@scale#d#", "c:@N@Eigen", 5, "scale", "Eigen::scale", signature="double scale(double f)", line=4)
-        sym("c:@F@scale#i#", "c:@N@Eigen", 5, "scale", "Eigen::scale", signature="int scale(int f)", line=5)
+        sym(
+            "c:@F@scale#d#",
+            "c:@N@Eigen",
+            SymbolKind.FUNCTION,
+            "scale",
+            "Eigen::scale",
+            signature="double scale(double f)",
+            line=4,
+        )
+        sym(
+            "c:@F@scale#i#",
+            "c:@N@Eigen",
+            SymbolKind.FUNCTION,
+            "scale",
+            "Eigen::scale",
+            signature="int scale(int f)",
+            line=5,
+        )
         con.commit()
     finally:
         con.close()
