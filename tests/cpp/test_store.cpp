@@ -426,12 +426,38 @@ TEST_CASE(
   red.value = 0;
   batch_b.enumerators.push_back(red);
 
+  // Batch C: a third, later batch that re-declares `Color` yet again, as a
+  // plain (non-defining, undocumented) forward declaration in a third file --
+  // e.g. another header that only needs an opaque `enum Color;`. Its symbols
+  // row for `c:@E@Color` still fires the same ON CONFLICT path as batch B's
+  // did, so this exercises that the enumerator survives *every* later write
+  // to the same USR, not just the one that happened to promote it, and that
+  // a plain declaration can never claw back a definition's own fields.
+  model::SourceFile fwd2_file;
+  fwd2_file.path = "/tmp/fwd2.hpp";
+  fwd2_file.sha256 = std::string(64, 'c');
+  fwd2_file.size_bytes = 9;
+
+  model::ParsedModule batch_c;
+  batch_c.files.push_back(fwd2_file);
+
+  model::Symbol color_fwd2;
+  color_fwd2.usr = "c:@E@Color";
+  color_fwd2.kind = model::SymbolKind::Enum;
+  color_fwd2.spelling = "Color";
+  color_fwd2.qualified_name = "Color";
+  color_fwd2.display_name = "Color";
+  color_fwd2.is_definition = false;
+  color_fwd2.location.file_path = fwd2_file.path;
+  batch_c.symbols.push_back(color_fwd2);
+
   {
     store::SqliteStore writer(path);
-    // Two separate write_part calls, hence two separate committed
+    // Three separate write_part calls, hence three separate committed
     // transactions -- exactly the streamed path the issue describes.
     writer.write_part(batch_a, store::Meta::current());
     writer.write_part(batch_b, store::Meta::current());
+    writer.write_part(batch_c, store::Meta::current());
   }
 
   store::SqliteStore reader(path);
@@ -442,12 +468,15 @@ TEST_CASE(
   REQUIRE(got.comments.size() == 1);
   CHECK(got.comments[0].symbol_usr == "c:@S@Foo");
 
-  // Likewise the enumerator, cascaded off the enum's symbols row.
+  // Likewise the enumerator, cascaded off the enum's symbols row -- and still
+  // there after batch C's unrelated re-declaration touches that row again.
   REQUIRE(got.enumerators.size() == 1);
   CHECK(got.enumerators[0].usr == "c:@E@Color@Red");
 
   // The definition promotes is_definition, and is_documented never regresses
-  // even though the definition's own batch didn't see the comment.
+  // even though the definition's own batch didn't see the comment. Batch C's
+  // plain forward declaration neither un-defines `Color` nor claws its
+  // location back from the definition's own file.
   REQUIRE(got.symbols.size() == 2);
   for (const auto& s : got.symbols) {
     if (s.usr == "c:@S@Foo") {
@@ -455,6 +484,7 @@ TEST_CASE(
       CHECK(s.is_documented);
     } else if (s.usr == "c:@E@Color") {
       CHECK(s.is_definition);
+      CHECK(s.location.file_path == def_file.path);
     }
   }
 
