@@ -493,8 +493,27 @@ def _carry_forward_diagnostics(
     """
     reparsed_files = {dep for deps in partial_deps.values() for dep in deps}
     reparsed_files.update(dropped)
-    carried = [diagnostic for diagnostic in previous if diagnostic.file not in reparsed_files]
-    return carried + warnings_or_worse(records)
+    fresh = warnings_or_worse(records)
+    # A location-less diagnostic (``file == ""`` — a command-line warning, say,
+    # which every translation unit re-emits) belongs to no file, so the path
+    # check below can never supersede it: the carried copy would be kept
+    # alongside the freshly re-emitted one and the list would grow by one on
+    # every partial reparse (issue #302). Fall back for those to the identity
+    # the parser itself dedups diagnostics on across batches — severity plus
+    # the formatted text, which already carries ``file:line:col`` when there is
+    # one. Carried diagnostics are keyed against each other too, so a list that
+    # an older cache already grew collapses back on the next incremental build.
+    seen = {(diagnostic.severity, diagnostic.text) for diagnostic in fresh}
+    carried: list[Diagnostic] = []
+    for diagnostic in previous:
+        if diagnostic.file in reparsed_files:
+            continue
+        identity = (diagnostic.severity, diagnostic.text)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        carried.append(diagnostic)
+    return carried + fresh
 
 
 def _diagnostics_log_path(config: Config, base: Path) -> Path | None:
