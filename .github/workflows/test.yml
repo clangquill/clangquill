@@ -140,13 +140,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+          # The repository-controlled installer (pinned key fingerprint, pinned
+          # llvm-toolchain-<codename>-22 suite), as used by pytest-newer-llvm
+          # and verify-extraction -- not the unpinned `apt.llvm.org/llvm.sh`.
       - name: Install LLVM 22 from apt.llvm.org
-        run: |
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 22
-          sudo apt-get install -y --no-install-recommends \
-            libclang-22-dev llvm-22-dev
+        run: bash tools/ci/install-llvm-22-apt.sh
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
       - name: Set up Python

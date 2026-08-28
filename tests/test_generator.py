@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from clangquill.comments import CommentModel
-from clangquill.generator import Generator, PagePlan, write_if_changed
+from clangquill.comments import CommentModel, CommentParam
+from clangquill.generator import _DEP_FIELD_SEP, Generator, PagePlan, write_if_changed
 from clangquill.store import Reference, RefKind, SourceFile, Store, Symbol
 
 if TYPE_CHECKING:
@@ -133,17 +133,37 @@ TEMPLATES_RENDERED_BY_GOLDEN_TREES = frozenset(
 )
 
 
+# The partials the top-level templates above import or the generator loads
+# directly. Pinned for the same reason: a new file here would otherwise ride
+# along unexercised until something happens to reference it.
+PARTIALS_RENDERED_BY_GOLDEN_TREES = frozenset(
+    {
+        "comment-block.md.jinja",
+        "param-table.md.jinja",
+        "signature.md.jinja",
+    },
+)
+
+
 def test_every_bundled_template_is_behind_a_golden_tree() -> None:
     """A newly bundled template must gain a golden page, not slip in untested.
 
     Substring assertions are what a template used to be checked by, and they
     pass through any amount of formatting drift; this fails the moment a
-    template exists that no byte-compared page renders.
+    template exists that no byte-compared page renders. Also covers
+    ``partials/`` -- the original top-level-only glob let a new partial slip
+    in unexercised. A partial is never rendered as a page of its own, but
+    every one bundled today is reached from a top-level template the golden
+    trees already cover, so the pinned set is the checklist a reviewer
+    updates -- and, in doing so, verifies -- when a new one is added.
     """
     templates = Path(__file__).parents[1] / "src" / "clangquill" / "templates"
     bundled = {path.name for path in templates.glob("*.md.jinja")}
     assert bundled
     assert bundled == TEMPLATES_RENDERED_BY_GOLDEN_TREES
+    bundled_partials = {path.name for path in templates.glob("partials/*.md.jinja")}
+    assert bundled_partials
+    assert bundled_partials == PARTIALS_RENDERED_BY_GOLDEN_TREES
 
 
 def test_fence_widens_past_the_longest_backtick_run_in_content() -> None:
@@ -173,6 +193,31 @@ def test_class_directive_widens_its_fence_around_an_embedded_code_block(gen: Gen
     assert lines[-1] == "````"
     # The embedded fence itself must survive unescaped and unwidened.
     assert "```\ncode inside\n```" in rendered
+
+
+def test_degraded_directive_widens_its_fence_around_a_backtick_run(degraded_db: Path) -> None:
+    # Regression for #303: degraded.md.jinja used a fixed ```cpp fence, the one
+    # page type #205's gen.fence sizing never reached. A pathological default
+    # argument containing its own backtick run would terminate the fence early.
+    with Store.open(degraded_db) as store:
+        gen = Generator(store)
+        symbol = _symbol(store, "Eigen::plogical_shift_right")
+        pathological = 'void f(const char* s = "```` embedded ````")'
+        original_signature = gen.signature
+        gen.signature = lambda sym, symbol=symbol, pathological=pathological, original=original_signature: (
+            pathological if sym.usr == symbol.usr else original(sym)
+        )
+        try:
+            gen._register_declaration(symbol)  # noqa: SLF001 -- force the conflict path below
+            rendered = gen.render_symbol(symbol, level=2)
+        finally:
+            gen.signature = original_signature
+
+    lines = rendered.splitlines()
+    open_index = next(i for i, line in enumerate(lines) if line.startswith("`") and line.endswith("cpp"))
+    assert lines[open_index] == "`````cpp"
+    assert lines[open_index + 1] == pathological
+    assert lines[open_index + 2] == "`````"
 
 
 def test_section_commands_render_as_admonitions_and_metadata(gen: Generator, store: Store) -> None:
@@ -205,6 +250,31 @@ def test_section_commands_render_as_admonitions_and_metadata(gen: Generator, sto
     assert "*Version: 2.1.*" in rendered
     assert "*Date: 2026-08-01.*" in rendered
     assert "*Author: Ada.*" in rendered
+
+
+def test_out_direction_prefix_reaches_the_rendered_page(gen: Generator, store: Store) -> None:
+    # Regression for #303: param-table.md.jinja's direction_prefix() macro was
+    # only pinned at the CommentParam/parse layer -- nothing rendered a full
+    # page and checked the `**[out]**` prefix actually reaches it.
+    scale = _symbol(store, "geo::scale")
+    model = CommentModel(
+        brief="Return a scaled copy of a circle.",
+        params=[
+            CommentParam("c", "the circle to scale", direction="in"),
+            CommentParam("factor", "receives the effective scale factor used", direction="out"),
+        ],
+    )
+    original_comment = gen.comment
+    gen.comment = lambda symbol, model=model, scale=scale, original=original_comment: (
+        model if symbol.usr == scale.usr else original(symbol)
+    )
+    try:
+        rendered = gen.render_symbol(scale, level=1)
+    finally:
+        gen.comment = original_comment
+
+    assert ":param c: **[in]** the circle to scale" in rendered
+    assert ":param factor: **[out]** receives the effective scale factor used" in rendered
 
 
 def test_generate_writes_pages_and_index(gen: Generator, tmp_path: Path) -> None:
@@ -953,6 +1023,19 @@ def test_related_functions_bust_the_class_page_fingerprint(fixture_db: Path) -> 
     con.commit()
     con.close()
     assert fingerprint() != before
+
+
+def test_related_tokens_are_not_limited_to_record_kinds(gen: Generator, store: Store) -> None:
+    # Regression for #303: gen.related() carries no kind restriction of its
+    # own, so a declared custom template may call it from a function (or any
+    # other) page, not just the bundled class.md.jinja's use of it on records.
+    # The wide fingerprint has to track that dependency too.
+    scale = _symbol(store, "geo::scale")
+    other = _symbol(store, "geo::Circle")
+    gen._related_by_name = {scale.qualified_name: [other]}  # noqa: SLF001
+    assert gen._related_tokens(scale) == [  # noqa: SLF001
+        _DEP_FIELD_SEP.join(("L", scale.usr, other.usr, other.qualified_name, other.content_hash)),
+    ]
 
 
 def test_file_page_fingerprint_busts_when_path_changes(fixture_db: Path) -> None:

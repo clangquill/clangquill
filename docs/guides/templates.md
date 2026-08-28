@@ -99,8 +99,10 @@ A template opts back in by declaring it, in a comment anywhere in the file:
 Declared templates are keyed on a wider fingerprint that covers every per-symbol
 field the documented template context exposes: the symbol row in full (spelling,
 display name, parent, documented flag, declaring file and line), its parameters,
-template parameters, comment, cross-references and enumerators, plus the same
-data for every symbol the page renders below it.
+template parameters, comment, cross-references, enumerators and the functions
+`gen.related(symbol)` returns (`\relates` is matched by name, so this is
+tracked for every kind, not only the record kinds the bundled templates call
+it on), plus the same data for every symbol the page renders below it.
 
 The declaration is a promise about the template, and it is yours to keep. It
 says: *this template renders only the page's own symbols and what `gen` reaches

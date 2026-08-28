@@ -709,7 +709,11 @@ TEST_CASE("only a doc comment documents a macro", "[parser]") {
         << "\n"
         << "/// Documented right above.\n"
         << "#define CQ_FIRST 3  // a trailing remark\n"
-        << "#define CQ_SECOND 4\n";
+        << "#define CQ_SECOND 4\n"
+        << "\n"
+        << "/* not documentation, directly above a doc block */\n"
+        << "/// Documented despite the plain block sitting right above.\n"
+        << "#define CQ_ADJACENT_BLOCK 5\n";
   }
 
   parser::ParseOptions opts;
@@ -750,6 +754,17 @@ TEST_CASE("only a doc comment documents a macro", "[parser]") {
   REQUIRE(second != nullptr);
   CHECK_FALSE(second->is_documented);
   CHECK(comment_of("CQ_SECOND").empty());
+
+  // Regression for #303: a non-doc `/* */` sitting on the line directly above
+  // a `///` block used to merge into it (both are comment tokens on
+  // consecutive first-of-line positions), and the merged block's leading `/*`
+  // made the whole thing read as non-doc -- losing the `///` documentation
+  // unless a blank line separated the two.
+  const auto* adjacent = find(m, "CQ_ADJACENT_BLOCK");
+  REQUIRE(adjacent != nullptr);
+  CHECK(adjacent->is_documented);
+  CHECK(comment_of("CQ_ADJACENT_BLOCK").find("despite the plain block") !=
+        std::string::npos);
 }
 
 TEST_CASE("umbrella batching attributes dependencies per member exactly",
@@ -924,6 +939,55 @@ TEST_CASE("headers with different compile-database commands are not batched toge
   for (const auto& d : m.diagnostics) {
     CHECK(d.text.find("no compilation database entry") == std::string::npos);
   }
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE(
+    "compile-database entries differing only in -o still share an umbrella batch",
+    "[parser]") {
+  // The grouping key (Parser::compile_flag_keys) compares what CompileDb::
+  // args_for answers, which already excludes -o and the other file-writing
+  // flags (writes_a_file, exercised directly by the "never writes the files
+  // it names" test above) -- so two headers, each with its own database
+  // entry, whose commands differ only in their object-file path are exactly
+  // equal-flags and must still land in one umbrella translation unit. #214's
+  // sibling test above pins the no-entry/borrowed-command case; this pins the
+  // two-own-entries case the mechanism was introduced for.
+  namespace fs = std::filesystem;
+  const fs::path dir = unique_temp_dir("clangquill-cc-o-only-diff-test");
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+
+  std::ofstream(dir / "a_defs.hpp")
+      << "#define CQ_SHARED_UNIT 1\n/// From a.\ninline int from_a() { return 1; }\n";
+  std::ofstream(dir / "b_uses.hpp")
+      << "#ifdef CQ_SHARED_UNIT\n/// From b.\ninline int from_b_batched() { return 2; }\n#endif\n";
+
+  {
+    // generic_string(): see the sibling batching test above.
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.generic_string() << "\", \"file\": \""
+       << (dir / "a_defs.hpp").generic_string()
+       << "\", \"arguments\": [\"c++\", \"-std=c++20\", \"-c\", \""
+       << (dir / "a_defs.hpp").generic_string() << "\", \"-o\", \""
+       << (dir / "a_defs.hpp.o").generic_string() << "\"]},"
+       << "{\"directory\": \"" << dir.generic_string() << "\", \"file\": \""
+       << (dir / "b_uses.hpp").generic_string()
+       << "\", \"arguments\": [\"c++\", \"-std=c++20\", \"-c\", \""
+       << (dir / "b_uses.hpp").generic_string() << "\", \"-o\", \""
+       << (dir / "b_uses.hpp.o").generic_string() << "\"]}]";
+  }
+
+  const std::vector<std::string> inputs{(dir / "b_uses.hpp").string(),
+                                        (dir / "a_defs.hpp").string()};
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+
+  const auto batched = parser::parse_files(inputs, opts);
+  // Visible only if both headers landed in the same translation unit.
+  CHECK(find(batched, "from_a") != nullptr);
+  CHECK(find(batched, "from_b_batched") != nullptr);
 
   fs::remove_all(dir);
 }

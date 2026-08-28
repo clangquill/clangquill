@@ -1039,6 +1039,15 @@ bool is_doc_block(const std::string& block) {
   return false;
 }
 
+// True for a line-comment token (`//`, `///`, `//!`); false for a block
+// comment (`/*`, `/**`, `/*!`). Adjacent tokens of different families must not
+// merge into one block below: a non-doc `/* ... */` sitting directly above a
+// `///` run is not that run's opening line, and merging them would carry the
+// combined block's non-doc leading marker over the doc-worthy one, losing it.
+bool is_line_comment(const std::string& spelling) {
+  return spelling.size() >= 2 && spelling[1] == '/';
+}
+
 // Tokenizes one source file and feeds free-floating comment blocks to the group
 // scanner so `\defgroup` definitions (and their following description lines)
 // become group rows. Consecutive line comments (`///`) tokenize separately, so
@@ -1064,6 +1073,7 @@ void scan_free_comments(CXTranslationUnit tu, CXFile file, VisitCtx& ctx) {
 
   std::string block;
   unsigned last_line = 0;
+  bool block_is_line_comment = false;
   auto flush = [&]() {
     if (block.empty()) return;
     scan_group_definitions(block, normalized_file, ctx);
@@ -1080,15 +1090,22 @@ void scan_free_comments(CXTranslationUnit tu, CXFile file, VisitCtx& ctx) {
   for (unsigned t = 0; t < count; ++t) {
     if (clang_getTokenKind(tokens[t]) != CXToken_Comment) continue;
     TokenStart start = token_start(tu, tokens[t]);
+    std::string spelling = to_string(clang_getTokenSpelling(tu, tokens[t]));
+    const bool token_is_line_comment = is_line_comment(spelling);
     // A block is a run of comment tokens on consecutive lines, each of them
-    // the first thing on its line. A comment trailing code (`#define A 1  //
-    // note`) is not a continuation of the block above: merging it moved the
-    // block's key past the very line it documents.
+    // the first thing on its line, all of the same // vs /* family. A comment
+    // trailing code (`#define A 1  // note`) is not a continuation of the
+    // block above: merging it moved the block's key past the very line it
+    // documents. A family change (a non-doc /* */ immediately above a ///
+    // run, or vice versa) is not a continuation either: the leading marker
+    // that decides is_doc_block() belongs to one comment, not both.
     const bool continues = start.line <= last_line + 1 &&
-                           lines.starts_line(start.line, start.column);
+                           lines.starts_line(start.line, start.column) &&
+                           (block.empty() || token_is_line_comment == block_is_line_comment);
     if (!block.empty() && !continues) flush();
-    if (!block.empty()) block += '\n';
-    block += to_string(clang_getTokenSpelling(tu, tokens[t]));
+    if (block.empty()) block_is_line_comment = token_is_line_comment;
+    else block += '\n';
+    block += spelling;
     last_line = token_line(tu, tokens[t], /*end=*/true);
   }
   flush();
