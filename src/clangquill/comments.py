@@ -171,6 +171,20 @@ def model_from_fields(rows: Iterable[tuple[str, str, str]]) -> CommentModel:
 
 # --- Default Doxygen parser (pure Python) ------------------------------------
 
+_WS_RUN_RE = re.compile(r"\s+")
+
+
+def _normalize_ws(text: str) -> str:
+    """Collapse whitespace runs to single spaces and trim the ends.
+
+    Mirrors ``normalize_ws`` in the C++ parser. A description wrapped over
+    several comment lines keeps whatever indentation each continuation line
+    carried past its marker (``*     enough to hold``), and the two parsers have
+    to agree on the text that reaches ``comment_fields``.
+    """
+    return _WS_RUN_RE.sub(" ", text).strip()
+
+
 _MARKER_RE = re.compile(r"^\s*(/\*\*<|/\*!<|/\*\*|/\*!|/\*|///<|///|//!<|//!|//)")
 # A command word, optionally carrying the attribute Doxygen glues onto it: a
 # direction on ``@param[in,out] buf ...``, a language on ``@code{.py}``. Without
@@ -528,7 +542,7 @@ class _Scan:
 
     def flush(self) -> None:
         """Close the open section, routing what it collected into the model."""
-        text = _render_inline_markup(" ".join(self.buf).strip())
+        text = _render_inline_markup(_normalize_ws(" ".join(self.buf)))
         self.buf.clear()
         if self.cmd is None:
             if text:

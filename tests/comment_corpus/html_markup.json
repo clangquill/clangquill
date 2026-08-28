@@ -1,0 +1,29 @@
+{
+    "description": "Inline HTML is Markdown's own escape hatch, so a tag written in a comment reaches the page as written rather than being stripped or escaped. The C++ parser's other path deletes libclang's HTML tag nodes unless they are handled; this pins the raw path, which sees the tags as plain text.",
+    "raw": "/**\n * @brief A <b>bold</b> summary.\n *\n * Call <code>Widget::spin()</code> to spin, or <em>don't</em>.\n * <ul><li>first</li><li>second</li></ul>\n */\n",
+    "expected": {
+        "brief": "A <b>bold</b> summary.",
+        "detail": [
+            "Call <code>Widget::spin()</code> to spin, or <em>don't</em>. <ul><li>first</li><li>second</li></ul>"
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {}
+    }
+}

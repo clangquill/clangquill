@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -32,6 +33,28 @@ def _assert_golden(name: str, text: str) -> None:
     assert text == expected
 
 
+def _assert_golden_tree(name: str, out: Path) -> None:
+    """Byte-compare every page under ``out`` against ``golden/<name>/``.
+
+    The page *set* is asserted before the bytes: a page that appears or stops
+    being generated is a regression the per-file comparison alone would miss.
+    """
+    root = GOLDEN_DIR / name
+    produced = sorted(path.relative_to(out).as_posix() for path in out.rglob("*.md"))
+    if os.environ.get(REGEN_ENV):
+        # Wiped rather than overwritten: a page the generator no longer emits
+        # would otherwise linger and keep the set assertion below green.
+        shutil.rmtree(root, ignore_errors=True)
+        for rel in produced:
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text((out / rel).read_text(encoding="utf-8"), encoding="utf-8")
+    stored = sorted(path.relative_to(root).as_posix() for path in root.rglob("*.md"))
+    assert produced == stored
+    for rel in produced:
+        assert (out / rel).read_text(encoding="utf-8") == (root / rel).read_text(encoding="utf-8"), rel
+
+
 @pytest.fixture
 def store(fixture_db: Path) -> Iterator[Store]:
     with Store.open(fixture_db) as opened:
@@ -52,6 +75,75 @@ def _symbol(store: Store, qualified_name: str) -> Symbol:
 def test_namespace_golden(gen: Generator, store: Store) -> None:
     rendered = gen.render_symbol(_symbol(store, "geo"), level=1)
     _assert_golden("geo.md", rendered)
+
+
+# One byte-compared page tree per ``group_by`` mode, together covering every
+# bundled template: ``namespace``/``class``/``function``/``enum``/``typedef``/
+# ``variable`` (geo), ``file``, ``namespace-hub``/``namespace-page``/
+# ``member-page`` (the namespace split), ``concept``/``macro``/``group`` (m7),
+# ``degraded``, ``index``, and the three partials they include. Substring
+# assertions elsewhere in this file say a page mentions the right things; these
+# say it is formatted, ordered and spaced the way it was last reviewed.
+GOLDEN_TREES = [
+    ("geo_file", "fixture_db", "file"),
+    ("geo_class", "fixture_db", "class"),
+    ("geo_namespace", "fixture_db", "namespace"),
+    ("ns_namespace", "ns_db", "namespace"),
+    ("m7_symbol", "m7_db", "symbol"),
+    ("degraded_symbol", "degraded_db", "symbol"),
+]
+
+
+@pytest.mark.parametrize(("golden", "db_fixture", "group_by"), GOLDEN_TREES, ids=[t[0] for t in GOLDEN_TREES])
+def test_generated_pages_match_golden(
+    request: pytest.FixtureRequest,
+    golden: str,
+    db_fixture: str,
+    group_by: str,
+    tmp_path: Path,
+) -> None:
+    db = request.getfixturevalue(db_fixture)
+    out = tmp_path / "api"
+    with Store.open(db) as store:
+        Generator(store).generate(out, group_by=group_by)
+    _assert_golden_tree(golden, out)
+
+
+# The bundled templates the trees above render between them, one entry per
+# ``templates/*.md.jinja``. Pinned rather than derived: Jinja does not report
+# which templates a render touched, so this is the list a reviewer checks.
+TEMPLATES_RENDERED_BY_GOLDEN_TREES = frozenset(
+    {
+        "class.md.jinja",
+        "concept.md.jinja",
+        "degraded.md.jinja",
+        "enum.md.jinja",
+        "file.md.jinja",
+        "function.md.jinja",
+        "group.md.jinja",
+        "index.md.jinja",
+        "macro.md.jinja",
+        "member-page.md.jinja",
+        "namespace-hub.md.jinja",
+        "namespace-page.md.jinja",
+        "namespace.md.jinja",
+        "typedef.md.jinja",
+        "variable.md.jinja",
+    },
+)
+
+
+def test_every_bundled_template_is_behind_a_golden_tree() -> None:
+    """A newly bundled template must gain a golden page, not slip in untested.
+
+    Substring assertions are what a template used to be checked by, and they
+    pass through any amount of formatting drift; this fails the moment a
+    template exists that no byte-compared page renders.
+    """
+    templates = Path(__file__).parents[1] / "src" / "clangquill" / "templates"
+    bundled = {path.name for path in templates.glob("*.md.jinja")}
+    assert bundled
+    assert bundled == TEMPLATES_RENDERED_BY_GOLDEN_TREES
 
 
 def test_fence_widens_past_the_longest_backtick_run_in_content() -> None:

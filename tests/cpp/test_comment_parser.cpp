@@ -560,6 +560,72 @@ TEST_CASE("inline markup and HTML reach the reader", "[comments]") {
   CHECK(prose.find("{cpp:any}`some-page`") == std::string::npos);
 }
 
+TEST_CASE("a //! block documents the entity it precedes", "[comments]") {
+  // `//!` is one of the four markers strip_line_markers knows, but the corpus
+  // only ever pinned its post-item `//!<` form -- nothing covered a `//!` block
+  // reaching libclang's parsed path and coming back out as comment_fields.
+  auto m = parse_fixture("doxygen.hpp");
+  const auto* spin = find(m, "doc::spin");
+  REQUIRE(spin != nullptr);
+  CHECK(spin->is_documented);
+
+  auto fs = fields_of(m, spin->usr);
+  const Field* brief = field(fs, "brief");
+  REQUIRE(brief != nullptr);
+  CHECK(brief->value == "Spins the widget.");
+  const Field* turns = field(fs, "param", "turns");
+  REQUIRE(turns != nullptr);
+  CHECK(turns->value == "how many turns to spin");
+}
+
+TEST_CASE("an overload's declaration is not the entity's summary", "[comments]") {
+  // Doxygen lets `\overload` carry the declaration it is an overload of. The
+  // summary beside it is the entity's own; nothing may promote the declaration
+  // over it. (Where the declaration itself lands is pinned by the shared
+  // corpus, which reaches the raw path this fixture does not.)
+  auto m = parse_fixture("doxygen.hpp");
+  const auto* twice = find(m, "doc::spin_twice");
+  REQUIRE(twice != nullptr);
+
+  auto fs = fields_of(m, twice->usr);
+  const Field* brief = field(fs, "brief");
+  REQUIRE(brief != nullptr);
+  CHECK(brief->value == "Spins the widget twice.");
+}
+
+TEST_CASE("a wrapped description collapses to one line on both parse paths",
+          "[comments]") {
+  // A description continued on the next comment line keeps whatever indentation
+  // that line carried past its marker. The indentation is layout, not text, so
+  // whitespace runs collapse to a single space -- and both parse paths, plus
+  // the Python parser the corpus holds to the same fixture, have to agree on
+  // the string that reaches comment_fields.
+  const std::string kBrief =
+      "Copies bytes between two buffers, stopping at the first null byte.";
+  const std::string kParam =
+      "the buffer written to, which must be large enough to hold the whole "
+      "string";
+
+  auto parsed = parse_fixture("doxygen.hpp");
+  const auto* copy = find(parsed, "doc::copy_string");
+  REQUIRE(copy != nullptr);
+  auto fs = fields_of(parsed, copy->usr);
+  REQUIRE(field(fs, "brief") != nullptr);
+  CHECK(field(fs, "brief")->value == kBrief);
+  REQUIRE(field(fs, "param", "destination") != nullptr);
+  CHECK(field(fs, "param", "destination")->value == kParam);
+
+  // `\ingroup` forces the raw path for this one.
+  auto raw = parse_fixture("structural.hpp");
+  const auto* wrapped = find(raw, "wrapped_helper");
+  REQUIRE(wrapped != nullptr);
+  auto rfs = fields_of(raw, wrapped->usr);
+  REQUIRE(field(rfs, "brief") != nullptr);
+  CHECK(field(rfs, "brief")->value == kBrief);
+  REQUIRE(field(rfs, "param", "destination") != nullptr);
+  CHECK(field(rfs, "param", "destination")->value == kParam);
+}
+
 TEST_CASE("a parsed comment stores its format alongside its fields",
           "[comments]") {
   auto m = parse_fixture("doxygen.hpp");

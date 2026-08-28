@@ -1,0 +1,33 @@
+{
+    "description": "A description wrapped over several lines is one paragraph, and the indentation a continuation line carries past its marker is layout, not text: both parsers collapse whitespace runs to a single space. Also the only fixture opening with `/*!`.",
+    "raw": "/*!\n * @brief Copies bytes between two buffers, stopping at the\n *        first null byte.\n *\n * @param destination the buffer written to, which must be large\n *                    enough to hold the whole string\n * @return the number of bytes copied\n */\n",
+    "expected": {
+        "brief": "Copies bytes between two buffers, stopping at the first null byte.",
+        "detail": [],
+        "params": [
+            {
+                "name": "destination",
+                "description": "the buffer written to, which must be large enough to hold the whole string",
+                "direction": ""
+            }
+        ],
+        "tparams": [],
+        "returns": "the number of bytes copied",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {}
+    }
+}

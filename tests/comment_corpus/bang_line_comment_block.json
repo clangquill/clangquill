@@ -1,0 +1,35 @@
+{
+    "description": "`//!` opens a documentation block the same way `///` does -- the post-item `//!<` fixtures cover only the trailing form. No line of a `//` block carries a continuation marker, so a `*` in one is content.",
+    "raw": "//! @brief Spins the widget.\n//!\n//! * a bulleted note about spinning\n//!\n//! @param turns how many turns to spin\n",
+    "expected": {
+        "brief": "Spins the widget.",
+        "detail": [
+            "* a bulleted note about spinning"
+        ],
+        "params": [
+            {
+                "name": "turns",
+                "description": "how many turns to spin",
+                "direction": ""
+            }
+        ],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {}
+    }
+}
