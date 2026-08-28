@@ -172,26 +172,30 @@ ParseResult parse_inputs(const std::vector<std::string>& inputs,
     // The batches arrive in canonical order on this thread, so the rows land in
     // the same sequence whatever the job count, and the counts below add up the
     // same totals the merged module used to report.
-    clangquill::store::SqliteStore store(db_path);
+    //
+    // write_streamed_full_parse builds the stream into a temporary database and
+    // only replaces db_path once every batch has landed -- this binding may be
+    // pointed at a database an earlier parse filled (#203), and a hard parse
+    // failure or a killed process partway through the stream must leave that
+    // existing IR untouched rather than a mix of old and partial rows (#317).
     const clangquill::store::Meta meta = clangquill::store::Meta::current();
-    // The batches accumulate, so the replacing semantics a one-shot `write`
-    // has — this binding may be pointed at a database an earlier parse filled
-    // (#203) — come from clearing once, here, before the first batch lands.
-    store.clear();
-    std::unordered_set<std::string> files_seen;
-    auto sink = [&](clangquill::model::ParsedModule&& part) {
-      res.symbol_count += static_cast<int>(part.symbols.size());
-      res.reference_count += static_cast<int>(part.references.size());
-      // Counted here rather than from the rows: batches re-parse the shared
-      // `#include` closure, and the file count has always been the distinct
-      // paths across the whole parse.
-      for (const auto& file : part.files) files_seen.insert(file.path);
-      store.write_part(part, meta);
-    };
-    const clangquill::model::ParsedModule diagnostics_only =
-        clangquill::parser::parse_files(inputs, to_core_options(opt), &tu_files,
-                                        &tu_ok, sink);
-    res.file_count = static_cast<int>(files_seen.size());
+    clangquill::model::ParsedModule diagnostics_only;
+    clangquill::store::write_streamed_full_parse(
+        db_path, meta, [&](const clangquill::store::BatchSink& write_batch) {
+          std::unordered_set<std::string> files_seen;
+          auto sink = [&](clangquill::model::ParsedModule&& part) {
+            res.symbol_count += static_cast<int>(part.symbols.size());
+            res.reference_count += static_cast<int>(part.references.size());
+            // Counted here rather than from the rows: batches re-parse the
+            // shared `#include` closure, and the file count has always been
+            // the distinct paths across the whole parse.
+            for (const auto& file : part.files) files_seen.insert(file.path);
+            write_batch(std::move(part));
+          };
+          diagnostics_only = clangquill::parser::parse_files(
+              inputs, to_core_options(opt), &tu_files, &tu_ok, sink);
+          res.file_count = static_cast<int>(files_seen.size());
+        });
     collect_diagnostics(res, diagnostics_only);
   }
 
