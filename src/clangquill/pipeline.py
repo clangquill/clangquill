@@ -675,18 +675,24 @@ def _rendered_files(
     eligible, wide = _page_cache_mode(config, base_dir)
     memoize = cache is not None and eligible
     rendered: list[tuple[str, str]] = []
+    # Only the pages this build actually rendered need writing back: a page
+    # replayed from the cache is already stored under the very key it was
+    # replayed by. ``stems`` carries the rest so the cache can still prune the
+    # pages that left the render.
     records: dict[str, tuple[str, str]] = {}
+    stems: list[str] = []
     for plan in plans:
         key = ""
         text: str | None = None
         if memoize:
             key = hash_text(render_fingerprint + generator.page_fingerprint(plan, wide=wide))
             text = cache.cached_page(plan.stem, key)
+            stems.append(plan.stem)
         if text is None:
             text = plan.render()
+            if memoize:
+                records[plan.stem] = (key, text)
         rendered.append((f"{plan.stem}.md", text))
-        if memoize:
-            records[plan.stem] = (key, text)
 
     index_stem = config.root_document
     index_key = ""
@@ -704,14 +710,17 @@ def _rendered_files(
             ),
         )
         index_text = cache.cached_page(index_stem, index_key)
+        stems.append(index_stem)
     if index_text is None:
         index_text = generator.render_index(plans, toctree_maxdepth=config.toctree_maxdepth)
+        if memoize:
+            records[index_stem] = (index_key, index_text)
     rendered.append((f"{index_stem}.md", index_text))
 
     if memoize:
-        records[index_stem] = (index_key, index_text)
-        # Rewriting the whole table prunes pages whose symbol vanished.
-        cache.record_pages(records)
+        # ``stems`` is the render's whole page set, so pages whose symbol
+        # vanished are still pruned; ``records`` holds only the re-rendered ones.
+        cache.record_pages(records, stems=stems)
     return rendered
 
 

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Collection, Iterable, Iterator, Mapping
 
 # Bump when the cache schema/semantics below change incompatibly; a mismatch
 # transparently discards the old cache and forces a full rebuild.
@@ -569,14 +569,30 @@ class BuildCache:
         ).fetchone()
         return row["text"] if row is not None else None
 
-    def record_pages(self, pages: Mapping[str, tuple[str, str]]) -> None:
-        """Replace the page cache with ``{page_stem: (key_hash, text)}``.
+    def record_pages(self, pages: Mapping[str, tuple[str, str]], *, stems: Collection[str] | None = None) -> None:
+        """Upsert ``{page_stem: (key_hash, text)}``, pruning pages ``stems`` omits.
 
-        The table is rewritten wholesale so a page that disappeared from the
-        render (its symbol vanished) drops out, matching the render's current
-        page set exactly.
+        Only the pages handed in are written. An incremental build re-renders a
+        handful of pages and replays the rest from this table, and a replayed
+        page's row already holds the key and text it was replayed under — so
+        rewriting the whole corpus would spend an O(project) write (every page's
+        full text) on an O(change) render.
+
+        ``stems`` names every page the render produced, including the ones it
+        replayed. Rows outside it are deleted, so a page whose symbol vanished
+        still drops out. Omit it and ``pages`` is taken to be the whole page
+        set, which is what a build that rendered everything hands over.
         """
-        self._con.execute("DELETE FROM page_cache")
+        keep = set(pages) if stems is None else set(stems)
+        # Read the stems alone rather than deleting by a NOT IN list: the row
+        # count is the page count, the text never leaves SQLite, and the delete
+        # that follows is normally empty.
+        stale = [
+            (row["page_stem"],)
+            for row in self._con.execute("SELECT page_stem FROM page_cache")
+            if row["page_stem"] not in keep
+        ]
+        self._con.executemany("DELETE FROM page_cache WHERE page_stem = ?", stale)
         self._con.executemany(
             "INSERT OR REPLACE INTO page_cache(page_stem, key_hash, text) VALUES(?, ?, ?)",
             [(stem, key_hash, text) for stem, (key_hash, text) in pages.items()],

@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from typer.testing import CliRunner
@@ -15,6 +16,9 @@ from clangquill.cache import BuildCache, file_sha256, hash_text
 from clangquill.config import Config
 from clangquill.pipeline import MANIFEST_NAME, build
 from clangquill.store import Store
+
+if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping
 
 
 def _store_symbols(db_path: Path) -> list[object]:
@@ -472,6 +476,22 @@ def test_incremental_page_cache_replays_unchanged_pages(
 
     monkeypatch.setattr(BuildCache, "cached_page", spy)
 
+    # ... and on what the render writes back: the pages it rendered, plus the
+    # full page set so vanished pages are still pruned.
+    recorded: list[tuple[list[str], list[str]]] = []
+    real_record = BuildCache.record_pages
+
+    def record_spy(
+        self: BuildCache,
+        pages: Mapping[str, tuple[str, str]],
+        *,
+        stems: Collection[str] | None = None,
+    ) -> None:
+        recorded.append((sorted(pages), sorted(stems if stems is not None else pages)))
+        real_record(self, pages, stems=stems)
+
+    monkeypatch.setattr(BuildCache, "record_pages", record_spy)
+
     (project / "alpha.hpp").write_text("/// alpha ns edited\nnamespace alpha { /// f\nint f(); }\n")
     result = build(config, base_dir=project)
 
@@ -482,6 +502,8 @@ def test_incremental_page_cache_replays_unchanged_pages(
     assert "index" in hits
     assert result.pages_written == ["alpha.md"]
     assert "alpha ns edited" in (project / "api" / "alpha.md").read_text()
+    # Written back: only alpha. Named as still present: every page.
+    assert recorded == [(["alpha"], ["alpha", "beta", "index"])]
 
 
 def test_page_cache_mode_follows_the_template_declaration(tmp_path: Path) -> None:
