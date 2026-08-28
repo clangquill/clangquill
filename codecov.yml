@@ -1,3 +1,4 @@
+---
 # Makes the coverage.yml/cpp_tests.yml split explicit: pytest uploads under
 # flag `python`, ctest under flag `cpp` (see the "Collect coverage"/"Upload
 # coverage" steps in each workflow). Without this file codecov falls back to
@@ -26,6 +27,5 @@ coverage:
       cpp:
         flags: [cpp]
         informational: true
-
 comment:
-  layout: "header, flags, diff, files"
+  layout: header, flags, diff, files
