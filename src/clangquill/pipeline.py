@@ -881,14 +881,14 @@ def _parse_status(
         status = ParseStatus(current=False)
     if (status.current or status.stale_inputs is not None) and not _ir_is_readable(ir_path):
         # Both remaining paths read the cached IR: the noop shortcut renders
-        # from it, the partial re-parse rewrites the stale TUs' rows in it. A truncated
-        # file (killed build, full disk) or one left by an incompatible schema
-        # version would fail every later build with a raw sqlite3 traceback
-        # until the user deleted the cache directory by hand. Discard it and pay
-        # for one full parse instead — the same recovery the bookkeeping
-        # database already performs. The rest of the cache is kept: it describes
-        # the pages on disk, which are still good, so only the pages the fresh
-        # parse actually changes are rewritten.
+        # from it, the partial re-parse rewrites the stale TUs' rows inside it.
+        # A truncated file (killed build, full disk) or one left by an
+        # incompatible schema version would fail every later build with a raw
+        # sqlite3 traceback until the user deleted the cache directory by hand.
+        # Discard it and pay for one full parse instead — the same recovery the
+        # bookkeeping database already performs. The rest of the cache is kept:
+        # it describes the pages on disk, which are still good, so only the
+        # pages the fresh parse actually changes are rewritten.
         ir_path.unlink(missing_ok=True)
         status = ParseStatus(current=False)
     return status
