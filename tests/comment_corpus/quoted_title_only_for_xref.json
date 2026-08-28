@@ -1,0 +1,27 @@
+{
+    "description": "The quoted-title link-text rewrite (`@ref target \"a title\"` -> `title <target>`) applies only to cross-reference commands; on a non-xref command like @c the quote is just prose that happens to follow the decorated word, so it stays outside the markup (see issue #300).",
+    "raw": "/// @brief Uses @c foo \"just a quote\" after it.\n",
+    "expected": {
+        "brief": "Uses `foo` \"just a quote\" after it.",
+        "detail": [],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "custom": {},
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": []
+    }
+}
