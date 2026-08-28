@@ -47,6 +47,27 @@ class SqliteStore {
   /// @param meta Metadata stored alongside the IR.
   void write(const model::ParsedModule& module, const Meta& meta);
 
+  /// @brief Writes one batch of a streamed full parse, in its own transaction.
+  ///
+  /// A full parse hands its IR over batch by batch as the parser produces it,
+  /// so peak memory is a couple of batches rather than the whole project's IR.
+  /// Unlike @ref write these calls accumulate, which is what lets the stream
+  /// build one database: files are upserted, so a header a previous batch
+  /// already wrote keeps the id that batch's symbols reference, and every
+  /// other table is keyed by USR and written with `INSERT OR REPLACE` or a
+  /// non-destructive upsert. Nothing is ever deleted here, so a caller
+  /// replacing an existing parse calls @ref clear once before the first
+  /// batch; refreshing part of an IR in place is @ref write_tus.
+  /// @param module The batch's IR.
+  /// @param meta Metadata stored alongside the IR.
+  void write_part(const model::ParsedModule& module, const Meta& meta);
+
+  /// @brief Deletes every IR row, in a single transaction.
+  ///
+  /// Leaves the schema and the `meta` rows in place. A streamed full parse
+  /// calls this once up front to get the replacing semantics @ref write has.
+  void clear();
+
   /// @brief Re-writes the re-parsed translation units' rows into an existing DB.
   ///
   /// Replaces only the IR sourced from @p replaced_files (plus any file the
@@ -90,9 +111,8 @@ class SqliteStore {
   void put_meta(const Meta& meta);
   /// Deletes every row from every IR table, so a full @ref write starts from
   /// an empty database even when @ref path already held a previous parse.
+  /// Assumes a transaction is already open.
   void clear_all();
-  /// Inserts @p module's files (assumes an empty `files` table) and returns ids.
-  FileIds insert_files(const model::ParsedModule& module);
   /// Upserts @p module's files (insert-or-update on path) and returns their ids.
   FileIds upsert_files(const model::ParsedModule& module);
   /// Resolves the ids of the files whose rows a write_tus call must replace.

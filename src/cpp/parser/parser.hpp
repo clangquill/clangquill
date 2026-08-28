@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -196,6 +197,20 @@ class Parser {
                                     model::ParsedModule& out) const;
 };
 
+/// @brief Receives one batch's IR from @ref parse_files as it is produced.
+///
+/// Lets a caller consume the parse incrementally — writing each batch to the
+/// store as it lands — instead of holding the whole project's IR in memory
+/// until every batch is done. Batches arrive in canonical batch order on the
+/// thread that called parse_files, one at a time, so a sink needs no locking
+/// and sees the same sequence whatever the job count. The IR is moved in: the
+/// sink owns it and it is freed as soon as the sink returns.
+///
+/// Diagnostics are not part of a batch's IR — they are deduplicated across
+/// batches and returned by parse_files instead. An exception thrown by a sink
+/// propagates out of parse_files once the workers have been joined.
+using PartSink = std::function<void(model::ParsedModule&&)>;
+
 /// @brief Parses every input file and merges the per-batch IR into one module.
 ///
 /// Inputs are grouped into batches of `options.tu_batch` (see ParseOptions) and
@@ -225,10 +240,15 @@ class Parser {
 ///        in for per-TU incremental re-parses.
 /// @param tu_parsed Optional sink, sized to and indexed by @p inputs, flagging
 ///        inputs whose translation unit hard-failed as `false`.
-/// @return The merged IR for all inputs.
+/// @param part_sink Optional streaming sink (see @ref PartSink). When set, the
+///        per-batch IR is handed over as it is produced instead of being merged,
+///        and the returned module carries the diagnostics alone.
+/// @return The merged IR for all inputs, or -- with @p part_sink -- the merged
+///         diagnostics only.
 model::ParsedModule parse_files(const std::vector<std::string>& inputs,
                                 const ParseOptions& options,
                                 std::vector<std::vector<std::string>>* tu_files = nullptr,
-                                std::vector<bool>* tu_parsed = nullptr);
+                                std::vector<bool>* tu_parsed = nullptr,
+                                const PartSink& part_sink = {});
 
 }  // namespace clangquill::parser

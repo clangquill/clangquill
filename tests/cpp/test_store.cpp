@@ -287,6 +287,86 @@ TEST_CASE("SqliteStore write against a non-empty DB replaces prior contents",
   std::remove(path.c_str());
 }
 
+TEST_CASE("successive write_part calls accumulate one batch at a time",
+          "[store]") {
+  // A full parse streams its batches into the store as they are parsed, so
+  // repeated writes have to add up — and a header two batches both saw must
+  // keep the one `files` row its symbols on either side are anchored to.
+  std::string path = temp_db_path();
+  model::SourceFile shared;
+  shared.path = "/tmp/shared.hpp";
+  shared.sha256 = std::string(64, 'c');
+  shared.size_bytes = 3;
+
+  model::ParsedModule first;
+  first.files.push_back(shared);
+  first.symbols.push_back(group_symbol("c:@F@one", shared.path));
+
+  model::ParsedModule second;
+  second.files.push_back(shared);
+  second.symbols.push_back(group_symbol("c:@F@two", shared.path));
+
+  {
+    store::SqliteStore writer(path);
+    writer.write_part(first, store::Meta::current());
+    writer.write_part(second, store::Meta::current());
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  CHECK(got.files.size() == 1);
+  REQUIRE(got.symbols.size() == 2);
+  for (const auto& s : got.symbols) {
+    CHECK(s.location.file_path == shared.path);
+  }
+
+  std::remove(path.c_str());
+}
+
+TEST_CASE("clear before a streamed parse drops the previous one", "[store]") {
+  // write_part accumulates, so a streamed full parse gets the replacing
+  // semantics of write by clearing once before it hands over the first batch.
+  std::string path = temp_db_path();
+  model::SourceFile stale;
+  stale.path = "/tmp/stale.hpp";
+  stale.sha256 = std::string(64, 'd');
+  stale.size_bytes = 5;
+
+  model::ParsedModule previous;
+  previous.files.push_back(stale);
+  previous.symbols.push_back(group_symbol("c:@F@gone", stale.path));
+
+  model::SourceFile fresh;
+  fresh.path = "/tmp/fresh.hpp";
+  fresh.sha256 = std::string(64, 'e');
+  fresh.size_bytes = 7;
+
+  model::ParsedModule batch;
+  batch.files.push_back(fresh);
+  batch.symbols.push_back(group_symbol("c:@F@kept", fresh.path));
+
+  {
+    store::SqliteStore writer(path);
+    writer.write(previous, store::Meta::current());
+  }
+  {
+    store::SqliteStore writer(path);
+    writer.clear();
+    writer.write_part(batch, store::Meta::current());
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  REQUIRE(got.files.size() == 1);
+  CHECK(got.files[0].path == fresh.path);
+  REQUIRE(got.symbols.size() == 1);
+  CHECK(got.symbols[0].usr == "c:@F@kept");
+
+  std::remove(path.c_str());
+}
+
 TEST_CASE("SqliteStore write_tus replaces only the re-parsed file's rows",
           "[store]") {
   // Two files in the IR: one to re-parse, one that must survive untouched.
