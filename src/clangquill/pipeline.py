@@ -40,7 +40,6 @@ from __future__ import annotations
 import glob
 import json
 import os
-import shutil
 import sqlite3
 import tempfile
 import time
@@ -835,7 +834,7 @@ def _parse_status(
         status = ParseStatus(current=False)
     if (status.current or status.stale_inputs is not None) and not _ir_is_readable(ir_path):
         # Both remaining paths read the cached IR: the noop shortcut renders
-        # from it, the partial re-parse writes into a copy of it. A truncated
+        # from it, the partial re-parse rewrites the stale TUs' rows in it. A truncated
         # file (killed build, full disk) or one left by an incompatible schema
         # version would fail every later build with a raw sqlite3 traceback
         # until the user deleted the cache directory by hand. Discard it and pay
@@ -1081,13 +1080,18 @@ def _parse_tus_into(
 
     One batched writer call re-parses every stale translation unit (in parallel,
     like a full parse) and replaces just those units' rows, reusing every other
-    TU's. The set of stale inputs must land all-or-nothing: the re-parse runs
-    against a staged copy of ``ir_path`` that replaces the original only once
-    every stale input has succeeded; on any failure the original IR (and the
-    cache, which is only updated afterwards) is left untouched, forcing a clean
-    rebuild next run. Returns the fresh dependency map, the error-severity
-    diagnostics and the full diagnostic records — the latter two covering the
-    re-parsed units only, since nothing else was parsed.
+    TU's. Returns the fresh dependency map, the error-severity diagnostics and
+    the full diagnostic records — the latter two covering the re-parsed units
+    only, since nothing else was parsed.
+
+    The stale set lands all-or-nothing, and the writer already guarantees that
+    without a staging copy: every input is parsed before the IR is opened at
+    all, a hard parse failure raises before the first write, and the row
+    replacement itself runs in one ``BEGIN IMMEDIATE`` transaction that rolls
+    back on any error or on a killed process. Copying the whole database first
+    only added an O(project) read+write to every O(change) rebuild. A failure
+    therefore leaves the IR (and the cache, which is only updated afterwards) as
+    it was, forcing a clean rebuild next run.
 
     ``dropped_candidates`` lists the files the previous parse attributed only to
     ``stale`` (see :meth:`BuildCache.deps_only_from`); those the fresh parse no
@@ -1101,14 +1105,7 @@ def _parse_tus_into(
         # The caller never reuses ``options`` after this call, so mutating the
         # incremental path's copy cannot leak into a full rebuild.
         options.tu_batch = _INCREMENTAL_TU_BATCH
-    staged = _new_temp_db(ir_path.parent)
-    try:
-        shutil.copyfile(ir_path, staged)
-        result = _core.parse_tus_to_sqlite(stale, str(staged), options, dropped_candidates or [])
-    except BaseException:
-        staged.unlink(missing_ok=True)
-        raise
-    staged.replace(ir_path)
+    result = _core.parse_tus_to_sqlite(stale, str(ir_path), options, dropped_candidates or [])
     return _tu_deps(result), result.diagnostics, _records(result)
 
 

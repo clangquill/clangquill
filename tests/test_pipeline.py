@@ -783,9 +783,11 @@ def test_incremental_partial_parse_failure_is_atomic(
     with pytest.raises(RuntimeError, match="boom"):
         build(config, base_dir=project)
 
-    # The staged copy was discarded: the on-disk IR is byte-for-byte unchanged.
+    # The writer parses every input before it opens the IR and replaces the
+    # stale rows in one transaction, so a failure leaves the on-disk IR
+    # byte-for-byte unchanged.
     assert ir.read_bytes() == ir_before
-    # Sanity: the staged temp DB was cleaned up, not left lingering.
+    # Sanity: no temp DB was left lingering in the cache directory.
     assert not list((project / ".cache").glob("tmp*.sqlite"))
 
     # With the patch removed, the next build recovers and re-parses both inputs.
@@ -793,6 +795,42 @@ def test_incremental_partial_parse_failure_is_atomic(
     recovered = build(config, base_dir=project)
     assert recovered.parsed
     assert {"alpha.md", "beta.md"}.issubset(set(recovered.pages_written))
+
+
+@requires_libclang
+def test_incremental_partial_parse_writes_the_ir_in_place(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The partial re-parse used to run against a full copy of the IR, so a
+    # one-file edit paid an O(project) read+write before parsing anything. The
+    # writer's own transaction gives the same all-or-nothing (see
+    # test_incremental_partial_parse_failure_is_atomic), so nothing is staged.
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    (project / "beta.hpp").write_text("/// beta ns\nnamespace beta { /// g\nint g(); }\n")
+    config = Config(input=["alpha.hpp", "beta.hpp"], output_dir="api", cache_dir=".cache")
+    build(config, base_dir=project)
+
+    # Every staging path goes through _new_temp_db, so counting its calls covers
+    # a copy reintroduced under any name.
+    staged: list[object] = []
+    real_temp_db = pipeline._new_temp_db  # noqa: SLF001
+
+    def spy(directory: Path | None = None) -> Path:
+        path = real_temp_db(directory)
+        staged.append(path)
+        return path
+
+    monkeypatch.setattr(pipeline, "_new_temp_db", spy)
+
+    (project / "alpha.hpp").write_text("/// alpha ns edit\nnamespace alpha { /// f\nint f(); }\n")
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    assert result.pages_written == ["alpha.md"]
+    assert staged == []
+    # beta's rows came through the in-place write untouched.
+    assert "beta ns" in (project / "api" / "beta.md").read_text()
 
 
 @requires_libclang
