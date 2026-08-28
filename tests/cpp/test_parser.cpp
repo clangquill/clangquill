@@ -1,8 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <set>
 #include <string>
 #include <vector>
@@ -30,6 +32,18 @@ model::ParsedModule parse_fixture(const std::string& name) {
   model::ParsedModule mod;
   p.parse_file(std::string(CLANGQUILL_FIXTURE_DIR) + "/" + name, mod);
   return mod;
+}
+
+// A directory unique to this call, under the system temp dir. ctest runs each
+// TEST_CASE as its own process (catch_discover_tests), so a fixed name races
+// under `ctest -j`, and a failed assertion that skips a test's own cleanup
+// leaks state into whatever runs next under the same name. A random suffix
+// keeps every call -- concurrent or left behind by a crashed run -- out of
+// every other call's way.
+std::filesystem::path unique_temp_dir(const std::string& label) {
+  namespace fs = std::filesystem;
+  std::random_device entropy;
+  return fs::temp_directory_path() / (label + "-" + std::to_string(entropy()));
 }
 
 const model::Symbol* find(const model::ParsedModule& m, const std::string& qn) {
@@ -126,13 +140,57 @@ TEST_CASE("parser reads enumerators with values", "[parser]") {
   CHECK(value_of("Blue") == 6);
 }
 
+TEST_CASE("enum signedness looks through typedef sugar", "[parser]") {
+  // `enum class Mask : u64` -- the underlying type arrives as CXType_Typedef,
+  // not as a builtin unsigned kind, so reading the kind without canonicalizing
+  // it took the enum for a signed one and stored All as -1.
+  auto m = parse_fixture("enums.hpp");
+
+  const model::Enumerator* all = nullptr;
+  for (const auto& e : m.enumerators) {
+    if (e.name == "All") all = &e;
+  }
+  REQUIRE(all != nullptr);
+  CHECK_FALSE(all->value_is_signed);
+  CHECK(static_cast<std::uint64_t>(all->value) == 0xFFFFFFFFFFFFFFFFULL);
+}
+
+TEST_CASE("an enum records its fixed underlying type", "[parser]") {
+  auto m = parse_fixture("enums.hpp");
+
+  auto integer_type =
+      [&](const std::string& enum_name) -> const model::Reference* {
+    const auto* sym = find(m, enum_name);
+    if (sym == nullptr) return nullptr;
+    for (const auto& r : m.references) {
+      if (r.from_usr == sym->usr && r.kind == model::RefKind::EnumIntegerType) {
+        return &r;
+      }
+    }
+    return nullptr;
+  };
+
+  // The edge carries the type as written, not its canonical spelling.
+  const auto* mask = integer_type("Mask");
+  REQUIRE(mask != nullptr);
+  CHECK(mask->to_spelling == "u64");
+
+  const auto* level = integer_type("Level");
+  REQUIRE(level != nullptr);
+  CHECK(level->to_spelling == "unsigned char");
+
+  // An enum that fixes no underlying type says nothing about one: the type
+  // libclang reports there is the implementation's choice, not the header's.
+  CHECK(integer_type("Color") == nullptr);
+  CHECK(integer_type("Direction") == nullptr);
+}
+
 TEST_CASE("declarations inside extern \"C\" reach the IR", "[parser]") {
   // extern "C" { ... } is CXCursor_LinkageSpec, which map_kind has no case for
   // and which visit() used to prune -- along with everything declared inside
   // it -- because it is not a scope kind that drives explicit recursion.
   namespace fs = std::filesystem;
-  const fs::path dir =
-      fs::temp_directory_path() / "clangquill-linkage-spec-test";
+  const fs::path dir = unique_temp_dir("clangquill-linkage-spec-test");
   fs::remove_all(dir);
   fs::create_directories(dir);
   const fs::path header = dir / "capi.hpp";
@@ -188,7 +246,7 @@ TEST_CASE("file hash cache serves repeats and notices edits", "[parser]") {
   // shared by many umbrella batches is read and hashed once per run. The cache
   // must replay identical rows for an unchanged file and re-hash an edited one.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-hash-cache-test";
+  const fs::path dir = unique_temp_dir("clangquill-hash-cache-test");
   fs::create_directories(dir);
   const fs::path header = dir / "cached.hpp";
   {
@@ -427,7 +485,12 @@ TEST_CASE("a documented forward declaration is still extracted", "[parser]") {
   // The skip is for declarations that carry nothing. Documenting an opaque type
   // where it is declared is a deliberate thing to write, so it must survive.
   const std::string dir = CLANGQUILL_FIXTURE_DIR;
-  const std::string header = dir + "/.fwd_documented.hpp";
+  // Written into the shared fixture directory rather than a private temp
+  // dir, since parse_files resolves relative includes against it -- so the
+  // name needs its own per-call uniqueness to stay race-free under `ctest -j`.
+  std::random_device entropy;
+  const std::string header =
+      dir + "/.fwd_documented_" + std::to_string(entropy()) + ".hpp";
   {
     std::ofstream out(header);
     out << "#pragma once\n/// An opaque handle, documented where it is declared.\nclass Handle;\n";
@@ -441,6 +504,104 @@ TEST_CASE("a documented forward declaration is still extracted", "[parser]") {
   REQUIRE(handle != nullptr);
   CHECK(handle->is_documented);
   CHECK_FALSE(handle->is_definition);
+}
+
+TEST_CASE("a documented forward declaration spanning lines is extracted",
+          "[parser]") {
+  // Whether the comment belongs to this declaration is decided by where it
+  // sits, and a declaration begins at its extent -- not at the line its entity
+  // is named on, which a template head or a wrapped declarator puts below the
+  // comment. Measuring from the name line called these comments somebody
+  // else's and dropped both declarations.
+  const std::string dir = CLANGQUILL_FIXTURE_DIR;
+  const std::string header = dir + "/.fwd_multiline.hpp";
+  {
+    std::ofstream out(header);
+    out << "#pragma once\n"
+        << "/// An opaque handle type.\n"
+        << "template <typename T>\n"
+        << "class Holder;\n"
+        << "\n"
+        << "/// An opaque status enum.\n"
+        << "enum class\n"
+        << "    Status : int;\n";
+  }
+
+  parser::ParseOptions opts;
+  auto m = parser::parse_files({header}, opts);
+  std::filesystem::remove(header);
+
+  const auto* holder = find(m, "Holder");
+  REQUIRE(holder != nullptr);
+  CHECK(holder->is_documented);
+  CHECK_FALSE(holder->is_definition);
+
+  const auto* status = find(m, "Status");
+  REQUIRE(status != nullptr);
+  CHECK(status->is_documented);
+  CHECK_FALSE(status->is_definition);
+}
+
+TEST_CASE("only a doc comment documents a macro", "[parser]") {
+  // libclang attaches no comment to a macro, so the token pre-scan recovers the
+  // block written above the `#define`. It used to hand over *any* comment
+  // block: a TODO, a commented-out line or a license header above a macro was
+  // published as its documentation and marked it is_documented.
+  const std::string dir = CLANGQUILL_FIXTURE_DIR;
+  const std::string header = dir + "/.macro_docs.hpp";
+  {
+    std::ofstream out(header);
+    out << "#pragma once\n"
+        << "// TODO: rethink this\n"
+        << "#define CQ_PLAIN 1\n"
+        << "\n"
+        << "/// Documented across a blank line.\n"
+        << "\n"
+        << "#define CQ_GAPPED 2\n"
+        << "\n"
+        << "/// Documented right above.\n"
+        << "#define CQ_FIRST 3  // a trailing remark\n"
+        << "#define CQ_SECOND 4\n";
+  }
+
+  parser::ParseOptions opts;
+  auto m = parser::parse_files({header}, opts);
+  std::filesystem::remove(header);
+
+  auto comment_of = [&](const std::string& name) -> std::string {
+    const auto* sym = find(m, name);
+    if (sym == nullptr) return "<missing>";
+    for (const auto& c : m.comments) {
+      if (c.symbol_usr == sym->usr) return c.text;
+    }
+    return {};
+  };
+
+  // A plain comment is not documentation, whatever it sits above.
+  const auto* plain = find(m, "CQ_PLAIN");
+  REQUIRE(plain != nullptr);
+  CHECK_FALSE(plain->is_documented);
+  CHECK(comment_of("CQ_PLAIN").empty());
+
+  // Doxygen attaches a doc block across the blank lines below it.
+  const auto* gapped = find(m, "CQ_GAPPED");
+  REQUIRE(gapped != nullptr);
+  CHECK(gapped->is_documented);
+  CHECK(comment_of("CQ_GAPPED").find("across a blank line") !=
+        std::string::npos);
+
+  // A comment trailing the `#define` is not part of the block above it: when
+  // it was merged in, the block's key moved one line down -- off CQ_FIRST and
+  // onto CQ_SECOND, which nobody documented.
+  const auto* first = find(m, "CQ_FIRST");
+  REQUIRE(first != nullptr);
+  CHECK(first->is_documented);
+  CHECK(comment_of("CQ_FIRST").find("right above") != std::string::npos);
+
+  const auto* second = find(m, "CQ_SECOND");
+  REQUIRE(second != nullptr);
+  CHECK_FALSE(second->is_documented);
+  CHECK(comment_of("CQ_SECOND").empty());
 }
 
 TEST_CASE("umbrella batching attributes dependencies per member exactly",
@@ -480,8 +641,7 @@ TEST_CASE("a header with no entry of its own gets a sibling .cpp's flags",
   // database in an interpolating one that answers for unlisted files. Pinned
   // here because output silently degrades if that ever stops happening.
   namespace fs = std::filesystem;
-  const fs::path dir =
-      fs::temp_directory_path() / "clangquill-sibling-cc-test";
+  const fs::path dir = unique_temp_dir("clangquill-sibling-cc-test");
   fs::remove_all(dir);
   fs::create_directories(dir / "extra");
 
@@ -529,7 +689,7 @@ TEST_CASE("headers sharing one compile-database command share an umbrella TU",
   // canonical (path-lexicographic) order, so a_defs.hpp comes first whatever
   // order this test names them in.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-batching-test";
+  const fs::path dir = unique_temp_dir("clangquill-cc-batching-test");
   fs::remove_all(dir);
   fs::create_directories(dir);
 
@@ -575,7 +735,7 @@ TEST_CASE("headers with different compile-database commands are not batched toge
   // what the other's headers declare -- and only one of the two commands could
   // be handed to libclang in the first place.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-groups-test";
+  const fs::path dir = unique_temp_dir("clangquill-cc-groups-test");
   fs::remove_all(dir);
   fs::create_directories(dir);
 
@@ -589,15 +749,17 @@ TEST_CASE("headers with different compile-database commands are not batched toge
   // Each header is listed with its own -D, so the two commands genuinely differ
   // rather than both being interpolated from one entry.
   {
+    // generic_string() throughout: JSON has no \U escape, so a native Windows
+    // path would make the database unparseable ("Unrecognized escape code").
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string() << "\", \"file\": \""
-       << (dir / "alpha.hpp").string()
+    cc << "[{\"directory\": \"" << dir.generic_string() << "\", \"file\": \""
+       << (dir / "alpha.hpp").generic_string()
        << "\", \"arguments\": [\"c++\", \"-std=c++20\", \"-DCQ_ALPHA\", \"-c\", \""
-       << (dir / "alpha.hpp").string() << "\"]},"
-       << "{\"directory\": \"" << dir.string() << "\", \"file\": \""
-       << (dir / "beta.hpp").string()
+       << (dir / "alpha.hpp").generic_string() << "\"]},"
+       << "{\"directory\": \"" << dir.generic_string() << "\", \"file\": \""
+       << (dir / "beta.hpp").generic_string()
        << "\", \"arguments\": [\"c++\", \"-std=c++20\", \"-DCQ_BETA\", \"-c\", \""
-       << (dir / "beta.hpp").string() << "\"]}]";
+       << (dir / "beta.hpp").generic_string() << "\"]}]";
   }
 
   parser::ParseOptions opts;
@@ -625,8 +787,7 @@ TEST_CASE("every batched member that borrowed its flags is reported", "[parser]"
   // silently drop that caveat for every other header in the batch, which
   // warnings-as-errors builds rely on seeing.
   namespace fs = std::filesystem;
-  const fs::path dir =
-      fs::temp_directory_path() / "clangquill-cc-borrowed-batch-test";
+  const fs::path dir = unique_temp_dir("clangquill-cc-borrowed-batch-test");
   fs::remove_all(dir);
   fs::create_directories(dir);
 
@@ -634,11 +795,12 @@ TEST_CASE("every batched member that borrowed its flags is reported", "[parser]"
   std::ofstream(dir / "two.hpp") << "/// Two.\ninline int two_value() { return 2; }\n";
   std::ofstream(dir / "target.cpp") << "int target();\n";
   {
+    // generic_string(): see the sibling batching test above.
     std::ofstream cc(dir / "compile_commands.json");
-    cc << "[{\"directory\": \"" << dir.string()
-       << "\", \"file\": \"" << (dir / "target.cpp").string()
+    cc << "[{\"directory\": \"" << dir.generic_string()
+       << "\", \"file\": \"" << (dir / "target.cpp").generic_string()
        << "\", \"arguments\": [\"c++\", \"-std=c++20\", \"-c\", \""
-       << (dir / "target.cpp").string() << "\"]}]";
+       << (dir / "target.cpp").generic_string() << "\"]}]";
   }
 
   parser::ParseOptions opts;
@@ -673,7 +835,7 @@ TEST_CASE("an unused link-only flag is not reported even under the "
   // built with -Werror promotes it to an error -- it should still never
   // surface, since it says nothing about the source being parsed.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-werror-cc-test";
+  const fs::path dir = unique_temp_dir("clangquill-werror-cc-test");
   fs::remove_all(dir);
   fs::create_directories(dir);
 
@@ -704,7 +866,7 @@ TEST_CASE("a differently spelled source path is still dropped from the args",
   // entry up by resolved path. Leaving that token in the argument list hands
   // libclang two input files and the translation unit fails outright.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-spelling-test";
+  const fs::path dir = unique_temp_dir("clangquill-cc-spelling-test");
   fs::remove_all(dir);
   fs::create_directories(dir / "sub");
   std::ofstream(dir / "sub" / "widget.hpp")
@@ -741,7 +903,7 @@ TEST_CASE("a '--' separator in a database entry does not sink the parse",
   // so libclang builds no translation unit at all and the header silently
   // documents nothing.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-separator";
+  const fs::path dir = unique_temp_dir("clangquill-cc-separator");
   fs::remove_all(dir);
   fs::create_directories(dir);
   std::ofstream(dir / "widget.hpp")
@@ -776,7 +938,7 @@ TEST_CASE("an entry's own -x survives, and is supplied when it has none",
   // stated the language knows better than the fallback does; one that has not
   // still needs it, or a header without a .cpp extension parses as C.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-language";
+  const fs::path dir = unique_temp_dir("clangquill-cc-language");
   fs::remove_all(dir);
   fs::create_directories(dir);
   // Valid C++, invalid C: it only parses if the language is right.
@@ -809,7 +971,7 @@ TEST_CASE("flags that describe another file are reported", "[parser]") {
   // reports a guess rather than let it produce plausible, wrong documentation
   // in silence.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-borrow-report";
+  const fs::path dir = unique_temp_dir("clangquill-cc-borrow-report");
   fs::remove_all(dir);
   fs::create_directories(dir / "include" / "geo");
   fs::create_directories(dir / "tests");
@@ -851,7 +1013,7 @@ TEST_CASE("a file the database really lists is not reported as borrowed",
   // The report has to distinguish an entry from an interpolated one, including
   // when the database spells its file differently from the path we look up.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-borrow-exact";
+  const fs::path dir = unique_temp_dir("clangquill-cc-borrow-exact");
   fs::remove_all(dir);
   fs::create_directories(dir / "sub");
   std::ofstream(dir / "sub" / "widget.hpp")
@@ -892,7 +1054,7 @@ TEST_CASE("an entry's paths resolve against its own directory, not ours",
   // parses "successfully" with its dependency missing, and the declarations
   // that needed it quietly vanish from the output.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-workdir";
+  const fs::path dir = unique_temp_dir("clangquill-cc-workdir");
   fs::remove_all(dir);
   fs::create_directories(dir / "include" / "geo" / "detail");
   fs::create_directories(dir / "src");
@@ -937,7 +1099,7 @@ TEST_CASE("a header borrowing another file's flags is parsed as a header",
   // header's own `#pragma once` is in the main file, which clang reports and a
   // project's -Werror turns into an error on a header that compiles cleanly.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-header-lang";
+  const fs::path dir = unique_temp_dir("clangquill-cc-header-lang");
   fs::remove_all(dir);
   fs::create_directories(dir / "include");
   fs::create_directories(dir / "tests");
@@ -975,7 +1137,7 @@ TEST_CASE("a header is parsed as a header under the fallback flags too",
   // extension-less input counts as a header as well -- that spelling belongs to
   // the standard library and its imitators, never to a translation unit.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-header-lang-default";
+  const fs::path dir = unique_temp_dir("clangquill-header-lang-default");
   fs::remove_all(dir);
   fs::create_directories(dir);
   std::ofstream(dir / "widget.hpp")
@@ -986,6 +1148,35 @@ TEST_CASE("a header is parsed as a header under the fallback flags too",
   parser::ParseOptions opts;
   opts.capture_all_diagnostics = true;
   for (const std::string& input : {"widget.hpp", "vector_like"}) {
+    model::ParsedModule mod;
+    REQUIRE(parser::Parser(opts).parse_file((dir / input).string(), mod));
+    for (const auto& d : mod.diagnostics) {
+      CHECK(d.text.find("pragma-once-outside-header") == std::string::npos);
+    }
+  }
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("an uppercase header extension is parsed as a header", "[parser]") {
+  // `.H` is a real, if old-school, C++ header spelling. Matching the extension
+  // list case-sensitively made such a header miss header mode entirely, so its
+  // own `#pragma once` was reported as being in a main file -- the failure the
+  // whole `-xc++-header` dance exists to avoid.
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "clangquill-header-lang-upper";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.H")
+      << "#pragma once\nnamespace demo { inline int upper_h() { return 6; } }\n";
+  std::ofstream(dir / "gadget.HPP")
+      << "#pragma once\nnamespace demo { inline int upper_hpp() { return 7; } }\n";
+  std::ofstream(dir / "thing.Hxx")
+      << "#pragma once\nnamespace demo { inline int mixed_hxx() { return 8; } }\n";
+
+  parser::ParseOptions opts;
+  opts.capture_all_diagnostics = true;
+  for (const std::string& input : {"widget.H", "gadget.HPP", "thing.Hxx"}) {
     model::ParsedModule mod;
     REQUIRE(parser::Parser(opts).parse_file((dir / input).string(), mod));
     for (const auto& d : mod.diagnostics) {
@@ -1008,7 +1199,7 @@ TEST_CASE("replaying a database entry never writes the files it names",
   // command with only the filename substituted, so every documented header
   // inherits the *same* -MF path, and batches parse concurrently.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-no-outputs";
+  const fs::path dir = unique_temp_dir("clangquill-cc-no-outputs");
   fs::remove_all(dir);
   fs::create_directories(dir);
   std::ofstream(dir / "widget.hpp") << "inline int widget_value() { return 3; }\n";
@@ -1046,7 +1237,7 @@ TEST_CASE("an interpolated entry's outputs are not written either", "[parser]") 
   // command -- output paths included -- is borrowed wholesale from a file it
   // has nothing to do with.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-cc-interp-outputs";
+  const fs::path dir = unique_temp_dir("clangquill-cc-interp-outputs");
   fs::remove_all(dir);
   fs::create_directories(dir / "include");
   fs::create_directories(dir / "tests");
@@ -1082,7 +1273,7 @@ TEST_CASE("an unloadable compile database is reported with the path searched",
   // file" -- by returning no flags -- so the fallback to -std/-I/-D would
   // otherwise kick in silently and yield plausible but wrong output.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-missing-cc-test";
+  const fs::path dir = unique_temp_dir("clangquill-missing-cc-test");
   fs::remove_all(dir);
   fs::create_directories(dir);
   std::ofstream(dir / "widget.hpp") << "inline int widget_value() { return 1; }\n";
@@ -1111,8 +1302,7 @@ std::filesystem::path write_scratch(const std::string& dir_name,
                                     const std::string& file_name,
                                     const std::string& contents) {
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / dir_name;
-  fs::remove_all(dir);
+  const fs::path dir = unique_temp_dir(dir_name);
   fs::create_directories(dir);
   const fs::path file = dir / file_name;
   std::ofstream(file) << contents;
@@ -1263,7 +1453,7 @@ TEST_CASE("a diagnostic shared by several batches is merged once", "[parser]") {
   // Two inputs in separate umbrella batches both pull in the same bad header.
   // Without dedup its error — and its note — would be reported once per batch.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-diag-dedup";
+  const fs::path dir = unique_temp_dir("clangquill-diag-dedup");
   fs::remove_all(dir);
   fs::create_directories(dir);
   std::ofstream(dir / "shared.hpp") << "#pragma once\n" << kErrorWithNoteSource;
@@ -1308,7 +1498,7 @@ TEST_CASE("a diagnostic shared by several batches is merged once", "[parser]") {
 TEST_CASE("the compile-database failure is reported once per parser",
           "[parser]") {
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-missing-cc-once";
+  const fs::path dir = unique_temp_dir("clangquill-missing-cc-once");
   fs::remove_all(dir);
   fs::create_directories(dir);
   std::ofstream(dir / "a.hpp") << "inline int a_value() { return 1; }\n";
@@ -1360,7 +1550,7 @@ TEST_CASE("a missing input reports why libclang refused it", "[parser]") {
   // — for an input the driver cannot open, so a bare "failed to parse" line was
   // everything the log ever carried for exactly this case.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-parse-fail-missing";
+  const fs::path dir = unique_temp_dir("clangquill-parse-fail-missing");
   fs::remove_all(dir);
   fs::create_directories(dir);
 
@@ -1401,7 +1591,7 @@ TEST_CASE("a database entry with a second input is named, and the file is "
   // report has to say that, and then get clang's actual complaints about the
   // source into the log by parsing it under flags known to be well formed.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-parse-fail-argv";
+  const fs::path dir = unique_temp_dir("clangquill-parse-fail-argv");
   fs::remove_all(dir);
   fs::create_directories(dir);
   std::ofstream(dir / "widget.hpp") << kErrorWithNoteSource;
@@ -1447,7 +1637,7 @@ TEST_CASE("a database entry with a second input is named, and the file is "
 
 TEST_CASE("a file that parses alone blames the compile flags", "[parser]") {
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-parse-fail-clean";
+  const fs::path dir = unique_temp_dir("clangquill-parse-fail-clean");
   fs::remove_all(dir);
   fs::create_directories(dir);
   std::ofstream(dir / "widget.hpp") << "inline int widget_value() { return 1; }\n";
@@ -1477,7 +1667,7 @@ TEST_CASE("a batch member libclang never opened is reported", "[parser]") {
   // no message, which reads as "nothing to document" rather than "never
   // parsed".
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-batch-unopened";
+  const fs::path dir = unique_temp_dir("clangquill-batch-unopened");
   fs::remove_all(dir);
   fs::create_directories(dir);
   std::ofstream(dir / "a.hpp") << "inline int a_value() { return 1; }\n";

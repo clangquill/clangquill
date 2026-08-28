@@ -407,6 +407,25 @@ def test_incremental_template_edit_busts_noop_skip(project: Path) -> None:
 
 
 @requires_libclang
+def test_incremental_comment_parser_env_override_busts_noop_skip(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    first = build(config, base_dir=project)
+    assert first.parsed
+    assert "A documented namespace." in (project / "api" / "demo.md").read_text()
+
+    # The env override changes every parsed comment (IR untouched), so the
+    # render fingerprint must notice it rather than replaying the cached page.
+    monkeypatch.setenv("CLANGQUILL_COMMENT_PARSER", "tests.test_comments.shouting_parser")
+    result = build(config, base_dir=project)
+    assert not result.parsed
+    assert "demo.md" in result.pages_written
+    assert "A DOCUMENTED NAMESPACE." in (project / "api" / "demo.md").read_text()
+
+
+@requires_libclang
 def test_incremental_touch_header_regenerates_only_affected(project: Path) -> None:
     (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
     (project / "beta.hpp").write_text("/// beta ns\nnamespace beta { /// g\nint g(); }\n")
@@ -1026,6 +1045,68 @@ def test_incremental_prunes_a_dependency_that_left_the_closure(project: Path) ->
 
     # beta.hpp's page is untouched and still renders from the surviving rows.
     assert sorted(p.name for p in (project / "api").glob("*.md")) == ["alpha.md", "beta.md", "index.md"]
+
+
+@requires_libclang
+def test_incremental_renamed_input_drops_stale_rows_and_pages(project: Path) -> None:
+    # A glob-driven project: renaming the input on disk changes the resolved
+    # input set, so the glob picks up renamed.hpp and drops demo.hpp. The old
+    # file's IR rows and page must not survive the rebuild (see #199, whose
+    # store-side stale-row bug could otherwise leak into this exact scenario).
+    config = Config(input=["*.hpp"], output_dir="api", cache_dir=".cache", group_by="file")
+    build(config, base_dir=project)
+    api = project / "api"
+    assert (api / "demo_hpp.md").is_file()
+
+    (project / "demo.hpp").rename(project / "renamed.hpp")
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    assert (api / "renamed_hpp.md").is_file()
+    assert not (api / "demo_hpp.md").exists()
+
+    ir = project / ".cache" / "clangquill.sqlite"
+    with Store.open(ir) as store:
+        tracked = {Path(f.path).name for f in store.files()}
+    assert tracked == {"renamed.hpp"}
+    assert result.file_count == len(tracked)
+
+    # No stale bookkeeping keeps flagging work: the next build noops cleanly.
+    assert not build(config, base_dir=project).parsed
+
+
+@requires_libclang
+def test_incremental_removed_input_prunes_pages_and_ir_together(tmp_path: Path) -> None:
+    # test_build_prunes_stale_pages exercises page pruning without a cache_dir;
+    # this pins down the same removal with the cache warm, so pruning and the
+    # IR/cache bookkeeping for a dropped input are exercised together.
+    (tmp_path / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    (tmp_path / "beta.hpp").write_text("/// beta ns\nnamespace beta { /// g\nint g(); }\n")
+    config = Config(input=["*.hpp"], output_dir="api", cache_dir=".cache")
+    build(config, base_dir=tmp_path)
+    api = tmp_path / "api"
+    assert (api / "alpha.md").is_file()
+    assert (api / "beta.md").is_file()
+
+    # Remove one input entirely while the cache is warm.
+    (tmp_path / "beta.hpp").unlink()
+    result = build(config, base_dir=tmp_path)
+
+    assert result.parsed
+    assert (api / "alpha.md").is_file()
+    assert not (api / "beta.md").exists()
+
+    ir = tmp_path / ".cache" / "clangquill.sqlite"
+    with Store.open(ir) as store:
+        tracked = {Path(f.path).name for f in store.files()}
+    assert tracked == {"alpha.hpp"}
+    assert result.file_count == len(tracked)
+    symbols = {s.qualified_name for s in _store_symbols(result.db_path)}
+    assert "alpha" in symbols
+    assert not any(name.startswith("beta") for name in symbols)
+
+    # A follow-up build with the surviving input noops cleanly.
+    assert not build(config, base_dir=tmp_path).parsed
 
 
 @requires_libclang

@@ -97,7 +97,8 @@ if(CLANGQUILL_BUILD_TESTS)
                         PRIVATE clangquill_core Catch2::Catch2WithMain)
   target_compile_definitions(
     clangquill_tests
-    PRIVATE CLANGQUILL_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp/fixtures")
+    PRIVATE CLANGQUILL_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp/fixtures"
+            CLANGQUILL_COMMENT_CORPUS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/comment_corpus")
   include(Catch)
   catch_discover_tests(clangquill_tests)
 endif()
