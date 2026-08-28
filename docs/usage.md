@@ -152,7 +152,7 @@ re-reading the whole API set on every build, and what lets
 [sphinx-autobuild](https://github.com/sphinx-doc/sphinx-autobuild) watch the
 source directory clangquill generates into without rebuilding in a loop.
 
-### Concurrent builds
+## Concurrent builds
 
 **One build runs against a given `cache_dir` at a time; concurrent readers are
 fine.** A build updates the bookkeeping database, the IR database and the
