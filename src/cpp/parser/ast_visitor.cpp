@@ -1,6 +1,7 @@
 #include "parser/ast_visitor.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <optional>
 #include <string_view>
@@ -225,6 +226,56 @@ bool documented_here(CXCursor c) {
   return comment_end + 1 >= cursor_line;
 }
 
+// Reports the copy commands nothing in this pipeline performs.
+//
+// `\copydoc Other::f` asks for another entity's documentation to be pulled in
+// here. No stage does that: the comment parser degrades the command to a
+// cross-reference to the entity it names, which is true and navigable but is
+// not the documentation the author asked for. Saying so is what makes this a
+// known gap rather than a silent one.
+//
+// Read off the raw text, which is the only place the command survives as
+// itself -- the parsed model no longer keeps it apart from an ordinary `\see`.
+// Recorded as a note rather than a warning: `warnings_as_errors` is about the
+// C++ libclang saw, and a docs build that asked to be strict about that should
+// not fail over a comment command clangquill has yet to implement. The record
+// still reaches the diagnostics log and the severity counts.
+void report_unresolved_copies(VisitCtx& ctx, const std::string& raw,
+                              CXCursor c) {
+  for (std::size_t i = 0; i + 1 < raw.size(); ++i) {
+    if (raw[i] != '\\' && raw[i] != '@') continue;
+    for (std::string_view command : {"copydoc", "copybrief", "copydetails"}) {
+      if (raw.compare(i + 1, command.size(), command) != 0) continue;
+      // A word boundary, so `\copydocs` is not this command.
+      std::size_t rest = i + 1 + command.size();
+      if (rest < raw.size() &&
+          (std::isalnum(static_cast<unsigned char>(raw[rest])) != 0 ||
+           raw[rest] == '_')) {
+        continue;
+      }
+      std::size_t eol = raw.find('\n', rest);
+      std::string target =
+          raw.substr(rest, eol == std::string::npos ? eol : eol - rest);
+      std::size_t a = target.find_first_not_of(" \t\r");
+      std::size_t b = target.find_last_not_of(" \t\r");
+      target =
+          a == std::string::npos ? std::string{} : target.substr(a, b - a + 1);
+
+      auto [file, line] = cursor_file_line(c);
+      model::Diagnostic d;
+      d.severity = model::kSeverityNote;
+      d.text = std::string("clangquill: \\") + std::string(command) + ' ' +
+               target +
+               " is not performed: the documentation it names is linked to, not"
+               " copied in";
+      d.file = file;
+      d.line = static_cast<int>(line);
+      ctx.mod->diagnostics.push_back(std::move(d));
+      break;
+    }
+  }
+}
+
 // Records @p raw as @p usr's documentation, once per USR per translation unit.
 //
 // First writer wins, which is what makes an entity's own comment beat a
@@ -237,6 +288,7 @@ void record_comment(VisitCtx& ctx, const std::string& usr,
   if (!ctx.documented->insert(usr).second) return;
 
   model::CommentModel parsed = ctx.comment_parser->parse(c, raw);
+  report_unresolved_copies(ctx, raw, c);
 
   model::RawComment comment;
   comment.symbol_usr = usr;

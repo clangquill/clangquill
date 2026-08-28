@@ -1,0 +1,29 @@
+{
+    "description": "A comment that is only a copy command. Nothing performs the copy, so it degrades to a cross-reference to the entity it names -- reduced to the qualified name, since Doxygen accepts a whole declaration there and only a name can be pointed at. Left in `custom` this symbol would publish an empty description.",
+    "raw": "\n/** @copydoc DenseCoeffsBase<Derived,ReadOnlyAccessors>::coeff(Index,Index) const */\n",
+    "expected": {
+        "brief": "",
+        "detail": [],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [
+            "DenseCoeffsBase::coeff"
+        ],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {}
+    }
+}

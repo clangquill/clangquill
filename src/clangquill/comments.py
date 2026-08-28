@@ -91,6 +91,12 @@ class CommentModel:
     warning: list[str] = field(default_factory=list)
     pre: list[str] = field(default_factory=list)
     post: list[str] = field(default_factory=list)
+    invariant: list[str] = field(default_factory=list)
+    todo: list[str] = field(default_factory=list)
+    bug: list[str] = field(default_factory=list)
+    author: list[str] = field(default_factory=list)
+    version: list[str] = field(default_factory=list)
+    date: list[str] = field(default_factory=list)
     custom: dict[str, list[str]] = field(default_factory=dict)
 
 
@@ -124,6 +130,12 @@ _LIST_FIELDS = {
     "warning": "warning",
     "pre": "pre",
     "post": "post",
+    "invariant": "invariant",
+    "todo": "todo",
+    "bug": "bug",
+    "author": "author",
+    "version": "version",
+    "date": "date",
 }
 
 
@@ -261,9 +273,45 @@ _LIST_APPEND = {
     "since": "since",
     "deprecated": "deprecated",
     "note": "note",
+    # Doxygen sets a @remark off from the prose exactly as it does a note.
+    "remark": "note",
+    "remarks": "note",
     "pre": "pre",
     "post": "post",
+    "invariant": "invariant",
+    "todo": "todo",
+    "bug": "bug",
+    "author": "author",
+    "authors": "author",
+    "version": "version",
+    "date": "date",
 }
+
+# Commands whose text is prose: @details is the detailed description, and
+# @par [title] text a paragraph of it. Neither is an unrecognized command.
+_DETAIL_CMDS = frozenset({"details", "par"})
+
+# Doxygen's copy commands, which name an entity whose documentation should be
+# pulled in here. Nothing in this pipeline performs the copy, and a command left
+# in ``custom`` renders as nothing at all -- so a comment that is only a
+# ``@copydoc`` would publish an empty description. They degrade to a
+# cross-reference to the entity whose documentation was asked for: true,
+# navigable, and where the reader was being sent. The parse reports the
+# unperformed copy separately (see ``ast_visitor.cpp``).
+_COPY_CMDS = frozenset({"copydoc", "copybrief", "copydetails"})
+
+# Everything a copy command's argument can carry beyond the name: Doxygen
+# accepts a whole declaration, so ``DenseCoeffsBase<Derived>::coeff(Index) const``
+# has to come down to ``DenseCoeffsBase::coeff`` -- the only shape that can be
+# pointed at, and the only one the C++ domain resolves.
+_COPY_ARGS_RE = re.compile(r"<[^<>]*>|\(.*")
+
+
+def _copy_target(text: str) -> str:
+    """Reduce a copy command's argument to the qualified name it points at."""
+    name = _COPY_ARGS_RE.sub("", text).split(maxsplit=1)
+    return name[0].removeprefix("::") if name else ""
+
 
 # Commands whose text is "<arg> <description>"; mapped to (attribute, dataclass).
 _TUPLE_APPEND: dict[str, tuple[str, type]] = {
@@ -310,8 +358,8 @@ def _strip_markers(raw: str) -> list[str]:
 def _route(model: CommentModel, name: str, text: str, direction: str = "") -> None:
     """Route one command into the model (mirrors the C++ ``route_command``)."""
     if name in _BRIEF_CMDS:
-        if not model.brief:
-            model.brief = text
+        # Doxygen joins a second @brief onto the first rather than dropping it.
+        model.brief = f"{model.brief} {text}".strip() if model.brief else text
     elif name in _RETURN_CMDS:
         model.returns = f"{model.returns} {text}".strip()
     elif name in _PARAM_CMDS:
@@ -321,6 +369,13 @@ def _route(model: CommentModel, name: str, text: str, direction: str = "") -> No
     elif name in _TUPLE_APPEND:
         attr, cls = _TUPLE_APPEND[name]
         getattr(model, attr).append(cls(*_split_first(text)))
+    elif name in _DETAIL_CMDS:
+        if text:
+            model.detail.append(text)
+    elif name in _COPY_CMDS:
+        target = _copy_target(text)
+        if target:
+            model.see.append(target)
     elif name in _LIST_APPEND:
         getattr(model, _LIST_APPEND[name]).append(text)
     else:

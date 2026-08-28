@@ -18,6 +18,12 @@
         "warning": [],
         "pre": [],
         "post": [],
-        "custom": {}
+        "custom": {},
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": []
     }
 }

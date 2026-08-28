@@ -1,0 +1,44 @@
+{
+    "description": "The prose and section commands: `\\details` and `\\par` are the detailed description itself, `\\remark` is a note by another name, and `\\invariant`, `\\todo`, `\\bug`, `\\version` and `\\date` each have a field of their own. None of them may land in `custom`, which the bundled templates render nothing from.",
+    "raw": "\n/**\n * @brief A summary.\n * @details The long story.\n * @par Rationale\n * Because it is.\n * @remark worth knowing\n * @invariant the buffer stays sorted\n * @todo handle the empty case\n * @bug loops on a null node\n * @author Ada\n * @version 2.1\n * @date 2026-08-01\n */\n",
+    "expected": {
+        "brief": "A summary.",
+        "detail": [
+            "The long story.",
+            "Rationale Because it is."
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [
+            "worth knowing"
+        ],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [
+            "the buffer stays sorted"
+        ],
+        "todo": [
+            "handle the empty case"
+        ],
+        "bug": [
+            "loops on a null node"
+        ],
+        "author": [
+            "Ada"
+        ],
+        "version": [
+            "2.1"
+        ],
+        "date": [
+            "2026-08-01"
+        ],
+        "custom": {}
+    }
+}

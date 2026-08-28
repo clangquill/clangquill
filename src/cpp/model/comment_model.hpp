@@ -53,10 +53,16 @@ struct CommentModel {
   std::vector<std::string> see;        ///< `\@see` references.
   std::vector<std::string> since;      ///< `\@since` notes.
   std::vector<std::string> deprecated; ///< `\@deprecated` notes.
-  std::vector<std::string> note;       ///< `\@note` blocks.
+  std::vector<std::string> note;       ///< `\@note` / `\@remark` blocks.
   std::vector<std::string> warning;    ///< `\@warning` blocks.
   std::vector<std::string> pre;        ///< `\@pre` preconditions.
   std::vector<std::string> post;       ///< `\@post` postconditions.
+  std::vector<std::string> invariant;  ///< `\@invariant` blocks.
+  std::vector<std::string> todo;       ///< `\@todo` items.
+  std::vector<std::string> bug;        ///< `\@bug` reports.
+  std::vector<std::string> author;     ///< `\@author` / `\@authors` credits.
+  std::vector<std::string> version;    ///< `\@version` notes.
+  std::vector<std::string> date;       ///< `\@date` notes.
   std::map<std::string, std::vector<std::string>> custom;  ///< Unrecognized commands, keyed by command word.
 
   /// @brief True when no field carries any documentation.
@@ -66,7 +72,9 @@ struct CommentModel {
            tparams.empty() && returns.empty() && retvals.empty() &&
            throws.empty() && see.empty() && since.empty() &&
            deprecated.empty() && note.empty() && warning.empty() &&
-           pre.empty() && post.empty() && custom.empty();
+           pre.empty() && post.empty() && invariant.empty() && todo.empty() &&
+           bug.empty() && author.empty() && version.empty() && date.empty() &&
+           custom.empty();
   }
 };
 

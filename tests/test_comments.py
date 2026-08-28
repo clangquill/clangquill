@@ -35,6 +35,8 @@ DOXYGEN = """
  * @deprecated use divide2
  * @see multiply
  * @author Ada
+ * @copydoc other::divide(int, int)
+ * @myalias an aliased command nothing defines
  */
 """
 
@@ -58,9 +60,13 @@ def test_doxygen_parse_covers_commands() -> None:
     assert model.warning == ["undefined for INT_MIN"]
     assert model.since == ["1.2"]
     assert model.deprecated == ["use divide2"]
-    assert model.see == ["multiply"]
-    # Unknown command falls into the custom bucket keyed by its name.
-    assert model.custom == {"author": ["Ada"]}
+    # A copy command nothing performs degrades to a cross-reference to the
+    # entity it names, reduced to the name the C++ domain can resolve.
+    assert model.see == ["multiply", "other::divide"]
+    assert model.author == ["Ada"]
+    # Unknown command falls into the custom bucket keyed by its name -- which is
+    # where a Doxygen ALIASES command lands, since nothing here defines one.
+    assert model.custom == {"myalias": ["an aliased command nothing defines"]}
 
 
 def test_doxygen_parse_triple_slash_brief() -> None:
@@ -73,6 +79,51 @@ def test_doxygen_parse_autobrief_without_command() -> None:
     model = doxygen_parse("/// A short summary line.")
     assert model.brief == "A short summary line."
     assert model.detail == []
+
+
+def test_doxygen_parse_routes_prose_and_section_commands() -> None:
+    """@details and friends are documentation, not unrecognized commands."""
+    model = doxygen_parse(
+        "/**\n"
+        " * @brief A summary.\n"
+        " * @details The long story.\n"
+        " * @par Rationale\n"
+        " * Because it is.\n"
+        " * @remark worth knowing\n"
+        " * @invariant the buffer stays sorted\n"
+        " * @todo handle the empty case\n"
+        " * @bug loops on a null node\n"
+        " * @author Ada\n"
+        " * @version 2.1\n"
+        " * @date 2026-08-01\n"
+        " */\n",
+    )
+
+    assert model.brief == "A summary."
+    assert model.detail == ["The long story.", "Rationale Because it is."]
+    assert model.note == ["worth knowing"]
+    assert model.invariant == ["the buffer stays sorted"]
+    assert model.todo == ["handle the empty case"]
+    assert model.bug == ["loops on a null node"]
+    assert model.author == ["Ada"]
+    assert model.version == ["2.1"]
+    assert model.date == ["2026-08-01"]
+    assert model.custom == {}
+
+
+def test_copy_commands_degrade_to_a_cross_reference() -> None:
+    """A @copydoc-only comment must render *something*: where it points."""
+    model = doxygen_parse(
+        "/** @copydoc DenseCoeffsBase<Derived,ReadOnlyAccessors>::coeff(Index,Index) const */",
+    )
+    assert model.see == ["DenseCoeffsBase::coeff"]
+    assert model.custom == {}
+
+
+def test_doxygen_parse_joins_a_second_brief() -> None:
+    """Doxygen joins repeated @brief text; dropping it lost half the summary."""
+    model = doxygen_parse("/// @brief First half.\n/// @brief Second half.\n")
+    assert model.brief == "First half. Second half."
 
 
 @pytest.mark.parametrize(
@@ -258,6 +309,8 @@ def test_model_from_fields_round_trips() -> None:
         ("throws", "Error", "on failure"),
         ("note", "", "a note"),
         ("author", "", "Ada"),
+        ("todo", "", "handle the empty case"),
+        ("myalias", "", "an aliased command"),
     ]
     model = model_from_fields(rows)
     assert model.brief == "A brief."
@@ -267,7 +320,10 @@ def test_model_from_fields_round_trips() -> None:
     assert model.retvals[0].value == "0"
     assert model.throws[0].exception == "Error"
     assert model.note == ["a note"]
-    assert model.custom == {"author": ["Ada"]}
+    assert model.author == ["Ada"]
+    assert model.todo == ["handle the empty case"]
+    # Only a command the model does not name lands in the custom bucket.
+    assert model.custom == {"myalias": ["an aliased command"]}
 
 
 def test_registry_default_and_registration() -> None:
