@@ -108,6 +108,15 @@ _PARSE_FINGERPRINT = "parse_fingerprint"
 _RENDER_FINGERPRINT = "render_fingerprint"
 _RENDER_SUMMARY = "render_summary"
 
+# Slack subtracted from the restat threshold in :meth:`BuildCache._fast_path_mtime`
+# to absorb coarse filesystem timestamp granularity. A write that lands after the
+# parse began can be *recorded* with an mtime truncated down to before it — 2s on
+# FAT/exFAT, 1s on ext3 and many NFS/SMB mounts — which would make the guard trust
+# a stat describing content the stored hash never saw. make and ninja carry the
+# same epsilon for the same reason. 2s covers the coarsest common case; erring
+# large only costs a redundant hash of files touched just before the parse.
+_MTIME_GRANULARITY_NS = 2_000_000_000
+
 
 def file_sha256(path: str | Path) -> str:
     """Return the hex SHA-256 of ``path``'s bytes, matching the C++ digest.
@@ -523,14 +532,20 @@ class BuildCache:
 
         So the ``restat`` guard make and ninja use: anything touched at or after
         the parse started records ``NULL`` metadata and is re-hashed next build.
-        The comparison assumes the filesystem's clock and :func:`time.time_ns`
-        agree; where they do not (a network mount running ahead), the cost is a
-        redundant hash, never a missed change.
+
+        The threshold is relaxed by :data:`_MTIME_GRANULARITY_NS` because a raw
+        comparison trusts the stat in the unsafe direction. On a filesystem with
+        coarse timestamps (FAT/exFAT, ext3, some NFS/SMB mounts) a write landing
+        *after* the parse began is recorded with an mtime truncated *down* to
+        before it, so the guard would pair a post-edit stat with a pre-edit hash
+        and every later build's fast path would skip the file forever. Clock skew
+        in the other direction (a network mount running ahead) errs safely: the
+        cost is a redundant hash, never a missed change.
         """
         mtime = cls._mtime_ns(path)
         if mtime is None or parse_started_ns is None:
             return mtime
-        return None if mtime >= parse_started_ns else mtime
+        return None if mtime >= parse_started_ns - _MTIME_GRANULARITY_NS else mtime
 
     # -- output bookkeeping ---------------------------------------------------
 

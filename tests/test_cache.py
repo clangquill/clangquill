@@ -134,12 +134,34 @@ def test_edit_during_the_parse_is_not_hidden_by_the_stat_fast_path(tmp_path: Pat
         assert not cache.parse_is_current("fp")
 
 
+def test_a_truncated_mtime_just_before_the_parse_still_forces_a_re_hash(tmp_path: Path) -> None:
+    header = tmp_path / "h.hpp"
+    header.write_text("aaaa", encoding="utf-8")
+    parsed = _entry(header)  # what the parser saw
+
+    # Same edit-during-the-parse race, but on a coarse-granularity filesystem
+    # (exFAT's 2s, ext3's 1s): the write lands after the parse began yet is
+    # *recorded* with an mtime truncated down to before it. A raw ``>=`` would
+    # trust the stat and pair it with the pre-edit hash forever.
+    started = header.stat().st_mtime_ns + 900_000_000
+    header.write_text("bbbb", encoding="utf-8")
+    os.utime(header, ns=(started - 900_000_000, started - 900_000_000))
+
+    with BuildCache.open(tmp_path / "cache") as cache:
+        cache.record_parse("fp", {str(header): parsed}, parse_started_ns=started)
+
+        row = cache._con.execute("SELECT mtime_ns FROM inputs").fetchone()  # noqa: SLF001
+        assert row["mtime_ns"] is None  # no fast path: the next build must hash
+        assert not cache.parse_is_current("fp")
+
+
 def test_untouched_file_keeps_its_fast_path_across_a_parse(tmp_path: Path) -> None:
     header = tmp_path / "h.hpp"
     header.write_text("aaaa", encoding="utf-8")
     # Nothing writes the file during the parse, so its stat is trustworthy and
-    # the fast path is kept: the guard must not cost every build a re-hash.
-    started = header.stat().st_mtime_ns + 1000
+    # the fast path is kept: the guard must not cost every build a re-hash. The
+    # gap clears the granularity epsilon the guard subtracts from the threshold.
+    started = header.stat().st_mtime_ns + 5_000_000_000
 
     with BuildCache.open(tmp_path / "cache") as cache:
         cache.record_parse("fp", {str(header): _entry(header)}, parse_started_ns=started)
