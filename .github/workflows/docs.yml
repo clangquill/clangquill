@@ -32,8 +32,8 @@ jobs:
           fetch-depth: 0
       - name: Install build dependencies
               # libclang lets the build dogfood clangquill on its own C++
-              # headers; sqlite3 comes from vcpkg, which the CMake build
-              # bootstraps itself.
+              # headers; sqlite3/nlohmann-json come from vcpkg, which the CMake
+              # build bootstraps itself.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libclang-dev

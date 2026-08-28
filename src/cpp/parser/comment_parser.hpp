@@ -10,7 +10,7 @@
 
 /**
  * @file
- * @brief Pluggable comment-parser interface and the IR field projection.
+ * @brief Pluggable comment-parser interface and IR serialization helpers.
  */
 
 namespace clangquill::parser {
@@ -41,6 +41,16 @@ class ICommentParser {
   virtual model::CommentModel parse(CXCursor cursor,
                                     const std::string& raw) const = 0;
 };
+
+/// @brief Serializes a CommentModel into its canonical JSON form.
+///
+/// Not persisted: the IR stores the model once, as `comment_fields` rows. This
+/// is the shape the shared conformance corpus (tests/comment_corpus/) spells a
+/// case's expected model in, so the C++ and Python parsers can be asserted
+/// against the same fixtures.
+/// @param model The structured comment to serialize.
+/// @return The JSON representation.
+std::string to_fields_json(const model::CommentModel& model);
 
 /// @brief Flattens a CommentModel into normalized `comment_fields` rows.
 ///

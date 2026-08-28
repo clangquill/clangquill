@@ -1,7 +1,21 @@
 #include "parser/comment_parser.hpp"
 
+#include <nlohmann/json.hpp>
+
 namespace clangquill::parser {
 namespace {
+
+using nlohmann::json;
+
+json params_to_json(const std::vector<model::CommentParam>& items) {
+  json arr = json::array();
+  for (const auto& p : items) {
+    arr.push_back({{"name", p.name},
+                   {"description", p.description},
+                   {"direction", p.direction}});
+  }
+  return arr;
+}
 
 // `comment_fields` has one slot for a field's argument, so a directed parameter
 // carries its direction there in the bracketed form Doxygen itself writes:
@@ -13,6 +27,36 @@ std::string param_arg(const model::CommentParam& p) {
 }
 
 }  // namespace
+
+std::string to_fields_json(const model::CommentModel& m) {
+  json retvals = json::array();
+  for (const auto& r : m.retvals) {
+    retvals.push_back({{"value", r.value}, {"description", r.description}});
+  }
+  json throws = json::array();
+  for (const auto& t : m.throws) {
+    throws.push_back({{"exception", t.exception}, {"description", t.description}});
+  }
+
+  json j = {
+      {"brief", m.brief},
+      {"detail", m.detail},
+      {"params", params_to_json(m.params)},
+      {"tparams", params_to_json(m.tparams)},
+      {"returns", m.returns},
+      {"retvals", retvals},
+      {"throws", throws},
+      {"see", m.see},
+      {"since", m.since},
+      {"deprecated", m.deprecated},
+      {"note", m.note},
+      {"warning", m.warning},
+      {"pre", m.pre},
+      {"post", m.post},
+      {"custom", m.custom},
+  };
+  return j.dump();
+}
 
 std::vector<model::CommentField> to_comment_fields(
     const std::string& usr, const model::CommentModel& m) {

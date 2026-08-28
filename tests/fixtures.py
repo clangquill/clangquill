@@ -340,7 +340,7 @@ def _build_uncommon_kinds_db(path: Path) -> None:
             (make, "Make a default-constructed T."),
         ):
             con.execute(
-                "INSERT INTO comments(symbol_usr, raw_text, format, fields_json) VALUES(?, '/// fixture', 'doxygen', '')",
+                "INSERT INTO comments(symbol_usr, raw_text, format) VALUES(?, '/// fixture', 'doxygen')",
                 (usr,),
             )
             con.execute(

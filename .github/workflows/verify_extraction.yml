@@ -78,8 +78,8 @@ jobs:
         # Use the repository-controlled installer (pinned key fingerprint +
         # pinned llvm-toolchain-<codename>-22 suite) rather than executing the
         # mutable upstream helper script.
-        # sqlite3 is not installed from apt: it comes from vcpkg, which the
-        # CMake build bootstraps itself.
+        # sqlite3 and nlohmann-json are not installed from apt: they come from
+        # vcpkg, which the CMake build bootstraps itself.
         run: |
           bash tools/ci/install-llvm-22-apt.sh
       - name: Install uv

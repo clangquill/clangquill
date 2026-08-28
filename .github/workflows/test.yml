@@ -41,8 +41,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
-          # Only libclang comes from apt; sqlite3 is provided by vcpkg,
-          # bootstrapped by the CMake build itself.
+          # Only libclang comes from apt; sqlite3 and nlohmann-json are
+          # provided by vcpkg, bootstrapped by the CMake build itself.
       - name: Install build dependencies
         run: |
           sudo apt-get update
