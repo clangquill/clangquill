@@ -94,12 +94,25 @@ def _write_compile_commands(directory: Path, sources: Iterable[str], *, std: str
     (directory / "compile_commands.json").write_text(json.dumps(entries), encoding="utf-8")
 
 
+def _cpp_objects(out_dir: Path) -> set[str]:
+    """Read back the ``cpp:`` domain object names a finished build wrote to ``objects.inv``.
+
+    An entry here is proof the domain both *parsed* the emitted declaration and
+    registered it: a declaration it cannot parse is warned about and then
+    dropped, leaving the build otherwise intact.
+    """
+    from sphinx.util.inventory import InventoryFile  # noqa: PLC0415
+
+    with (out_dir / "objects.inv").open("rb") as handle:
+        inv = InventoryFile.load(handle, "", lambda a, b: f"{a}/{b}")
+    return {name for domain, entries in inv.items() if domain.startswith("cpp:") for name in entries}
+
+
 @requires_libclang
 def test_minimal_sphinx_project_builds(tmp_path: Path) -> None:
     pytest.importorskip("sphinx")
     pytest.importorskip("myst_parser")
     from sphinx.application import Sphinx  # noqa: PLC0415
-    from sphinx.util.inventory import InventoryFile  # noqa: PLC0415
 
     src = tmp_path / "src"
     src.mkdir()
@@ -127,9 +140,7 @@ def test_minimal_sphinx_project_builds(tmp_path: Path) -> None:
     assert (src / "api" / "geo.md").is_file()
 
     # objects.inv lists the expected cpp: domain objects.
-    with (out / "objects.inv").open("rb") as handle:
-        inv = InventoryFile.load(handle, "", lambda a, b: f"{a}/{b}")
-    cpp_objects = {name for domain, entries in inv.items() if domain.startswith("cpp:") for name in entries}
+    cpp_objects = _cpp_objects(out)
     assert "geo::Circle" in cpp_objects
     assert "geo::scale" in cpp_objects
 
@@ -473,6 +484,32 @@ WARNING_HEADER = '#warning "geo is on its way out"\n' + HEADER
 # A redefinition: an error, which *does* still reach the warning stream.
 ERROR_HEADER = HEADER + "\nnamespace geo { struct Circle { int x; }; }\n"
 
+# An anonymous namespace inside ``geo``: internal linkage, so nothing here is
+# API a caller can name, include or link against. The nesting cases live in the
+# C++ suite (tests/cpp/test_parser.cpp); what only a real Sphinx build can show
+# is what the *domain* makes of the qualified names these produce.
+ANONYMOUS_HEADER = (
+    HEADER
+    + """
+namespace geo {
+namespace {
+
+/// An internal helper: one translation unit only.
+inline int internal_helper() { return 1; }
+
+/// An internal tag type.
+struct InternalTag {
+  /// A member of an internal type is internal too.
+  int internal_field = 0;
+};
+
+}  // namespace
+}  // namespace geo
+"""
+)
+
+ANONYMOUS_CONF = CONF + "clangquill_extract_anonymous_namespaces = True\n"
+
 DIAGNOSTICS_LOG_CONF = CONF + 'clangquill_diagnostics_log = "_build/parse.log"\n'
 
 
@@ -708,3 +745,58 @@ def test_missing_libclang_prunes_pages_a_prior_run_left_behind(
     # The orphaned real page is gone; only the placeholder index remains.
     assert not (api / "geo.md").exists()
     assert (api / "index.md").is_file()
+
+
+@requires_libclang
+def test_extract_anonymous_namespaces_config_value_is_recognised(tmp_path: Path) -> None:
+    """``clangquill_extract_anonymous_namespaces`` must not trip the unknown-config hook.
+
+    The option is a ``Config`` dataclass field, so it lands in ``CONFIG_FIELDS``
+    and ``_warn_unknown_config`` knows about it. Registering it directly with
+    ``app.add_config_value`` instead would have it flagged as a typo.
+    """
+    src, warnings = _build_project(tmp_path, ANONYMOUS_HEADER, ANONYMOUS_CONF)
+
+    assert "unknown config value" not in warnings
+    assert (src / "api" / "geo.md").is_file()
+
+
+@requires_libclang
+def test_anonymous_scope_declaration_parses_in_the_cpp_domain(tmp_path: Path) -> None:
+    """The opt-in's qualified names must survive the C++ domain, not just the generator.
+
+    This is why the scope is spelled ``@anonymous`` rather than clang's own
+    ``(anonymous namespace)``: ``@name`` is how the domain spells an anonymous
+    entity, while the parenthesised form is an invalid declaration. The domain
+    warns about one it cannot parse and then *drops* it, leaving the rest of the
+    build intact -- so the inventory entry, not a surviving build, is what shows
+    the declaration was understood.
+
+    Every other test of this option (``tests/test_pipeline.py``,
+    ``tests/cpp/test_parser.cpp``) stops at the generated text, so a regression
+    to a spelling Sphinx rejects would pass them all.
+    """
+    _, warnings = _build_project(tmp_path, ANONYMOUS_HEADER, ANONYMOUS_CONF)
+
+    cpp_objects = _cpp_objects(tmp_path / "out")
+    assert "geo::@anonymous::internal_helper" in cpp_objects
+    assert "geo::@anonymous::InternalTag" in cpp_objects
+    # Not merely absent from the inventory: never rejected on the way there.
+    assert "Invalid C++ declaration" not in warnings
+
+
+@requires_libclang
+def test_anonymous_contents_stay_out_of_the_inventory_by_default(tmp_path: Path) -> None:
+    """The bug in #195, end to end: internal linkage must not reach the API index.
+
+    Without the opt-in nothing from the anonymous namespace is documented -- and
+    above all not under ``geo::``, where eliding the unnamed scope used to file
+    it, indistinguishable from API a caller can actually use.
+    """
+    _build_project(tmp_path, ANONYMOUS_HEADER, CONF)
+
+    cpp_objects = _cpp_objects(tmp_path / "out")
+    # The real API is still there, so the assertions below cannot pass by the
+    # build having produced nothing at all.
+    assert "geo::scale" in cpp_objects
+    assert not [name for name in cpp_objects if "internal" in name.lower() or "@anonymous" in name]
