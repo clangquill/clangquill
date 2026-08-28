@@ -1312,7 +1312,7 @@ TEST_CASE("an uppercase header extension is parsed as a header", "[parser]") {
   // own `#pragma once` was reported as being in a main file -- the failure the
   // whole `-xc++-header` dance exists to avoid.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-header-lang-upper";
+  const fs::path dir = unique_temp_dir("clangquill-header-lang-upper");
   fs::remove_all(dir);
   fs::create_directories(dir);
   std::ofstream(dir / "widget.H")
@@ -1781,7 +1781,7 @@ TEST_CASE("the logged command tail survives a paste into a shell", "[parser]") {
   // define carrying a command substitution used to come back as a command the
   // paste would *run*. Single quotes leave nothing special, with `'` spliced.
   namespace fs = std::filesystem;
-  const fs::path dir = fs::temp_directory_path() / "clangquill-parse-fail-quoting";
+  const fs::path dir = unique_temp_dir("clangquill-parse-fail-quoting");
   fs::remove_all(dir);
   fs::create_directories(dir);
 
