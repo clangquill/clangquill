@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Annotated
 import typer
 
 from clangquill import __version__, _core
+from clangquill._lock import BuildLockTimeoutError
 from clangquill.config import GROUP_BY_CHOICES, Config, ConfigError
 from clangquill.pipeline import build as run_pipeline
 from clangquill.pipeline import warnings_or_worse
@@ -222,7 +223,7 @@ def build(  # noqa: PLR0913
 
     try:
         result = run_pipeline(config, base_dir=Path.cwd())
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, BuildLockTimeoutError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     if result.db_is_temporary:

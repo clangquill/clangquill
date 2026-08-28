@@ -32,6 +32,10 @@ def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _is_str(value: object) -> bool:
     return isinstance(value, str)
 
@@ -68,6 +72,7 @@ _TYPE_CHECKS: tuple[tuple[str, Callable[[object], bool], str], ...] = (
     ("compile_commands", _is_optional_str, "a string or None"),
     ("clang_resource_dir", _is_optional_str, "a string or None"),
     ("cache_dir", _is_optional_str, "a string or None"),
+    ("cache_lock_timeout", _is_number, "a number"),
     ("comment_parser", _is_optional_str, "a string or None"),
     ("path_base", _is_optional_str, "a string or None"),
     ("diagnostics_log", _is_optional_str, "a string or None"),
@@ -144,6 +149,13 @@ class Config:
     #: caching: each build re-parses into a throwaway temp file and rewrites
     #: every page.
     cache_dir: str | None = None
+    #: Seconds an incremental build waits for another build already holding
+    #: the single-writer lock on ``cache_dir`` before giving up (see
+    #: :mod:`clangquill._lock`). Only one build may run against a given
+    #: ``cache_dir`` at a time; concurrent readers of its IR are unaffected.
+    #: Ignored when ``cache_dir`` is ``None``, since a stateless build has
+    #: nothing to lock.
+    cache_lock_timeout: float = 300.0
     #: Emit pages/sections for symbols that carry no documentation comment.
     include_undocumented: bool = True
     #: Comment-parser override (a registered name or a dotted import path).
@@ -206,6 +218,9 @@ class Config:
             raise ConfigError(msg)
         if self.tu_batch < 0:
             msg = f"{CONFIG_PREFIX}tu_batch must be >= 0 (0 = auto, 1 = one TU per input), got {self.tu_batch}"
+            raise ConfigError(msg)
+        if self.cache_lock_timeout <= 0:
+            msg = f"{CONFIG_PREFIX}cache_lock_timeout must be > 0 seconds, got {self.cache_lock_timeout}"
             raise ConfigError(msg)
         return self
 

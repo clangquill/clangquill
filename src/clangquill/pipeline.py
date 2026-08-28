@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from clangquill import _core
+from clangquill._lock import build_lock
 from clangquill.cache import BuildCache, OutputRecord, ParseStatus, file_sha256, fingerprint, hash_bytes, hash_text
 from clangquill.comments import OVERRIDE_ENV
 from clangquill.config import CONFIG_PREFIX
@@ -804,7 +805,13 @@ def build(config: Config, *, base_dir: str | Path) -> BuildResult:
     output_dir = (base / config.output_dir).resolve()
     if config.cache_dir:
         cache_dir = (base / config.cache_dir).resolve()
-        return _incremental_build(config, base, inputs, output_dir, cache_dir, compile_db)
+        # Held for the whole incremental build: it touches the bookkeeping DB,
+        # the IR DB and the output tree in a non-atomic sequence, none of it
+        # guarded by a cross-store transaction, so a second build sharing this
+        # cache_dir must wait rather than interleave with it (see #311). A
+        # stateless build (no cache_dir) has no persistent state to race over.
+        with build_lock(cache_dir, timeout=config.cache_lock_timeout):
+            return _incremental_build(config, base, inputs, output_dir, cache_dir, compile_db)
     return _full_build(config, base, inputs, output_dir, compile_db)
 
 

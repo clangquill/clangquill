@@ -152,6 +152,25 @@ re-reading the whole API set on every build, and what lets
 [sphinx-autobuild](https://github.com/sphinx-doc/sphinx-autobuild) watch the
 source directory clangquill generates into without rebuilding in a loop.
 
+### Concurrent builds
+
+**One build runs against a given `cache_dir` at a time; concurrent readers are
+fine.** A build updates the bookkeeping database, the IR database and the
+output tree in a non-atomic sequence, so two builds sharing a `cache_dir` at
+once — `sphinx-autobuild` racing a manual build, two CI jobs sharing a
+workspace — could otherwise interleave and leave either inconsistent. clangquill
+prevents that itself: `build()` takes an OS-level advisory lock (`flock` on
+POSIX, `msvcrt.locking` on Windows) on a lockfile inside `cache_dir` for the
+whole of an incremental build, so a second build waits for the first to finish.
+If it is still waiting after `clangquill_cache_lock_timeout` seconds (default
+300; see [the configuration reference](guides/configuration.md#output)) it
+fails with an error naming the process still holding the lock, rather than
+hanging forever. A stateless build (no `cache_dir`) has no persistent state to
+lock and is unaffected.
+
+Reading the IR while a build is in flight — e.g. a second Sphinx process just
+browsing, not writing — is unaffected by the lock and always safe.
+
 ## Example notebooks statistics
 
 ```{nb-exec-table}
