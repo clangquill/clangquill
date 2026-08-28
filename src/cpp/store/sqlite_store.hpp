@@ -146,6 +146,15 @@ using BatchSink = std::function<void(model::ParsedModule&&)>;
 /// temporary file and leaves `path` exactly as it was, rather than holding a
 /// mix of an old IR's rows and however many batches had landed (#317).
 ///
+/// The database's own WAL-mode `-wal`/`-shm` sidecar files are handled
+/// alongside the main one: any left next to `path` by an earlier, abnormally
+/// terminated write are cleared before the swap (the rename above only ever
+/// touches the main file, so a stale sidecar pair would otherwise sit next to
+/// the freshly replaced database and could be replayed onto it by the next
+/// reader), and the temporary file's own sidecars — ordinarily gone already,
+/// checkpointed away by its clean close — are swept up too rather than left
+/// behind under the temp name.
+///
 /// @param path Filesystem path of the target database.
 /// @param meta Metadata stored alongside every batch.
 /// @param produce Callback that drives the parse, calling the sink it is given

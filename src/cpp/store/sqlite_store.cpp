@@ -35,6 +35,15 @@ std::filesystem::path unique_sibling_path(const std::filesystem::path& target) {
                            target.string());
 }
 
+// Best-effort removal of `path`'s WAL-mode sidecar files (`-wal` and `-shm`).
+// Safe to call whether or not either exists.
+void remove_wal_sidecars(const std::filesystem::path& path) {
+  std::error_code ec;
+  std::filesystem::remove(path.string() + "-wal", ec);
+  ec.clear();
+  std::filesystem::remove(path.string() + "-shm", ec);
+}
+
 }  // namespace
 
 Meta Meta::current() {
@@ -638,12 +647,26 @@ void write_streamed_full_parse(const std::string& path, const Meta& meta,
   const fs::path tmp = unique_sibling_path(target);
   try {
     {
-      // Scoped so the temp database's connection (and its WAL) is closed
-      // before the rename below -- and, if `produce` throws, before the temp
-      // file is removed in the catch block.
+      // Scoped so the temp database's connection is closed before anything
+      // below touches the filesystem -- and, if `produce` throws, before the
+      // temp file is removed in the catch block. A clean close checkpoints
+      // WAL mode's `-wal` file back into the main one and removes both
+      // sidecars, but nothing renames sidecars below, so any that somehow
+      // survived the close would otherwise be orphaned under the temp name
+      // forever; the removal below is defensive.
       SqliteStore staging(tmp.string());
       produce([&](model::ParsedModule&& part) { staging.write_part(part, meta); });
     }
+    remove_wal_sidecars(tmp);
+    // A *stale* `-wal`/`-shm` pair can survive next to `target` from an
+    // earlier, abnormally terminated write (exactly the crash this whole
+    // mechanism defends against) -- the rename below only ever touches the
+    // main file, so it would otherwise sit next to the freshly swapped-in
+    // database, and SQLite's WAL recovery on the next open could replay it,
+    // resurrecting old, unrelated rows into what is supposed to be a fresh
+    // parse. Clear it before the swap so the replacement really is just the
+    // fresh file, nothing riding along with it.
+    remove_wal_sidecars(target);
     std::error_code ec;
     fs::rename(tmp, target, ec);
     if (ec) {
@@ -654,6 +677,7 @@ void write_streamed_full_parse(const std::string& path, const Meta& meta,
   } catch (...) {
     std::error_code ec;
     fs::remove(tmp, ec);
+    remove_wal_sidecars(tmp);
     throw;
   }
 }

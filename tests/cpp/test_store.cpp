@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -466,6 +467,64 @@ TEST_CASE(
       std::runtime_error);
 
   CHECK_FALSE(std::filesystem::exists(path));
+}
+
+TEST_CASE(
+    "write_streamed_full_parse discards a stale WAL sidecar left next to the "
+    "target",
+    "[store]") {
+  // A `-wal`/`-shm` pair can survive next to `path` from an earlier,
+  // abnormally terminated write -- exactly the crash this whole mechanism
+  // defends against. The rename write_streamed_full_parse does only ever
+  // touches the main file, so left in place a stale sidecar would sit next to
+  // the freshly swapped-in database, and SQLite's WAL recovery on the next
+  // open could replay it, resurrecting rows that have nothing to do with the
+  // new parse.
+  std::string path = temp_db_path();
+  model::ParsedModule previous;
+  model::SourceFile old_file;
+  old_file.path = "/tmp/old.hpp";
+  old_file.sha256 = std::string(64, 'a');
+  previous.files.push_back(old_file);
+  previous.symbols.push_back(group_symbol("c:@F@old", old_file.path));
+
+  {
+    store::SqliteStore writer(path);
+    writer.write(previous, store::Meta::current());
+  }
+
+  // Fabricate a stale sidecar pair: arbitrary bytes are enough, since the
+  // point is that they must be gone by the time write_streamed_full_parse
+  // returns, not that they parse as a valid WAL.
+  {
+    std::ofstream wal(path + "-wal", std::ios::binary);
+    wal << "stale wal bytes";
+    std::ofstream shm(path + "-shm", std::ios::binary);
+    shm << "stale shm bytes";
+  }
+  REQUIRE(std::filesystem::exists(path + "-wal"));
+  REQUIRE(std::filesystem::exists(path + "-shm"));
+
+  model::SourceFile fresh;
+  fresh.path = "/tmp/fresh.hpp";
+  fresh.sha256 = std::string(64, 'b');
+  model::ParsedModule batch;
+  batch.files.push_back(fresh);
+  batch.symbols.push_back(group_symbol("c:@F@fresh", fresh.path));
+
+  store::write_streamed_full_parse(
+      path, store::Meta::current(),
+      [&](const store::BatchSink& sink) { sink(model::ParsedModule(batch)); });
+
+  CHECK_FALSE(std::filesystem::exists(path + "-wal"));
+  CHECK_FALSE(std::filesystem::exists(path + "-shm"));
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+  REQUIRE(got.symbols.size() == 1);
+  CHECK(got.symbols[0].usr == "c:@F@fresh");
+
+  std::remove(path.c_str());
 }
 
 TEST_CASE("SqliteStore write_tus replaces only the re-parsed file's rows",
