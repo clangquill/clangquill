@@ -5,6 +5,54 @@
 #include <system_error>
 #include <vector>
 
+// The token-heuristic layer's contract.
+//
+// libclang's structured cursor API has no accessor for a template parameter's
+// default argument, a variable template's shape (it reports the whole
+// declaration as one opaque CXCursor_UnexposedDecl), or a macro's parameter
+// list. template_head(), param_default(), variable_template() and
+// macro_signature() recover this by re-lexing the cursor's own raw tokens
+// (clang_tokenize()) and walking them with a small hand-rolled parser --
+// angle_closes() and in_group(), below -- rather than parsing the grammar
+// properly. That makes this file the most libclang-version-sensitive code in
+// the repo: it depends on clang_tokenize()'s raw-lex splitting of `>>`/`<<`
+// (see angle_closes()) and, for the friend-body probe in ast_visitor.cpp
+// (friend_decl_has_inline_body()), on exactly how far
+// CXTranslationUnit_SkipFunctionBodies truncates a cursor's extent.
+//
+// What each function recovers:
+//   - template_head(): the `template<...>` clause of a template/concept
+//     owner, plus (via defaults_out) each parameter's default-argument text.
+//     Handles arbitrary angle-bracket nesting split across `<`/`>`/`>>`
+//     tokens however the raw lexer grouped them, and a default containing a
+//     parenthesized/bracketed/braced subexpression -- `(N > 2)`, a fold
+//     expression, a call, a brace-init -- whose own `<`, `>`, `>>`, `,` and
+//     `=` are not template-argument-list syntax (in_group()). It does not
+//     look past the closing `>` of the parameter list, so a trailing
+//     `requires` clause is simply not part of what it returns -- neither
+//     included nor a reason to fail.
+//   - param_default(): a function/method parameter's default-argument text,
+//     found as the first top-level `=` (not inside the parameter's own type,
+//     e.g. `enable_if_t<(sizeof(int) > 2), int>`).
+//   - variable_template(): a variable template's head, decl-specifiers-and-
+//     type, and (on an explicit specialization) trailing argument list, none
+//     of which libclang's API exposes for an unexposed declaration.
+//   - specialization_form(): explicit specialization vs. explicit
+//     instantiation, told apart by whether template_head() finds a head at
+//     all (instantiation has none).
+//
+// When it bails: an owner with no `template` keyword, an unbalanced angle- or
+// group-nesting, or a token shape this file's parser doesn't recognize all
+// bail to "" (template_head(), param_default(), macro_signature()'s params)
+// or std::nullopt (variable_template()) -- never a partial answer. A silently
+// *wrong* answer -- a truncated-but-nonempty default, a head missing its last
+// parameter -- is the one class of bug this layer must not have; a documented
+// bail is fine. tests/cpp/test_token_heuristics_generative.cpp exercises this
+// invariant generatively across nested templates, shift and parenthesized
+// NTTP defaults, brace-inits, fold expressions and constrained parameters; a
+// find that violates it belongs there, not just as an isolated regression
+// test. Re-run that suite against each new libclang major as it's packaged.
+
 namespace clangquill::parser {
 
 model::SymbolKind map_kind(CXCursorKind kind) {
@@ -136,16 +184,47 @@ void append_token(std::string& buf, const std::string& tok) {
 //
 // clang_tokenize is a raw lex, so the close of `A<B<C>>` arrives as a single
 // `>>` token (and `A<B<C<D>>>` as `>>` followed by `>`), matching neither "<"
-// nor ">". A `>>` closes two lists only when two are open: with a single list
-// open the same spelling is the shift operator of an expression (an NTTP
-// default such as `1 >> 4`), whose second `>` would have to close a list that
-// was never opened. `<<` needs no mirror rule -- no declaration opens two
-// argument lists with one token, so it is always a shift and stays an ordinary
-// token.
+// nor ">". Per [temp.names], an unparenthesized `>>` is *always* split into
+// two `>` wherever a template-argument/parameter list could end -- it is not
+// an ambiguity the compiler resolves by how many lists happen to be open.
+// With two open, both close cleanly. With one, the first `>` closes it and
+// the second is a leftover token the grammar has no use for right there --
+// which is why a bare `1 >> 4` as an NTTP default does not compile at all
+// (unlike `1 << 4`, which never collides with list-closing syntax); it needs
+// parens, which route it through in_group() instead of here. So @p depth < 2
+// is a shape that never reaches this function from source that actually
+// compiled -- returning 0 is a safe default for the unreachable case, not a
+// claim that the bare form is valid C++.
 int angle_closes(const std::string& tok, int depth) {
   if (tok == ">") return 1;
   if (tok == ">>" && depth >= 2) return 2;
   return 0;
+}
+
+// Advances @p paren_depth for one token of a raw token stream -- `(`, `[` and
+// `{` open a group, `)`, `]` and `}` close one (never letting it go negative,
+// so a stray unmatched closer is a no-op rather than a wrong angle depth for
+// everything after it) -- and reports whether @p tok must be read as plain
+// text rather than as angle-bracket syntax: either it is one of those six
+// bracket tokens, or a group is still open around it.
+//
+// Every function in this file that walks raw tokens counting `<`/`>`/`>>`
+// needs this: a `>` inside a parenthesized NTTP default (`(N > 2)`), a fold
+// expression (`(Ns + ... + 0)`), a call (`pick(1, 2)`) or a brace-init
+// (`{1, 2}`) is never template-argument-list syntax, and a `,` there is never
+// a top-level parameter separator. Skipping this check reads that `>` as
+// closing a list that was never opened, or that `,` as ending a parameter
+// early -- silently wrong, not a bail.
+bool in_group(const std::string& tok, int& paren_depth) {
+  if (tok == "(" || tok == "[" || tok == "{") {
+    ++paren_depth;
+    return true;
+  }
+  if (tok == ")" || tok == "]" || tok == "}") {
+    if (paren_depth > 0) --paren_depth;
+    return true;
+  }
+  return paren_depth > 0;
 }
 
 // Joins declaration tokens back into readable text: a space only where two
@@ -210,6 +289,7 @@ std::string template_head(CXCursor owner,
   std::string cur, cur_default;
   bool started = false, done = false, in_default = false;
   int depth = 0;
+  int paren_depth = 0;  // see in_group()
 
   auto push_seg = [&]() {
     segs.push_back(cur);
@@ -217,6 +297,10 @@ std::string template_head(CXCursor owner,
     cur.clear();
     cur_default.clear();
     in_default = false;
+  };
+  auto emit = [&](const std::string& t) {
+    append_token(cur, t);
+    if (in_default) append_token(cur_default, t);
   };
 
   for (const std::string& t : toks) {
@@ -232,10 +316,13 @@ std::string template_head(CXCursor owner,
       }
       break;  // tokens before the '<' that are not 'template' end the head
     }
+    if (in_group(t, paren_depth)) {
+      emit(t);
+      continue;
+    }
     if (t == "<") {
       ++depth;
-      append_token(cur, t);
-      if (in_default) append_token(cur_default, t);
+      emit(t);
     } else if (int closes = angle_closes(t, depth); closes > 0) {
       for (int i = 0; i < closes; ++i) {
         if (--depth == 0) {
@@ -251,15 +338,19 @@ std::string template_head(CXCursor owner,
     } else if (t == "," && depth == 1) {
       push_seg();
     } else if (t == "=" && depth == 1) {
-      append_token(cur, t);
+      emit(t);
       in_default = true;
     } else {
-      append_token(cur, t);
-      if (in_default) append_token(cur_default, t);
+      emit(t);
     }
   }
 
-  if (!started || segs.empty()) {
+  // `done` is set only when the outermost `<...>` actually closed. Without
+  // it, a shape this loop doesn't fully understand (an unbalanced group, a
+  // libclang tokenization this wasn't written against) would still return
+  // whatever partial segments it collected -- a head silently missing its
+  // last parameter, which is worse than bailing.
+  if (!started || segs.empty() || !done) {
     if (defaults_out != nullptr) defaults_out->clear();
     return "";
   }
@@ -304,7 +395,9 @@ std::optional<VariableTemplate> variable_template(CXCursor c) {
   while (i < toks.size() && toks[i] != "template") ++i;
   ++i;  // the `template` keyword itself
   int depth = 0;
+  int paren_depth = 0;  // see in_group()
   for (; i < toks.size(); ++i) {
+    if (in_group(toks[i], paren_depth)) continue;
     if (toks[i] == "<") {
       ++depth;
       continue;
@@ -321,11 +414,16 @@ std::optional<VariableTemplate> variable_template(CXCursor c) {
   std::vector<std::string> type_toks;
   bool named = false;
   depth = 0;
+  paren_depth = 0;
   for (; i < toks.size(); ++i) {
-    if (depth == 0 && toks[i] == name) {
+    if (paren_depth == 0 && depth == 0 && toks[i] == name) {
       named = true;
       ++i;
       break;
+    }
+    if (in_group(toks[i], paren_depth)) {
+      type_toks.push_back(toks[i]);
+      continue;
     }
     if (toks[i] == "<") {
       ++depth;
@@ -342,7 +440,12 @@ std::optional<VariableTemplate> variable_template(CXCursor c) {
   if (i < toks.size() && toks[i] == "<") {
     std::vector<std::string> args{toks[i]};
     depth = 1;
+    paren_depth = 0;
     for (++i; i < toks.size() && depth > 0; ++i) {
+      if (in_group(toks[i], paren_depth)) {
+        args.push_back(toks[i]);
+        continue;
+      }
       if (toks[i] == "<") {
         ++depth;
         args.push_back(toks[i]);
@@ -375,17 +478,18 @@ std::string param_default(CXCursor param) {
   std::vector<std::string> toks = cursor_tokens(param);
   std::string out;
   bool seen = false;
-  int depth = 0;   // `(`, `[` and `{` groups
-  int angles = 0;  // template-argument lists, counted apart from the above so
-                   // the `>>` rule in angle_closes() sees the angle depth only
+  int depth = 0;   // '(', '[' and '{' groups; see in_group()
+  int angles = 0;  // template-argument lists opened by the parameter's own
+                   // type (e.g. `std::enable_if_t<...>`), so a top-level `=`
+                   // inside them (a default nested in a default template
+                   // argument) isn't mistaken for this parameter's own `=`.
   for (const std::string& t : toks) {
     if (!seen) {
-      if (t == "=" && depth == 0 && angles == 0) {
+      if (in_group(t, depth)) {
+        // A '<'/'>' inside a group -- `enable_if_t<(sizeof(int) > 2), int>`
+        // -- is part of that subexpression, never an angle-list boundary.
+      } else if (t == "=" && angles == 0) {
         seen = true;
-      } else if (t == "(" || t == "[" || t == "{") {
-        ++depth;
-      } else if (t == ")" || t == "]" || t == "}") {
-        --depth;
       } else if (t == "<") {
         ++angles;
       } else if (int closes = angle_closes(t, angles); closes > 0) {
