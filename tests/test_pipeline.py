@@ -1855,6 +1855,21 @@ def test_warnings_or_worse_drops_notes() -> None:
     assert [record.text for record in pipeline.warnings_or_worse(records)] == ["warn", "fatal"]
 
 
+def test_diagnostic_texts_drops_nested_records_even_at_error_severity() -> None:
+    records = [
+        pipeline.Diagnostic(severity=3, depth=0, text="a.hpp:1:1: error: bad"),
+        pipeline.Diagnostic(severity=3, depth=2, text="a.hpp:1:1: error: recovered nested"),
+        pipeline.Diagnostic(severity=1, depth=1, text="a.hpp:1:1: note: here"),
+        pipeline.Diagnostic(severity=2, depth=0, text="a.hpp:2:1: warning: meh"),
+        pipeline.Diagnostic(severity=4, depth=0, text="b.hpp:1:1: fatal: worse"),
+    ]
+
+    assert pipeline._diagnostic_texts(records) == [  # noqa: SLF001
+        "a.hpp:1:1: error: bad",
+        "b.hpp:1:1: fatal: worse",
+    ]
+
+
 def _carry_forward(
     previous: list[pipeline.Diagnostic],
     records: list[pipeline.Diagnostic],
