@@ -1,8 +1,8 @@
 {
-    "description": "The `/*!<` post-item marker must not leak its '<' into the text.",
-    "raw": "/*!< trailing member doc */",
+    "description": "Doxygen joins a second `\\brief` onto the first; keeping only the first silently dropped half the summary.",
+    "raw": "\n/// @brief First half.\n/// @brief Second half.\n",
     "expected": {
-        "brief": "trailing member doc",
+        "brief": "First half. Second half.",
         "detail": [],
         "params": [],
         "tparams": [],
@@ -16,12 +16,12 @@
         "warning": [],
         "pre": [],
         "post": [],
-        "custom": {},
         "invariant": [],
         "todo": [],
         "bug": [],
         "author": [],
         "version": [],
-        "date": []
+        "date": [],
+        "custom": {}
     }
 }

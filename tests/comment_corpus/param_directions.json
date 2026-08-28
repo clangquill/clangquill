@@ -47,6 +47,12 @@
             "unknown[bracket]": [
                 "keeps its full spelling"
             ]
-        }
+        },
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": []
     }
 }
