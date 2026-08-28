@@ -131,6 +131,16 @@ def test_copy_target_drops_nested_template_arguments() -> None:
     assert model.see == ["Outer::at"]
 
 
+def test_copy_target_keeps_the_member_past_a_function_type_template_argument() -> None:
+    """Only a `(` outside the template arguments ends the name.
+
+    The `(` of `void(int)` belongs to the argument being dropped; cutting the
+    target there points the reader at the class instead of the member named.
+    """
+    model = doxygen_parse("/** @copydoc Registry<std::function<void(int)>>::add(Handler) */")
+    assert model.see == ["Registry::add"]
+
+
 def test_doxygen_parse_joins_a_second_brief() -> None:
     """Doxygen joins repeated @brief text; dropping it lost half the summary."""
     model = doxygen_parse("/// @brief First half.\n/// @brief Second half.\n")

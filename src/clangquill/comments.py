@@ -347,18 +347,23 @@ def _copy_target(text: str) -> str:
     Template arguments are dropped by counting ``<``/``>`` depth rather than by
     substituting an innermost ``<...>``, so a nested list -- Eigen's
     ``Matrix<Scalar,Rows,Cols>::Base<Derived<T>>`` shape -- comes out whole
-    instead of leaving the outer brackets behind. This mirrors ``copy_target``
-    in ``src/cpp/parser/doxygen_comment_parser.cpp`` command for command; the
-    two parsers must agree here (see ``tests/comment_corpus``).
+    instead of leaving the outer brackets behind. The parameter list ends the
+    name only at depth zero: the ``(`` of a function-type template argument,
+    ``Registry<std::function<void(int)>>::add``, belongs to the argument being
+    dropped, and cutting there would strip the member the copy named. This
+    mirrors ``copy_target`` in ``src/cpp/parser/doxygen_comment_parser.cpp``
+    command for command; the two parsers must agree here (see
+    ``tests/comment_corpus``).
     """
-    head = text.split("(", 1)[0]
     out = []
     depth = 0
-    for ch in head:
+    for ch in text:
         if ch == "<":
             depth += 1
         elif ch == ">":
             depth = max(depth - 1, 0)
+        elif ch == "(" and depth == 0:
+            break
         elif depth == 0:
             out.append(ch)
     name = "".join(out).split(maxsplit=1)

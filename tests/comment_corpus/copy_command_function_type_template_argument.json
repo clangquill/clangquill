@@ -1,0 +1,29 @@
+{
+    "description": "A copy command whose target carries a function-type template argument. The `(` of `void(int)` belongs to the argument being dropped, so only a `(` at angle depth zero ends the name -- cutting at the first one would strip `::add` and point the reader at the class instead of the member.",
+    "raw": "\n/** @copydoc Registry<std::function<void(int)>>::add(Handler) const */\n",
+    "expected": {
+        "brief": "",
+        "detail": [],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [
+            "Registry::add"
+        ],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {}
+    }
+}
