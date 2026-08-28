@@ -40,7 +40,6 @@ from __future__ import annotations
 import glob
 import json
 import os
-import shutil
 import sqlite3
 import tempfile
 import time
@@ -51,7 +50,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from clangquill import _core
-from clangquill.cache import BuildCache, OutputRecord, ParseStatus, file_sha256, fingerprint, hash_text
+from clangquill.cache import BuildCache, OutputRecord, ParseStatus, file_sha256, fingerprint, hash_bytes, hash_text
 from clangquill.comments import OVERRIDE_ENV
 from clangquill.config import CONFIG_PREFIX
 from clangquill.generator import Generator, write_if_changed
@@ -232,6 +231,21 @@ def _compile_commands_candidates(value: str, base_dir: Path) -> list[Path]:
     return [configured / COMPILE_COMMANDS_NAME]
 
 
+@dataclass(frozen=True)
+class _CompileDatabase:
+    """A resolved, validated ``compile_commands.json``: where it is and its hash.
+
+    A build needs the database's directory (libclang takes the directory, not
+    the file), proof that it loads, and its content hash for the parse
+    fingerprint. Each of those used to re-read and re-parse the whole file —
+    three reads plus a fourth for the hash, noticeable at monorepo sizes — so
+    :func:`build` produces one of these up front and passes it around.
+    """
+
+    path: Path
+    sha256: str
+
+
 def resolve_compile_commands(value: str, base_dir: Path) -> Path:
     """Return the usable ``compile_commands.json`` configured as ``value``.
 
@@ -244,11 +258,15 @@ def resolve_compile_commands(value: str, base_dir: Path) -> Path:
     Raises :class:`CompileCommandsError` if no candidate path holds a loadable
     database.
     """
+    return _load_compile_commands(value, base_dir).path
+
+
+def _load_compile_commands(value: str, base_dir: Path) -> _CompileDatabase:
+    """Resolve, validate and hash the configured database in a single read."""
     candidates = _compile_commands_candidates(value, base_dir)
     for candidate in candidates:
         if candidate.is_file():
-            _check_compile_commands(candidate)
-            return candidate
+            return _check_compile_commands(candidate)
     looked = "\n".join(f"  {candidate}" for candidate in candidates)
     msg = (
         f"{CONFIG_PREFIX}compile_commands={value!r} does not point at a "
@@ -257,15 +275,21 @@ def resolve_compile_commands(value: str, base_dir: Path) -> Path:
     raise CompileCommandsError(msg)
 
 
-def _check_compile_commands(path: Path) -> None:
-    """Raise :class:`CompileCommandsError` unless ``path`` is a loadable database."""
+def _check_compile_commands(path: Path) -> _CompileDatabase:
+    """Return ``path`` described, or raise unless it is a loadable database.
+
+    Read as bytes: the same buffer answers "does it load?" and "what is its
+    hash?", and the hash then matches :func:`file_sha256` exactly, so nothing
+    about this shortcut moves an existing parse fingerprint. ``json.loads``
+    takes bytes directly and reports a bad encoding as the ValueError below.
+    """
     try:
-        text = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
     except OSError as exc:
         msg = f"compilation database {path} could not be read: {exc}"
         raise CompileCommandsError(msg) from exc
     try:
-        entries = json.loads(text)
+        entries = json.loads(raw)
     except ValueError as exc:
         msg = f"compilation database {path} is not valid JSON: {exc}"
         raise CompileCommandsError(msg) from exc
@@ -278,10 +302,19 @@ def _check_compile_commands(path: Path) -> None:
             "regenerate it (e.g. cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON)"
         )
         raise CompileCommandsError(msg)
+    return _CompileDatabase(path, hash_bytes(raw))
 
 
-def _parse_options(config: Config, base_dir: Path) -> _core.ParseOptions:
-    """Translate a :class:`Config` into core :class:`ParseOptions`."""
+def _parse_options(
+    config: Config,
+    base_dir: Path,
+    compile_db: _CompileDatabase | None = None,
+) -> _core.ParseOptions:
+    """Translate a :class:`Config` into core :class:`ParseOptions`.
+
+    ``compile_db`` is the database :func:`build` already resolved; omitting it
+    resolves one, which is what a caller outside a build wants.
+    """
     opt = _core.ParseOptions()
     opt.std_flag = config.std
     opt.include_dirs = [str((base_dir / d).resolve()) for d in config.include_dirs]
@@ -300,11 +333,18 @@ def _parse_options(config: Config, base_dir: Path) -> _core.ParseOptions:
     if config.compile_commands:
         # libclang takes the *directory*; the resolver has already proven a
         # loadable compile_commands.json sits inside it.
-        opt.compile_commands_dir = str(resolve_compile_commands(config.compile_commands, base_dir).parent)
+        if compile_db is None:
+            compile_db = _load_compile_commands(config.compile_commands, base_dir)
+        opt.compile_commands_dir = str(compile_db.path.parent)
     return opt
 
 
-def _parse_fingerprint(config: Config, base_dir: Path, inputs: list[str]) -> str:
+def _parse_fingerprint(
+    config: Config,
+    base_dir: Path,
+    inputs: list[str],
+    compile_db: _CompileDatabase | None = None,
+) -> str:
     """Fingerprint everything that, if changed, invalidates the cached parse.
 
     Covers the resolved input set, the normalized compile arguments, the
@@ -315,14 +355,13 @@ def _parse_fingerprint(config: Config, base_dir: Path, inputs: list[str]) -> str
     compile_commands_hash = ""
     if config.compile_commands:
         # ``compile_commands`` names the *directory* holding compile_commands.json
-        # (it is handed to clang_CompilationDatabase_fromDirectory), so hash the
-        # JSON file inside it rather than the directory. ``build`` has already
-        # rejected a database that cannot be loaded, so the guard here only
-        # covers a file that vanished mid-run.
-        try:
-            compile_commands_hash = file_sha256(resolve_compile_commands(config.compile_commands, base_dir))
-        except OSError:
-            compile_commands_hash = "missing"
+        # (it is handed to clang_CompilationDatabase_fromDirectory), so this is
+        # the hash of the JSON file inside it, not of the directory. It comes
+        # from the one read ``build`` already did, which also closes the window
+        # where the file vanished between that read and this one.
+        if compile_db is None:
+            compile_db = _load_compile_commands(config.compile_commands, base_dir)
+        compile_commands_hash = compile_db.sha256
     return fingerprint(
         {
             # Sorted because the parse is a function of the input *set*: two
@@ -679,18 +718,24 @@ def _rendered_files(
     eligible, wide = _page_cache_mode(config, base_dir)
     memoize = cache is not None and eligible
     rendered: list[tuple[str, str]] = []
+    # Only the pages this build actually rendered need writing back: a page
+    # replayed from the cache is already stored under the very key it was
+    # replayed by. ``stems`` carries the rest so the cache can still prune the
+    # pages that left the render.
     records: dict[str, tuple[str, str]] = {}
+    stems: list[str] = []
     for plan in plans:
         key = ""
         text: str | None = None
         if memoize:
             key = hash_text(render_fingerprint + generator.page_fingerprint(plan, wide=wide))
             text = cache.cached_page(plan.stem, key)
+            stems.append(plan.stem)
         if text is None:
             text = plan.render()
+            if memoize:
+                records[plan.stem] = (key, text)
         rendered.append((f"{plan.stem}.md", text))
-        if memoize:
-            records[plan.stem] = (key, text)
 
     index_stem = config.root_document
     index_key = ""
@@ -708,14 +753,17 @@ def _rendered_files(
             ),
         )
         index_text = cache.cached_page(index_stem, index_key)
+        stems.append(index_stem)
     if index_text is None:
         index_text = generator.render_index(plans, toctree_maxdepth=config.toctree_maxdepth)
+        if memoize:
+            records[index_stem] = (index_key, index_text)
     rendered.append((f"{index_stem}.md", index_text))
 
     if memoize:
-        records[index_stem] = (index_key, index_text)
-        # Rewriting the whole table prunes pages whose symbol vanished.
-        cache.record_pages(records)
+        # ``stems`` is the render's whole page set, so pages whose symbol
+        # vanished are still pruned; ``records`` holds only the re-rendered ones.
+        cache.record_pages(records, stems=stems)
     return rendered
 
 
@@ -728,16 +776,17 @@ def build(config: Config, *, base_dir: str | Path) -> BuildResult:
     """
     config.validate()
     base = Path(base_dir).resolve()
-    if config.compile_commands:
-        # Resolved up front so a missing/unloadable database fails before any
-        # parsing, cache bookkeeping or page writing happens.
-        resolve_compile_commands(config.compile_commands, base)
+    # Read, validated and hashed exactly once here: a missing or unloadable
+    # database fails before any parsing, cache bookkeeping or page writing
+    # happens, and the parse options and the parse fingerprint below are both
+    # served from this one read rather than re-parsing the JSON each.
+    compile_db = _load_compile_commands(config.compile_commands, base) if config.compile_commands else None
     inputs = _resolve_inputs(config.input, base)
     output_dir = (base / config.output_dir).resolve()
     if config.cache_dir:
         cache_dir = (base / config.cache_dir).resolve()
-        return _incremental_build(config, base, inputs, output_dir, cache_dir)
-    return _full_build(config, base, inputs, output_dir)
+        return _incremental_build(config, base, inputs, output_dir, cache_dir, compile_db)
+    return _full_build(config, base, inputs, output_dir, compile_db)
 
 
 def _new_temp_db(directory: Path | None = None) -> Path:
@@ -747,7 +796,13 @@ def _new_temp_db(directory: Path | None = None) -> Path:
     return Path(handle.name)
 
 
-def _full_build(config: Config, base: Path, inputs: list[str], output_dir: Path) -> BuildResult:
+def _full_build(
+    config: Config,
+    base: Path,
+    inputs: list[str],
+    output_dir: Path,
+    compile_db: _CompileDatabase | None = None,
+) -> BuildResult:
     """Stateless build: parse into a throwaway IR and rewrite every page."""
     db_path = _new_temp_db()
 
@@ -755,7 +810,7 @@ def _full_build(config: Config, base: Path, inputs: list[str], output_dir: Path)
     records: list[Diagnostic] = []
     succeeded = False
     try:
-        result = _core.parse_to_sqlite(inputs, str(db_path), _parse_options(config, base))
+        result = _core.parse_to_sqlite(inputs, str(db_path), _parse_options(config, base, compile_db))
         records = _records(result)
         if log_path is not None:
             # Written before the render, not after: a log of the parse that
@@ -830,32 +885,33 @@ def _parse_status(
         status = ParseStatus(current=False)
     if (status.current or status.stale_inputs is not None) and not _ir_is_readable(ir_path):
         # Both remaining paths read the cached IR: the noop shortcut renders
-        # from it, the partial re-parse writes into a copy of it. A truncated
-        # file (killed build, full disk) or one left by an incompatible schema
-        # version would fail every later build with a raw sqlite3 traceback
-        # until the user deleted the cache directory by hand. Discard it and pay
-        # for one full parse instead — the same recovery the bookkeeping
-        # database already performs. The rest of the cache is kept: it describes
-        # the pages on disk, which are still good, so only the pages the fresh
-        # parse actually changes are rewritten.
+        # from it, the partial re-parse rewrites the stale TUs' rows inside it.
+        # A truncated file (killed build, full disk) or one left by an
+        # incompatible schema version would fail every later build with a raw
+        # sqlite3 traceback until the user deleted the cache directory by hand.
+        # Discard it and pay for one full parse instead — the same recovery the
+        # bookkeeping database already performs. The rest of the cache is kept:
+        # it describes the pages on disk, which are still good, so only the
+        # pages the fresh parse actually changes are rewritten.
         ir_path.unlink(missing_ok=True)
         status = ParseStatus(current=False)
     return status
 
 
-def _incremental_build(
+def _incremental_build(  # noqa: PLR0913
     config: Config,
     base: Path,
     inputs: list[str],
     output_dir: Path,
     cache_dir: Path,
+    compile_db: _CompileDatabase | None = None,
 ) -> BuildResult:
     """Reuse the cached parse where possible and write only changed pages."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     ir_path = cache_dir / IR_NAME
-    parse_fp = _parse_fingerprint(config, base, inputs)
+    parse_fp = _parse_fingerprint(config, base, inputs, compile_db)
     render_fp = _render_fingerprint(config, base)
-    options = _parse_options(config, base)
+    options = _parse_options(config, base, compile_db)
     log_path = _diagnostics_log_path(config, base)
 
     with BuildCache.open(cache_dir) as cache:
@@ -1076,13 +1132,18 @@ def _parse_tus_into(
 
     One batched writer call re-parses every stale translation unit (in parallel,
     like a full parse) and replaces just those units' rows, reusing every other
-    TU's. The set of stale inputs must land all-or-nothing: the re-parse runs
-    against a staged copy of ``ir_path`` that replaces the original only once
-    every stale input has succeeded; on any failure the original IR (and the
-    cache, which is only updated afterwards) is left untouched, forcing a clean
-    rebuild next run. Returns the fresh dependency map, the error-severity
-    diagnostics and the full diagnostic records — the latter two covering the
-    re-parsed units only, since nothing else was parsed.
+    TU's. Returns the fresh dependency map, the error-severity diagnostics and
+    the full diagnostic records — the latter two covering the re-parsed units
+    only, since nothing else was parsed.
+
+    The stale set lands all-or-nothing, and the writer already guarantees that
+    without a staging copy: every input is parsed before the IR is opened at
+    all, a hard parse failure raises before the first write, and the row
+    replacement itself runs in one ``BEGIN IMMEDIATE`` transaction that rolls
+    back on any error or on a killed process. Copying the whole database first
+    only added an O(project) read+write to every O(change) rebuild. A failure
+    therefore leaves the IR (and the cache, which is only updated afterwards) as
+    it was, forcing a clean rebuild next run.
 
     ``dropped_candidates`` lists the files the previous parse attributed only to
     ``stale`` (see :meth:`BuildCache.deps_only_from`); those the fresh parse no
@@ -1096,14 +1157,7 @@ def _parse_tus_into(
         # The caller never reuses ``options`` after this call, so mutating the
         # incremental path's copy cannot leak into a full rebuild.
         options.tu_batch = _INCREMENTAL_TU_BATCH
-    staged = _new_temp_db(ir_path.parent)
-    try:
-        shutil.copyfile(ir_path, staged)
-        result = _core.parse_tus_to_sqlite(stale, str(staged), options, dropped_candidates or [])
-    except BaseException:
-        staged.unlink(missing_ok=True)
-        raise
-    staged.replace(ir_path)
+    result = _core.parse_tus_to_sqlite(stale, str(ir_path), options, dropped_candidates or [])
     return _tu_deps(result), result.diagnostics, _records(result)
 
 

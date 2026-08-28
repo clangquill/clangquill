@@ -296,6 +296,31 @@ def test_page_cache_round_trip_key_sensitivity_and_pruning(tmp_path: Path) -> No
         assert cache.cached_page("b", "k2") is None
 
 
+def test_record_pages_writes_only_the_pages_the_render_rendered(tmp_path: Path) -> None:
+    """An O(change) render costs an O(change) write, not a rewrite of the corpus."""
+    cache_dir = tmp_path / "cache"
+    with BuildCache.open(cache_dir) as cache:
+        cache.record_pages({"a": ("k1", "TEXT A"), "b": ("k2", "TEXT B"), "gone": ("k3", "TEXT G")})
+
+        statements: list[str] = []
+        cache._con.set_trace_callback(statements.append)  # noqa: SLF001
+        try:
+            # 'a' was re-rendered, 'b' replayed from the cache under its stored
+            # key, and 'gone' left the render because its symbol vanished.
+            cache.record_pages({"a": ("k4", "TEXT A2")}, stems=["a", "b"])
+        finally:
+            cache._con.set_trace_callback(None)  # noqa: SLF001
+
+        assert cache.cached_page("a", "k4") == "TEXT A2"
+        # Replayed, never rewritten -- and still replayable next build.
+        assert cache.cached_page("b", "k2") == "TEXT B"
+        assert cache.cached_page("gone", "k3") is None
+
+    written = [sql for sql in statements if "INSERT" in sql]
+    assert len(written) == 1
+    assert "TEXT B" not in written[0]
+
+
 def test_render_summary_survives_version_reset_as_absent(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     with BuildCache.open(cache_dir) as cache:

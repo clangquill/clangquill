@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from typer.testing import CliRunner
@@ -13,8 +14,11 @@ from typer.testing import CliRunner
 from clangquill import _core, cli, pipeline
 from clangquill.cache import BuildCache, file_sha256, hash_text
 from clangquill.config import Config
-from clangquill.pipeline import MANIFEST_NAME, build
+from clangquill.pipeline import COMPILE_COMMANDS_NAME, MANIFEST_NAME, build
 from clangquill.store import Store
+
+if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping
 
 
 def _store_symbols(db_path: Path) -> list[object]:
@@ -472,6 +476,22 @@ def test_incremental_page_cache_replays_unchanged_pages(
 
     monkeypatch.setattr(BuildCache, "cached_page", spy)
 
+    # ... and on what the render writes back: the pages it rendered, plus the
+    # full page set so vanished pages are still pruned.
+    recorded: list[tuple[list[str], list[str]]] = []
+    real_record = BuildCache.record_pages
+
+    def record_spy(
+        self: BuildCache,
+        pages: Mapping[str, tuple[str, str]],
+        *,
+        stems: Collection[str] | None = None,
+    ) -> None:
+        recorded.append((sorted(pages), sorted(stems if stems is not None else pages)))
+        real_record(self, pages, stems=stems)
+
+    monkeypatch.setattr(BuildCache, "record_pages", record_spy)
+
     (project / "alpha.hpp").write_text("/// alpha ns edited\nnamespace alpha { /// f\nint f(); }\n")
     result = build(config, base_dir=project)
 
@@ -482,6 +502,8 @@ def test_incremental_page_cache_replays_unchanged_pages(
     assert "index" in hits
     assert result.pages_written == ["alpha.md"]
     assert "alpha ns edited" in (project / "api" / "alpha.md").read_text()
+    # Written back: only alpha. Named as still present: every page.
+    assert recorded == [(["alpha"], ["alpha", "beta", "index"])]
 
 
 def test_page_cache_mode_follows_the_template_declaration(tmp_path: Path) -> None:
@@ -761,9 +783,11 @@ def test_incremental_partial_parse_failure_is_atomic(
     with pytest.raises(RuntimeError, match="boom"):
         build(config, base_dir=project)
 
-    # The staged copy was discarded: the on-disk IR is byte-for-byte unchanged.
+    # The writer parses every input before it opens the IR and replaces the
+    # stale rows in one transaction, so a failure leaves the on-disk IR
+    # byte-for-byte unchanged.
     assert ir.read_bytes() == ir_before
-    # Sanity: the staged temp DB was cleaned up, not left lingering.
+    # Sanity: no temp DB was left lingering in the cache directory.
     assert not list((project / ".cache").glob("tmp*.sqlite"))
 
     # With the patch removed, the next build recovers and re-parses both inputs.
@@ -771,6 +795,42 @@ def test_incremental_partial_parse_failure_is_atomic(
     recovered = build(config, base_dir=project)
     assert recovered.parsed
     assert {"alpha.md", "beta.md"}.issubset(set(recovered.pages_written))
+
+
+@requires_libclang
+def test_incremental_partial_parse_writes_the_ir_in_place(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The partial re-parse used to run against a full copy of the IR, so a
+    # one-file edit paid an O(project) read+write before parsing anything. The
+    # writer's own transaction gives the same all-or-nothing (see
+    # test_incremental_partial_parse_failure_is_atomic), so nothing is staged.
+    (project / "alpha.hpp").write_text("/// alpha ns\nnamespace alpha { /// f\nint f(); }\n")
+    (project / "beta.hpp").write_text("/// beta ns\nnamespace beta { /// g\nint g(); }\n")
+    config = Config(input=["alpha.hpp", "beta.hpp"], output_dir="api", cache_dir=".cache")
+    build(config, base_dir=project)
+
+    # Every staging path goes through _new_temp_db, so counting its calls covers
+    # a copy reintroduced under any name.
+    staged: list[object] = []
+    real_temp_db = pipeline._new_temp_db  # noqa: SLF001
+
+    def spy(directory: Path | None = None) -> Path:
+        path = real_temp_db(directory)
+        staged.append(path)
+        return path
+
+    monkeypatch.setattr(pipeline, "_new_temp_db", spy)
+
+    (project / "alpha.hpp").write_text("/// alpha ns edit\nnamespace alpha { /// f\nint f(); }\n")
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    assert result.pages_written == ["alpha.md"]
+    assert staged == []
+    # beta's rows came through the in-place write untouched.
+    assert "beta ns" in (project / "api" / "beta.md").read_text()
 
 
 @requires_libclang
@@ -997,6 +1057,58 @@ def test_parse_options_and_fingerprint_carry_anonymous_namespaces(tmp_path: Path
         tmp_path,
         ["a.hpp"],
     )
+
+
+@requires_libclang
+def test_compile_commands_is_read_once_per_build(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The database was resolved (and re-parsed) once for the up-front check,
+    # once for the parse options and once for the parse fingerprint, then read a
+    # fourth time to hash it. A monorepo-sized database makes that noticeable,
+    # and one read answers all four questions.
+    (project / "compile_commands.json").write_text(
+        json.dumps(
+            [
+                {
+                    "directory": str(project),
+                    "file": str(project / "demo.hpp"),
+                    "arguments": ["c++", "-std=c++20", "-c", str(project / "demo.hpp")],
+                },
+            ],
+        ),
+        encoding="utf-8",
+    )
+    config = Config(input=["demo.hpp"], output_dir="api", compile_commands=".", cache_dir=".cache")
+
+    # Every way the file was ever read: as bytes, as text, and through the
+    # separate hashing read.
+    reads: list[str] = []
+    real_read_bytes = Path.read_bytes
+    real_read_text = Path.read_text
+    real_file_sha256 = pipeline.file_sha256
+
+    def spy_read_bytes(self: Path) -> bytes:
+        if self.name == COMPILE_COMMANDS_NAME:
+            reads.append("read_bytes")
+        return real_read_bytes(self)
+
+    def spy_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == COMPILE_COMMANDS_NAME:
+            reads.append("read_text")
+        return real_read_text(self, *args, **kwargs)
+
+    def spy_file_sha256(path: str | Path) -> str:
+        if Path(path).name == COMPILE_COMMANDS_NAME:
+            reads.append("file_sha256")
+        return real_file_sha256(path)
+
+    monkeypatch.setattr(Path, "read_bytes", spy_read_bytes)
+    monkeypatch.setattr(Path, "read_text", spy_read_text)
+    monkeypatch.setattr(pipeline, "file_sha256", spy_file_sha256)
+
+    result = build(config, base_dir=project)
+
+    assert result.parsed
+    assert reads == ["read_bytes"]
 
 
 def test_missing_compile_commands_names_every_path_searched(tmp_path: Path) -> None:

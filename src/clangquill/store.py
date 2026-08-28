@@ -183,6 +183,16 @@ class Store:
         # and each miss costs two queries plus a model reconstruction.
         self._comment_cache: dict[str, CommentModel | None] = {}
         self._comment_parser: CommentParser | None = None
+        # Bulk indexes over ``symbols`` and ``references_``, built on first use.
+        # The per-page dependency walk asks for one symbol, one child list and
+        # one reference list at a time, once per symbol in the project, and a
+        # popular target (a common base class) is asked for again by every
+        # symbol referring to it — served row by row that is hundreds of
+        # thousands of tiny queries per build. Two bulk reads answer all of them
+        # from memory instead. The store is opened read-only, so an index cannot
+        # go stale under it.
+        self._symbol_indexes: tuple[dict[str, Symbol], dict[str, list[Symbol]]] | None = None
+        self._references_by_source: dict[str, list[Reference]] | None = None
 
     @classmethod
     @contextmanager
@@ -250,13 +260,33 @@ class Store:
         sql += " ORDER BY qualified_name"
         return [self._to_symbol(row) for row in self._con.execute(sql, params)]
 
+    def _symbol_index(self) -> tuple[dict[str, Symbol], dict[str, list[Symbol]]]:
+        """Return the ``{usr: Symbol}`` and ``{parent_usr: [Symbol]}`` indexes.
+
+        Both are built from a single read of ``symbols``, ordered exactly as
+        :meth:`children` orders its rows so each parent's bucket comes out in
+        the same order the per-parent query produced. Every symbol is stored
+        once and shared by the two dicts.
+        """
+        if self._symbol_indexes is None:
+            by_usr: dict[str, Symbol] = {}
+            by_parent: dict[str, list[Symbol]] = {}
+            sql = f"SELECT {self._SYMBOL_COLUMNS} FROM symbols ORDER BY kind, line, qualified_name"  # noqa: S608
+            for row in self._con.execute(sql):
+                symbol = self._to_symbol(row)
+                by_usr[symbol.usr] = symbol
+                by_parent.setdefault(symbol.parent_usr, []).append(symbol)
+            self._symbol_indexes = (by_usr, by_parent)
+        return self._symbol_indexes
+
     def symbol(self, usr: str) -> Symbol | None:
-        """Return the symbol with ``usr``, or ``None`` if it is unknown."""
-        row = self._con.execute(
-            f"SELECT {self._SYMBOL_COLUMNS} FROM symbols WHERE usr = ?",  # noqa: S608
-            (usr,),
-        ).fetchone()
-        return self._to_symbol(row) if row is not None else None
+        """Return the symbol with ``usr``, or ``None`` if it is unknown.
+
+        Answered from the bulk index, so repeated lookups of a popular target
+        cost one dict hit rather than one query each.
+        """
+        by_usr, _ = self._symbol_index()
+        return by_usr.get(usr)
 
     def roots(self) -> list[Symbol]:
         """Return top-level symbols (those with no enclosing parent)."""
@@ -290,12 +320,13 @@ class Store:
         return [self._to_symbol(row) for row in self._con.execute(sql, (file_id,))]
 
     def children(self, parent_usr: str) -> list[Symbol]:
-        """Return the direct children of ``parent_usr`` in declaration-friendly order."""
-        sql = (
-            f"SELECT {self._SYMBOL_COLUMNS} FROM symbols "  # noqa: S608
-            "WHERE parent_usr = ? ORDER BY kind, line, qualified_name"
-        )
-        return [self._to_symbol(row) for row in self._con.execute(sql, (parent_usr,))]
+        """Return the direct children of ``parent_usr``, in declaration-friendly order.
+
+        Answered from the bulk index; the caller gets a fresh list it may sort
+        or filter in place.
+        """
+        _, by_parent = self._symbol_index()
+        return list(by_parent.get(parent_usr, ()))
 
     def related_by_name(self) -> dict[str, list[Symbol]]:
         r"""Return the symbols carrying a ``\relates`` field, keyed by the name it gives.
@@ -367,17 +398,32 @@ class Store:
         *,
         kind: RefKind | None = None,
     ) -> list[Reference]:
-        """Return outgoing cross-references of ``from_usr`` in stable order."""
-        sql = (
-            "SELECT from_usr, ref_kind, to_usr, to_spelling, is_resolved, access, ordinal "
-            "FROM references_ WHERE from_usr = ?"
-        )
-        params: tuple[object, ...] = (from_usr,)
-        if kind is not None:
-            sql += " AND ref_kind = ?"
-            params = (from_usr, int(kind))
-        sql += " ORDER BY ref_kind, ordinal"
-        return [self._to_reference(row) for row in self._con.execute(sql, params)]
+        """Return outgoing cross-references of ``from_usr`` in stable order.
+
+        Answered from the bulk index, and the ``kind`` filter applied in memory:
+        the reference walk asks for every symbol's references anyway, so one
+        table read beats one query per symbol.
+        """
+        refs = self._reference_index().get(from_usr, ())
+        if kind is None:
+            return list(refs)
+        return [ref for ref in refs if ref.ref_kind == kind]
+
+    def _reference_index(self) -> dict[str, list[Reference]]:
+        """Return ``{from_usr: [Reference]}`` for the whole ``references_`` table.
+
+        Read in one pass, ordered so every source's list arrives in the
+        ``(ref_kind, ordinal)`` order :meth:`references` promises.
+        """
+        if self._references_by_source is None:
+            index: dict[str, list[Reference]] = {}
+            for row in self._con.execute(
+                "SELECT from_usr, ref_kind, to_usr, to_spelling, is_resolved, access, ordinal "
+                "FROM references_ ORDER BY from_usr, ref_kind, ordinal",
+            ):
+                index.setdefault(row["from_usr"], []).append(self._to_reference(row))
+            self._references_by_source = index
+        return self._references_by_source
 
     def bases(self, usr: str) -> list[Reference]:
         """Return the base-class references of ``usr`` in declaration order."""
