@@ -344,21 +344,67 @@ void SqliteStore::insert_rows(const model::ParsedModule& module,
     // every membership row it owns, including the ones contributed by
     // translation units this write is not touching.
     //
-    // The WHERE additionally refuses the *downgrade*: `ensure_group` emits a
-    // stub row (title == id, no brief/detail/parent) for every `\ingroup`
-    // reference whose `\defgroup` block this parse did not read, and last
-    // write wins would let such a stub overwrite the real title and prose —
-    // both on an incremental write whose re-parsed units only reference the
-    // group, and on a full parse where batch order decides which copy lands
-    // last. A stub therefore only ever creates a row, never updates one.
+    // The DO UPDATE additionally refuses the *downgrade*. Three kinds of row
+    // carry the same group id, and last write wins would let the weakest one
+    // land last: the `\defgroup` block that defines the group, an
+    // `\addtogroup` block that only adds to it, and the stub `ensure_group`
+    // emits (title == id, no brief/detail/parent) for every `\ingroup`
+    // reference whose defining block this parse did not read. Which one lands
+    // last is decided by batch order on a full parse, and by which files an
+    // incremental parse happened to re-read otherwise — so precedence has to
+    // be a property of the rows, not of their arrival order.
+    //
+    // Hence `is_definition`, set only by `\defgroup`, and a per-field merge:
+    //
+    //   * definition over definition — plain last write wins, so editing a
+    //     `\defgroup` block's own title or prose still reaches the database
+    //     (including emptying a field);
+    //   * definition over non-definition — the definition wins every field it
+    //     actually fills; an `\addtogroup` block with prose keeps title == id
+    //     and so used to pass the old whole-row guard and clobber the real
+    //     title *and* brief (issue #301);
+    //   * anything over a field the existing row leaves unset — a stub title
+    //     (== id), an empty brief or detail, a null parent — fills it in, so
+    //     an `\addtogroup` block still contributes what the definition omits
+    //     and a stub still creates the row it references;
+    //   * otherwise the stored value stands: among non-definitions the first
+    //     one to fill a field keeps it.
     Stmt g(db_,
-           "INSERT INTO groups(id, title, brief, detail, parent_group_id) "
-           "VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
-           "title = excluded.title, brief = excluded.brief, "
-           "detail = excluded.detail, "
-           "parent_group_id = excluded.parent_group_id "
-           "WHERE excluded.title <> excluded.id OR excluded.brief <> '' "
-           "OR excluded.detail <> '' OR excluded.parent_group_id IS NOT NULL;");
+           "INSERT INTO "
+           "groups(id, title, brief, detail, parent_group_id, is_definition) "
+           "VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+           "title = CASE"
+           " WHEN excluded.is_definition = 1 AND groups.is_definition = 1"
+           " THEN excluded.title"
+           " WHEN excluded.is_definition = 1 AND excluded.title <> excluded.id"
+           " THEN excluded.title"
+           " WHEN groups.title = groups.id THEN excluded.title"
+           " ELSE groups.title END, "
+           "brief = CASE"
+           " WHEN excluded.is_definition = 1 AND groups.is_definition = 1"
+           " THEN excluded.brief"
+           " WHEN excluded.is_definition = 1 AND excluded.brief <> ''"
+           " THEN excluded.brief"
+           " WHEN groups.brief = '' THEN excluded.brief"
+           " ELSE groups.brief END, "
+           "detail = CASE"
+           " WHEN excluded.is_definition = 1 AND groups.is_definition = 1"
+           " THEN excluded.detail"
+           " WHEN excluded.is_definition = 1 AND excluded.detail <> ''"
+           " THEN excluded.detail"
+           " WHEN groups.detail = '' THEN excluded.detail"
+           " ELSE groups.detail END, "
+           "parent_group_id = CASE"
+           " WHEN excluded.is_definition = 1 AND groups.is_definition = 1"
+           " THEN excluded.parent_group_id"
+           " WHEN excluded.is_definition = 1"
+           " AND excluded.parent_group_id IS NOT NULL"
+           " THEN excluded.parent_group_id"
+           " WHEN groups.parent_group_id IS NULL"
+           " THEN excluded.parent_group_id"
+           " ELSE groups.parent_group_id END, "
+           "is_definition = "
+           "MAX(groups.is_definition, excluded.is_definition);");
     for (const auto& grp : module.groups) {
       g.reset();
       g.bind(1, grp.id);
@@ -370,6 +416,7 @@ void SqliteStore::insert_rows(const model::ParsedModule& module,
       } else {
         g.bind(5, grp.parent_group_id);
       }
+      g.bind(6, grp.is_definition ? 1 : 0);
       g.step();
     }
   }
@@ -533,7 +580,8 @@ model::ParsedModule SqliteStore::read() {
 
   {
     Stmt g(db_,
-           "SELECT id, title, brief, detail, parent_group_id FROM groups "
+           "SELECT id, title, brief, detail, parent_group_id, is_definition "
+           "FROM groups "
            "ORDER BY id;");
     while (g.step()) {
       model::Group grp;
@@ -542,6 +590,7 @@ model::ParsedModule SqliteStore::read() {
       grp.brief = g.column_text(2);
       grp.detail = g.column_text(3);
       grp.parent_group_id = g.column_text(4);
+      grp.is_definition = g.column_int64(5) != 0;
       m.groups.push_back(std::move(grp));
     }
   }

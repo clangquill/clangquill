@@ -19,6 +19,12 @@ struct Group {
   std::string brief;            ///< One-line group summary.
   std::string detail;           ///< Longer group description.
   std::string parent_group_id;  ///< Enclosing group token; empty for a top-level group.
+  /// @brief True when this row came from a `\defgroup` block.
+  ///
+  /// `\addtogroup` blocks and the stub rows an `\ingroup` reference emits are
+  /// *not* definitions: they may fill in what the definition leaves empty, but
+  /// they never overwrite a definition's title or prose.
+  bool is_definition = false;
 };
 
 /// @brief Membership of a symbol in a group.

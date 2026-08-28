@@ -197,6 +197,35 @@ TEST_CASE("group prose keeps its markdown and its paragraphs", "[m7]") {
   CHECK(decorated->detail.empty());
 }
 
+TEST_CASE("an addtogroup block never outranks the defgroup block", "[m7]") {
+  // `\\addtogroup geom` carries no title, so the scanner reads title == id off
+  // it — and reading the addtogroup file first used to leave the group titled
+  // with its raw id and described by whichever block happened to come first.
+  // A definition owns the title and the prose; an addtogroup block only fills
+  // in what the definition leaves empty.
+  auto m = parse_fixture("group_addtogroup.hpp");
+
+  const model::Group* geom = find_group(m, "geom");
+  REQUIRE(geom != nullptr);
+  CHECK(geom->title == "Geometry helpers");
+  CHECK(geom->brief == "Points and vectors.");
+  CHECK(geom->detail == "The long version.");
+  CHECK(geom->is_definition);
+
+  const model::Group* bare = find_group(m, "bare");
+  REQUIRE(bare != nullptr);
+  CHECK(bare->title == "Bare definition");
+  CHECK(bare->brief == "Prose only an addtogroup block supplies.");
+  CHECK(bare->is_definition);
+
+  // One row per group id, however many blocks contributed to it.
+  int geom_rows = 0;
+  for (const auto& g : m.groups) {
+    if (g.id == "geom") ++geom_rows;
+  }
+  CHECK(geom_rows == 1);
+}
+
 TEST_CASE("parser extracts parameters and references for function templates",
          "[m7]") {
   auto m = parse_m7();
