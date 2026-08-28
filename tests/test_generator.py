@@ -1172,3 +1172,28 @@ def test_m7_kinds_build_as_domain_objects(m7_gen: Generator, tmp_path: Path) -> 
     # directives, and malformed C++/C-domain signatures, so it validates every
     # kind the fixture declares.
     _build_strict(src, tmp_path, "m7")
+
+
+def test_page_fingerprints_read_symbols_and_references_in_bulk(fixture_db: Path) -> None:
+    # The dependency walk asks for one symbol, one child list and one reference
+    # list per symbol on every page, and re-asks for a popular target once per
+    # referrer. Served row by row that is O(project) tiny queries per build; the
+    # store answers them from one read of each table, so the walk must issue no
+    # more than that however many symbols it visits.
+    with Store.open(fixture_db) as opened:
+        generator = Generator(opened)
+        plans = generator.plan_pages(group_by="class")
+        assert opened.symbol_count() > len(plans) > 1, "a per-symbol walk would be visibly larger"
+
+        seen: list[str] = []
+        opened._con.set_trace_callback(seen.append)  # noqa: SLF001
+        try:
+            for plan in plans:
+                generator.page_fingerprint(plan)
+        finally:
+            opened._con.set_trace_callback(None)  # noqa: SLF001
+
+    # At most, not exactly: planning already walks the tree, so either index may
+    # have been built before the traced block and cost nothing inside it.
+    assert sum("FROM symbols" in sql for sql in seen) <= 1
+    assert sum("FROM references_" in sql for sql in seen) <= 1
