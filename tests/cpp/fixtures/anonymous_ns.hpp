@@ -19,6 +19,20 @@ struct HiddenTag {
   int hidden_field = 0;
 };
 
+namespace inner {
+
+/// A named namespace nested inside the anonymous one is internal too.
+inline int nested_helper() { return 4; }
+
+}  // namespace inner
+
 }  // namespace
 
 }  // namespace demo
+
+namespace {
+
+/// An internal helper at file scope, enclosed by no named namespace at all.
+inline int file_scope_helper() { return 5; }
+
+}  // namespace
