@@ -195,25 +195,87 @@ const InlineMarkup* inline_markup(const std::string& name) {
   return nullptr;
 }
 
-// True for a plain (optionally qualified) C++ name -- what the C++ domain can
-// actually resolve. A `{cpp:any}` role over anything else is an "Unparseable
-// C++ cross-reference", which a warnings-as-errors docs build turns into a hard
-// failure, so such a target degrades to a code span instead.
+// An overloaded operator's name, which the C++ domain indexes and resolves like
+// any other member (`Vec::operator==`) but which is not spelled out of
+// identifier characters. Ordered longest-first so `<<=` is not read as `<<`
+// followed by stray text. The named forms (`operator new`, `operator co_await`)
+// are deliberately absent: they carry a space, and a Doxygen `\ref` argument
+// ends at the first one.
+constexpr std::string_view kOperatorSpellings[] = {
+    "<=>", "<<=", ">>=", "->*", "++", "--", "->", "<<", ">>", "<=", ">=",
+    "==",  "!=",  "&&",  "||",  "+=", "-=", "*=", "/=", "%=", "^=", "&=",
+    "|=",  "()",  "[]",  "+",   "-",  "*",  "/",  "%",  "^",  "&",  "|",
+    "~",   "!",   "=",   "<",   ">",  ","};
+
+// Length of the `operator<op>` name at `pos`, or 0 if there is none. Only an
+// exact match of the whole remainder counts: an operator name is always the last
+// component of a cross-reference target.
+std::size_t operator_name_length(const std::string& s, std::size_t pos) {
+  static constexpr std::string_view kOperator = "operator";
+  if (s.compare(pos, kOperator.size(), kOperator) != 0) return 0;
+  const std::size_t rest = pos + kOperator.size();
+  for (std::string_view spelling : kOperatorSpellings) {
+    if (s.size() == rest + spelling.size() &&
+        s.compare(rest, spelling.size(), spelling) == 0) {
+      return kOperator.size() + spelling.size();
+    }
+  }
+  return 0;
+}
+
+// True for a plain (optionally qualified) C++ name, or such a name ending in an
+// operator -- what the C++ domain can actually resolve. A `{cpp:any}` role over
+// anything else is an "Unparseable C++ cross-reference", which a
+// warnings-as-errors docs build turns into a hard failure, so such a target
+// degrades to a code span instead.
 bool is_cpp_name(const std::string& s) {
   std::size_t i = 0;
   while (true) {
+    if (operator_name_length(s, i) != 0) return true;
     if (i >= s.size() || (std::isalpha(static_cast<unsigned char>(s[i])) == 0 &&
                           s[i] != '_')) {
       return false;
     }
+    const std::size_t word_start = i;
     while (i < s.size() && (std::isalnum(static_cast<unsigned char>(s[i])) != 0 ||
                             s[i] == '_')) {
       ++i;
     }
-    if (i == s.size()) return true;
+    // A target that stops at the `operator` keyword names nothing:
+    // `\ref Vec::operator bool` is a conversion operator whose name carries a
+    // space, so the argument ends before the type.
+    if (i == s.size()) return s.compare(word_start, i - word_start, "operator") != 0;
     if (s.compare(i, 2, "::") != 0) return false;
     i += 2;
   }
+}
+
+// Punctuation that closes the sentence or the clause around the decorated word
+// rather than belonging to it. Doxygen prose is full of
+// `(see \ref parse_files)`, where the `)` would otherwise be carried into the
+// markup -- and into a cross-reference target, where it does not parse.
+const std::string kTrailing = ".,;:!?()[]{}";  // NOLINT(cert-err58-cpp)
+
+// Splits `token` into a C++ cross-reference target and its trailing punctuation.
+// `kTrailing` cannot simply be stripped from the right before the target is
+// checked: `[]`, `()` and `,` are sentence punctuation in
+// `(see \ref parse_files)` but part of the name in `\ref Vec::operator[]`. So
+// the longest prefix that is a whole C++ name wins, and only characters from
+// `kTrailing` may follow it. Returns false (leaving `token` untouched) when no
+// prefix qualifies, and the caller degrades the reference to a code span.
+bool split_xref_target(std::string& token, std::string& tail) {
+  for (std::size_t cut = token.size(); cut > 0; --cut) {
+    if (cut < token.size() &&
+        kTrailing.find(token[cut]) == std::string::npos) {
+      break;
+    }
+    if (is_cpp_name(token.substr(0, cut))) {
+      tail = token.substr(cut);
+      token.resize(cut);
+      return true;
+    }
+  }
+  return false;
 }
 
 bool is_inline_command(const std::string& name) {
@@ -228,11 +290,6 @@ bool is_inline_command(const std::string& name) {
 // a `\ref target "a title"` becomes a role with that title. The command has to
 // start a word, so an address like `user@b.example` is left alone.
 std::string render_inline_markup(const std::string& text) {
-  // Punctuation that closes the sentence or the clause around the decorated
-  // word rather than belonging to it. Doxygen prose is full of
-  // `(see \ref parse_files)`, where the `)` would otherwise be carried into the
-  // markup -- and into a cross-reference target, where it does not parse.
-  static const std::string kTrailing = ".,;:!?()[]{}";
   std::string out;
   std::size_t i = 0;
   while (i < text.size()) {
@@ -268,17 +325,20 @@ std::string render_inline_markup(const std::string& text) {
     if (arg_end == std::string::npos) arg_end = text.size();
     std::string arg = text.substr(word_end + 1, arg_end - word_end - 1);
     std::string tail;
-    while (!arg.empty() && kTrailing.find(arg.back()) != std::string::npos) {
-      tail.insert(tail.begin(), arg.back());
-      arg.pop_back();
+    // A cross-reference the C++ domain could not parse fails the docs build, so
+    // one that does not name a C++ entity becomes a plain code span.
+    const bool as_xref = markup->xref && split_xref_target(arg, tail);
+    if (!as_xref) {
+      tail.clear();
+      while (!arg.empty() && kTrailing.find(arg.back()) != std::string::npos) {
+        tail.insert(tail.begin(), arg.back());
+        arg.pop_back();
+      }
     }
     if (arg.empty()) {
       out += text[i++];
       continue;
     }
-    // A cross-reference the C++ domain could not parse fails the docs build, so
-    // one that does not name a C++ entity becomes a plain code span.
-    const bool as_xref = markup->xref && is_cpp_name(arg);
     std::size_t next = arg_end;
     if (as_xref) {
       // `\ref target "a title"` -- Doxygen's way of writing the link text. The

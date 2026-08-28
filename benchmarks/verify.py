@@ -44,6 +44,12 @@ cannot be parsed cleanly is telling you its config lacks include directories or
 defines, which is fixable in ``configs/<name>.toml``. Recording the noise as
 "expected" instead would make the whole run decorative.
 
+Alongside the checks, the report carries an ungated **unresolved cross-reference**
+count per project: how many of the ``{cpp:any}`` targets in the generated pages
+name no parsed symbol. An unresolved reference does not warn outside Sphinx's
+``nitpicky`` mode — it renders as plain text — so nothing else in the pipeline
+would notice link health decaying. See ``docs/development/cross-references.md``.
+
 The driver depends only on the standard library plus ``clangquill`` itself
 (whose SQLite IR it reads); ``doxygen`` is required and the run fails without
 it, since half the verification would otherwise be silently skipped.
@@ -191,6 +197,25 @@ def _documented(element: ET.Element) -> bool:
     return _has_text(element.find("briefdescription")) or _has_text(element.find("detaileddescription"))
 
 
+def _relative_to_root(raw: str, root: Path) -> str | None:
+    """Return ``raw`` relative to ``root``, or ``None`` if it lies outside.
+
+    A path either tool records may be relative, and a relative path must be
+    joined onto ``root`` rather than resolved against this process's working
+    directory: clang spells a file the way the command line reached it, so a
+    forced-include prologue leaves ``./x/y.h`` in the IR, and resolving that
+    against wherever ``verify.py`` was launched from yields a path outside the
+    project — dropping every symbol in it from the comparison.
+    """
+    path = Path(raw)
+    if not path.is_absolute():
+        path = root / path
+    try:
+        return str(path.resolve().relative_to(root))
+    except ValueError:
+        return None
+
+
 def _location(element: ET.Element, root: Path) -> str | None:
     """Return an entity's source file, relative to ``root``, or ``None``.
 
@@ -212,13 +237,7 @@ def _location(element: ET.Element, root: Path) -> str | None:
     raw = location.get("file")
     if not raw:
         return None
-    path = Path(raw)
-    if not path.is_absolute():
-        path = root / path
-    try:
-        return str(path.resolve().relative_to(root))
-    except ValueError:
-        return None
+    return _relative_to_root(raw, root)
 
 
 def _qualified_name(element: ET.Element) -> str:
@@ -296,13 +315,65 @@ def clangquill_extraction(ir_path: Path, source_root: Path) -> tuple[dict[str, i
             raw = paths.get(symbol.file_id)
             if raw is None:
                 continue
-            try:
-                rel = str(Path(raw).resolve().relative_to(source_root))
-            except ValueError:
+            rel = _relative_to_root(raw, source_root)
+            if rel is None:
                 continue
             per_file[rel] = per_file.get(rel, 0) + 1
             total += 1
     return per_file, total, documented_names
+
+
+# One ``{cpp:any}`` role in a generated MyST page. The generator emits no other
+# cross-reference role, so this is every inter-symbol link in the output.
+CPP_ANY_RE = re.compile(r"\{cpp:any\}`(?:[^`<]*<)?([^`<>]+)>?`")
+
+
+def xref_health(myst_dir: Path, ir_path: Path) -> dict:
+    """Count the ``{cpp:any}`` targets in the generated pages that name nothing.
+
+    A cross-reference that does not resolve is silent: outside ``nitpicky`` mode
+    Sphinx renders the target as plain text rather than warning, so a project can
+    build clean with every link in it dead. The e2e suite gates that property on
+    a fixture (see ``docs/development/cross-references.md``); this is the
+    real-project counterpart, reported as a number rather than gated, because a
+    project whose comments link into headers it never asked clangquill to parse
+    will always have some.
+
+    Resolvability is approximated from the IR rather than by running Sphinx: a
+    target counts as resolvable when some symbol carries it as a qualified name.
+    An unscoped enumerator is also accepted without its enum, since C++ (and the
+    C++ domain) names it both ways; that over-accepts for a scoped enum, which
+    keeps the number a floor on link health rather than a claim of precision.
+    """
+    from clangquill.store import Store, SymbolKind  # noqa: PLC0415 - optional at import time, required here
+
+    def without_enum_scope(qualified: str) -> str:
+        """``ns::Colour::Red`` -> ``ns::Red``, the other name C++ gives it."""
+        enum_scope, sep, enumerator = qualified.rpartition("::")
+        if not sep:
+            return qualified
+        outer, sep, _ = enum_scope.rpartition("::")
+        return f"{outer}::{enumerator}" if sep else enumerator
+
+    resolvable: set[str] = set()
+    with Store.open(ir_path) as store:
+        for symbol in store.symbols():
+            if not symbol.qualified_name:
+                continue
+            resolvable.add(symbol.qualified_name)
+            if symbol.kind == SymbolKind.ENUMERATOR:
+                resolvable.add(without_enum_scope(symbol.qualified_name))
+    targets: Counter[str] = Counter()
+    for page in sorted(myst_dir.rglob("*.md")):
+        targets.update(CPP_ANY_RE.findall(page.read_text(encoding="utf-8", errors="replace")))
+    unresolved = Counter({t: n for t, n in targets.items() if t not in resolvable})
+    return {
+        "targets": sum(targets.values()),
+        "distinct_targets": len(targets),
+        "unresolved": sum(unresolved.values()),
+        "distinct_unresolved": len(unresolved),
+        "examples": [name for name, _ in unresolved.most_common(MAX_REPORTED_LINES)],
+    }
 
 
 def symbol_rows(ir_path: Path) -> set[tuple]:
@@ -555,7 +626,7 @@ def check_comments(ctx: RepoContext) -> Check:
     )
 
 
-def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
+def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:  # noqa: PLR0911
     """Compare what each tool documented, per source file.
 
     The gate is one-directional on purpose: a file Doxygen documented and
@@ -607,8 +678,25 @@ def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
     # read as documentation — produces a full set of XML with nothing documented
     # in it. There is no reference to measure against, but nothing went wrong,
     # and this driver's own gate is the parse check.
+    floor = ctx.config.min_documented_ratio
     if not doxygen_files:
         wrote_xml = any(path.name not in {"index.xml", "Doxyfile.xml"} for path in xml_dir.glob("*.xml"))
+        # A configured floor is a claim that this project *has* a reference and
+        # clangquill reaches a share of it. If the reference collapses to
+        # nothing the claim cannot be checked -- and passing here would retire
+        # the gate silently, which is the one outcome a floor exists to prevent.
+        if wrote_xml and floor is not None:
+            return (
+                Check(
+                    "extraction",
+                    passed=False,
+                    summary=(
+                        f"a floor of {floor:.0%} is configured but doxygen documented nothing here, "
+                        f"so there is no reference to measure against (clangquill documented {quill_total})"
+                    ),
+                ),
+                stats,
+            )
         return (
             Check(
                 "extraction",
@@ -623,7 +711,6 @@ def check_extraction(ctx: RepoContext, xml_dir: Path) -> tuple[Check, dict]:
             stats,
         )
 
-    floor = ctx.config.min_documented_ratio
     summary = (
         f"{quill_total} vs {doxygen_total} documented entities "
         f"({'n/a' if ratio is None else f'{ratio:.0%}'}) over {len(doxygen_files)} file(s)"
@@ -700,6 +787,12 @@ def verify_repo(cfg: RepoConfig, args: argparse.Namespace, tools: Tools) -> dict
     comments_check = check_comments(ctx)
     comments_check = timed(comments_check, time.perf_counter() - mark)
 
+    # Reported, never gated: see :func:`xref_health`.
+    ir_path = ctx.cache_dir / "clangquill.sqlite"
+    xrefs = xref_health(ctx.myst_out, ir_path) if ir_path.is_file() else {}
+    if xrefs:
+        print(f"  xrefs: {xrefs['unresolved']} of {xrefs['targets']} cross-reference(s) name no parsed symbol")
+
     checks = [parse_check, doxygen_check, extraction_check, isolation_check, comments_check]
     print(f"  prepare: [{prepare_seconds:.1f}s] clone/checkout" + (", cmake configure" if cfg.cmake_preset else ""))
     return {
@@ -709,6 +802,7 @@ def verify_repo(cfg: RepoConfig, args: argparse.Namespace, tools: Tools) -> dict
         "passed": all(check.passed for check in checks),
         "checks": [check.as_dict() for check in checks],
         "extraction": stats,
+        "xrefs": xrefs,
         "logs": str(logs),
         "seconds": {
             "prepare": round(prepare_seconds, 2),
@@ -757,7 +851,12 @@ def _timing_table(results: dict) -> list[str]:
     timed = {name: r["seconds"] for name, r in results.items() if r.get("seconds")}
     if not timed:
         return []
-    names = [check["name"] for check in next(iter(results.values()))["checks"]]
+    # Union rather than the first project's list: a project that raised before
+    # its checks ran records a single "harness" check, and reading the column
+    # names off that one would drop every real check from the table.
+    names: list[str] = []
+    for result in results.values():
+        names += [check["name"] for check in result["checks"] if check["name"] not in names]
     lines = [
         "## Wall clock",
         "",
@@ -800,8 +899,9 @@ def render_markdown(payload: dict) -> str:
         "",
     ]
     lines += [
-        "| project | parse | doxygen | extraction | isolation | comments | documented (clangquill / doxygen) |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| project | parse | doxygen | extraction | isolation | comments "
+        "| documented (clangquill / doxygen) | unresolved xrefs |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for name, result in results.items():
         marks = {check["name"]: "✅" if check["passed"] else "❌" for check in result["checks"]}
@@ -811,11 +911,18 @@ def render_markdown(payload: dict) -> str:
             f"{stats.get('clangquill_documented', 0)} / {stats.get('doxygen_documented', 0)}"
             f"{'' if ratio is None else f' ({ratio:.0%})'}"
         )
+        xrefs = result.get("xrefs") or {}
+        links = "—" if not xrefs else f"{xrefs['unresolved']} / {xrefs['targets']}"
         lines.append(
             f"| {name} | {marks.get('parse', '—')} | {marks.get('doxygen', '—')} "
             f"| {marks.get('extraction', '—')} | {marks.get('isolation', '—')} "
-            f"| {marks.get('comments', '—')} | {counts} |",
+            f"| {marks.get('comments', '—')} | {counts} | {links} |",
         )
+    lines += [
+        "",
+        "_Unresolved cross-references are reported, not gated: a project whose comments",
+        "link into headers it never asked clangquill to parse will always have some._",
+    ]
     lines.append("")
     lines += _timing_table(results)
 
@@ -899,6 +1006,7 @@ def main(argv: list[str] | None = None) -> int:
                 "passed": False,
                 "checks": [Check("harness", passed=False, summary=str(exc)).as_dict()],
                 "extraction": {},
+                "xrefs": {},
                 "logs": "",
             }
         checkpoint()

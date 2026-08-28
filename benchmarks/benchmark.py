@@ -115,6 +115,10 @@ EXIT_INVALIDATES_SAMPLE = ("clangquill-sphinx",)
 # shipping brittle unified diffs) is robust across pinned refs while still
 # forcing a re-parse of exactly the touched file. The guard macro keeps repeated
 # applications and odd include orders harmless.
+#: The include guard the snippet below defines, and so the string that says a
+#: patched file was never reverted.
+PATCH_MARKER = "CLANGQUILL_BENCHMARK_PATCH_MARKER"
+
 PATCH_SNIPPET = """
 
 #ifndef CLANGQUILL_BENCHMARK_PATCH_MARKER
@@ -205,44 +209,76 @@ def _maxrss_kb(ru_maxrss: int) -> int:
 # --------------------------------------------------------------------------- #
 # Repo preparation
 # --------------------------------------------------------------------------- #
-def apply_patch(ctx: RepoContext, files: list[str] | None = None) -> list[Path]:
+@dataclass(frozen=True)
+class Patched:
+    """One patched file and the bytes it held before :func:`apply_patch`."""
+
+    path: Path
+    original: bytes
+
+
+def apply_patch(ctx: RepoContext, files: list[str] | None = None) -> list[Patched]:
     """Append the fixed snippet to each target file (default: ``patch_files``).
 
     ``files`` selects the patch-target list — the widely-included
     ``patch_files`` for the ``incremental`` scenario or the ``leaf_patch_files``
-    for ``incremental-leaf``. Returns the paths actually patched.
+    for ``incremental-leaf``. The pre-patch bytes ride along in the returned
+    records so :func:`revert_patch` can put them back exactly.
     """
-    patched: list[Path] = []
+    patched: list[Patched] = []
     for rel in ctx.config.patch_files if files is None else files:
         target = ctx.source_dir / rel
         if not target.is_file():
             print(f"  WARNING: patch target {rel!r} missing in {ctx.config.name}", file=sys.stderr)
             continue
+        original = target.read_bytes()
         with target.open("a", encoding="utf-8") as fh:
             fh.write(PATCH_SNIPPET)
-        patched.append(target)
+        patched.append(Patched(target, original))
     return patched
 
 
-def revert_patch(ctx: RepoContext, patched: list[Path]) -> None:
-    """Undo :func:`apply_patch` via ``git checkout`` of the touched files."""
-    for target in patched:
-        rel = target.relative_to(ctx.source_dir)
-        run_git(["checkout", "--", str(rel)], ctx.source_dir, check=False)
+def revert_patch(patched: list[Patched]) -> None:
+    """Undo :func:`apply_patch` by restoring the bytes it recorded.
+
+    Not ``git checkout``: that reverts to *HEAD*, so on a ``local`` run it would
+    also discard whatever the operator had uncommitted in the patch target — and,
+    because its exit code was never inspected, a checkout that failed (no git, a
+    detached path, a locked index) left the patch in place. Every later scenario
+    would then measure a tree that already carried the change, and the harness
+    would report incremental timings for a rebuild with nothing to do.
+
+    A failure to restore is raised rather than warned: from here on, every number
+    the run would produce describes a tree nobody configured.
+    """
+    for entry in patched:
+        entry.path.write_bytes(entry.original)
+        if PATCH_MARKER in entry.original.decode("utf-8", errors="replace"):
+            continue  # the file legitimately carried the marker before we ran
+        if PATCH_MARKER in entry.path.read_text(encoding="utf-8", errors="replace"):
+            message = f"benchmark patch survived its revert in {entry.path}"
+            raise RuntimeError(message)
 
 
 def reset_state(ctx: RepoContext) -> None:
     """Return the target to a clean pre-build state between repetitions.
 
-    Generated artifacts (MyST, Sphinx, Doxygen, cache, logs) are removed and any
-    lingering patch is reverted. Only the configured ``patch_files`` /
-    ``leaf_patch_files`` are ``git checkout`` reverted — never the whole tree —
-    so running against a ``local`` repo can never clobber the operator's other
-    uncommitted changes (the harness only ever edits those patch targets).
+    Generated artifacts (MyST, Sphinx, Doxygen, cache, logs) are removed, and a
+    patch left behind by an earlier run that died mid-scenario is reverted with
+    ``git checkout``. That last-resort cleanup fires only for a file that
+    actually still carries :data:`PATCH_MARKER`, so a ``local`` run cannot
+    discard the operator's own uncommitted work on a file that merely happens to
+    be a patch target.
     """
     for path in (ctx.sphinx_src, ctx.sphinx_out, ctx.cache_dir, ctx.doxygen_out("xml"), ctx.doxygen_out("html")):
         wipe(path)
     for rel in ctx.config.patch_files + ctx.config.leaf_patch_files:
+        target = ctx.source_dir / rel
+        if not target.is_file():
+            continue
+        if PATCH_MARKER not in target.read_text(encoding="utf-8", errors="replace"):
+            continue
+        print(f"  reverting a benchmark patch left behind in {rel}", file=sys.stderr)
         run_git(["checkout", "--", rel], ctx.source_dir, check=False)
 
 
@@ -384,7 +420,7 @@ def run_stage(
                 incr = measure(argv, cwd, _stage_log(ctx, stage, "incremental", rep))
                 incr_output = dir_stats(out_dir)
             finally:
-                revert_patch(ctx, patched)
+                revert_patch(patched)
 
         # -- incremental-leaf ------------------------------------------------ #
         leaf = None
@@ -408,7 +444,7 @@ def run_stage(
                 leaf = measure(argv, cwd, _stage_log(ctx, stage, "incremental-leaf", rep))
                 leaf_output = dir_stats(out_dir)
             finally:
-                revert_patch(ctx, patched)
+                revert_patch(patched)
 
         if not recording:
             continue

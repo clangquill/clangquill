@@ -24,6 +24,8 @@ import pytest
 
 from clangquill import _core
 
+from .sphinx_warnings import project_warnings
+
 if TYPE_CHECKING:
     from sphinx.environment import BuildEnvironment
 
@@ -112,7 +114,7 @@ def _build(
             str(build_root / "out"),
             str(build_root / "doctree"),
             "html",
-            warningiserror=True,  # any unresolved xref or bad directive fails the build
+            warningiserror=True,  # any warning fails the build (asserted below)
             status=None,
             warning=warning_file,
             parallel=parallel,
@@ -120,6 +122,14 @@ def _build(
         )
         app.connect("env-before-read-docs", record)
         app.build()
+
+    # Since Sphinx 8, ``warningiserror`` no longer raises on the first warning:
+    # the build runs to the end and reports itself failed through ``statuscode``.
+    # Without an assertion here the flag above would be decorative and every
+    # warning the build emits -- a bad directive, a mis-rendered signature --
+    # would pass unnoticed.
+    warnings = project_warnings((build_root / "warnings.txt").read_text(encoding="utf-8"))
+    assert warnings == []
 
     return _Build(
         out=build_root / "out",
@@ -157,8 +167,9 @@ def test_full_sphinx_build_over_fixtures(tmp_path: Path) -> None:
     assert "CQ_MAX" in names  # the function-like macro is a C-domain object
 
     # 3. Cross-references resolved: the group page links to its member objects,
-    #    which live on the namespace page (an unresolved {cpp:any} would have
-    #    failed the warningiserror build above).
+    #    which live on the namespace page. Note that the build above does *not*
+    #    prove this on its own -- an unresolved ``{cpp:any}`` warns only under
+    #    ``nitpicky``, which :mod:`tests.e2e.test_e2e_xrefs` turns on.
     group_html = (out / "out" / "api" / "group_math.html").read_text(encoding="utf-8")
     assert "m7.html#" in group_html
 

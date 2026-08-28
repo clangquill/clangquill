@@ -245,6 +245,14 @@ def prepare_repo(cfg: RepoConfig, work_dir: Path, *, fresh_clone: bool) -> RepoC
     if cfg.ref:
         checkout = run_git(["checkout", "--force", cfg.ref], source, check=False)
         if checkout.returncode != 0:
+            # A clone from an earlier run predates a ref added or moved since,
+            # and a shallow blob filter does not backfill it. Fetch once and
+            # retry before deciding the ref does not exist: without this a
+            # re-baselined config silently benchmarks whatever the stale clone
+            # happened to hold.
+            run_git(["fetch", "--tags", "--force", "origin"], source, check=False)
+            checkout = run_git(["checkout", "--force", cfg.ref], source, check=False)
+        if checkout.returncode != 0:
             print(f"  WARNING: ref {cfg.ref!r} not found for {cfg.name}; using default branch", file=sys.stderr)
             # Actually move HEAD to the remote default; a failed checkout leaves
             # the worktree where it was, which on a reused clone could be a
