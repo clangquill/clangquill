@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 from jinja2 import ChoiceLoader, Environment, FileSystemLoader, PackageLoader, StrictUndefined
 
+from clangquill.comments import split_xref_target
 from clangquill.store import AccessKind, RefKind, SymbolKind
 
 _logger = logging.getLogger(__name__)
@@ -682,11 +683,17 @@ class Generator:
             # A variable template carries its ``template<...>`` head in
             # ``signature`` (plain variables have none), so the directive
             # declares a template object rather than a duplicate of the name.
+            # Any templated enclosing scope contributes its head and arguments
+            # too (see :meth:`_member_qualifier`) -- ``Buffer<T, N>::data``
+            # rather than ``Buffer::data``, whose ``T``/``N`` name nothing.
+            enclosing, qualified = self._member_qualifier(symbol)
             head = f"{_repair_split_operators(symbol.signature)} " if symbol.signature else ""
-            return head + self._variable_declaration(symbol)
+            return enclosing + head + self._variable_declaration(symbol, qualified)
         if symbol.kind in (SymbolKind.TYPEDEF, SymbolKind.TYPE_ALIAS):
+            enclosing, qualified = self._member_qualifier(symbol)
             target = self._underlying(symbol)
-            return f"{symbol.qualified_name} = {target}" if target else symbol.qualified_name
+            declaration = f"{qualified} = {target}" if target else qualified
+            return enclosing + declaration
         if symbol.kind == SymbolKind.MACRO:
             # ``signature`` is the function-like macro's ``NAME(a, b)`` (or the
             # bare name for an object-like macro).
@@ -702,15 +709,19 @@ class Generator:
             # specialization carries its argument list in ``display_name``; append
             # it so the directive names the specialization rather than collapsing
             # every specialization onto the bare template name (a duplicate).
+            # A class nested in a class template needs that template's head and
+            # arguments too (see :meth:`_member_qualifier`), or it lands in a
+            # scope no cross-reference -- not even one from its own members'
+            # declarations -- can reach.
+            enclosing, qualified = self._member_qualifier(symbol)
             head = f"{_repair_split_operators(symbol.signature)} " if symbol.signature else ""
-            name = symbol.qualified_name + _spec_suffix(symbol)
-            return head + name + self.base_clause(symbol)
+            return enclosing + head + qualified + _spec_suffix(symbol) + self.base_clause(symbol)
         return symbol.qualified_name
 
     #: Trailing C array extent(s) on a type spelling, e.g. ``[8]`` or ``[2][3]``.
     _ARRAY_EXTENT = re.compile(r"(?:\s*\[[^\]]*\])+$")
 
-    def _variable_declaration(self, symbol: Symbol) -> str:
+    def _variable_declaration(self, symbol: Symbol, qualified: str | None = None) -> str:
         """Build the ``type name`` directive argument for a variable/field.
 
         clang spells an array type with the extent on the type (``int[8]``), but
@@ -725,9 +736,13 @@ class Generator:
 
         A specialized variable template names its arguments (``is_foo_v<int>``),
         which is what keeps it apart from the primary it shares a name with.
+
+        ``qualified`` overrides the name the declarator carries, so a member of a
+        class template can be spelled with its enclosing template arguments (see
+        :meth:`_member_qualifier`); it defaults to the symbol's own qualified name.
         """
         type_repr = symbol.type_repr.strip()
-        name = symbol.qualified_name + _spec_suffix(symbol)
+        name = (symbol.qualified_name if qualified is None else qualified) + _spec_suffix(symbol)
         extent = self._ARRAY_EXTENT.search(type_repr)
         if extent:
             base = type_repr[: extent.start()].strip()
@@ -774,27 +789,39 @@ class Generator:
     def _member_qualifier(self, symbol: Symbol) -> tuple[str, str]:
         """Return ``(template_head, qualified_name)`` for a member declaration.
 
-        For a member of a class-template specialization the parent qualifier carries
-        the specialization args (``ContainerFactory<CommonDenseVector<S>>::create``)
-        and ``template_head`` is the parent's ``template<...>`` head so the spec
-        args' parameters (``S``) are declared for the standalone out-of-line
-        directive. A plain member returns ``("", qualified_name)`` (legacy
-        behaviour).
+        Every templated enclosing scope contributes two things to a standalone
+        out-of-line member declaration: its ``template<...>`` head, which declares
+        the parameters the member's own type may name (``T``, ``N``), and its
+        argument list on the qualifier (``Buffer<T, N>::data``), which is what
+        attaches the member to the *template* rather than to a second, plain
+        symbol of the same name. Without them the Sphinx C++ domain files the
+        member under a scope no cross-reference can reach, and the parameters
+        appearing in its type resolve to nothing.
+
+        The whole ancestor chain is walked, innermost first, so a member of a
+        nested class template is qualified at every level; the heads are returned
+        outermost first, the order a C++ out-of-line definition spells them in. A
+        member whose enclosing scopes are all plain (non-template) returns
+        ``("", qualified_name)``.
         """
         qualified = symbol.qualified_name
-        if not symbol.parent_usr:
-            return "", qualified
-        parent = self.store.symbol(symbol.parent_usr)
-        if parent is None:
-            return "", qualified
-        suffix = _spec_suffix(parent)
-        if not suffix:
-            return "", qualified
-        prefix = f"{parent.qualified_name}::"
-        if qualified.startswith(prefix):
-            qualified = f"{parent.qualified_name}{suffix}::{qualified[len(prefix) :]}"
-        head = f"{_repair_split_operators(parent.signature)} " if parent.signature else ""
-        return head, qualified
+        heads: list[str] = []
+        usr, seen = symbol.parent_usr, {symbol.usr}
+        while usr and usr not in seen:
+            seen.add(usr)
+            parent = self.store.symbol(usr)
+            if parent is None:
+                break
+            usr = parent.parent_usr
+            suffix = _spec_suffix(parent)
+            if not suffix:
+                continue
+            prefix = f"{parent.qualified_name}::"
+            if qualified.startswith(prefix):
+                qualified = f"{parent.qualified_name}{suffix}::{qualified[len(prefix) :]}"
+            if parent.signature:
+                heads.append(f"{_repair_split_operators(parent.signature)} ")
+        return "".join(reversed(heads)), qualified
 
     def _underlying(self, symbol: Symbol) -> str:
         """Return the typedef/alias target spelling, or ``""``."""
@@ -851,12 +878,19 @@ class Generator:
             return text
         # A USR resolves to its qualified name; a plain name is left for the
         # domain to resolve. Trailing call/punctuation noise (``foo().``) is
-        # stripped so the cleaned name stays parseable.
+        # stripped so the cleaned name stays parseable -- but not the ``[]`` of
+        # ``Vec::operator[]``, which is part of the name (see
+        # :func:`~clangquill.comments.split_xref_target`). Text that is no C++
+        # name at all degrades to a code span rather than to a role the domain
+        # would reject as an unparseable cross-reference.
         resolved = self.store.symbol(text)
         if resolved is not None:
             return f"{{cpp:{role}}}`{resolved.qualified_name}`"
+        split = split_xref_target(text)
+        if split is not None:
+            return f"{{cpp:{role}}}`{split[0]}`"
         name = _XREF_TRAILING_RE.sub("", text)
-        return f"{{cpp:{role}}}`{name}`" if name else ""
+        return f"`{name}`" if name else ""
 
     # -- comment rendering ----------------------------------------------------
 
@@ -911,10 +945,17 @@ class Generator:
         carries the specialization suffix so a class template and its
         specializations (distinct domain objects) never collide. Namespaces are
         exempt: re-declaring a namespace is ordinary C++ and safe in the domain.
+
+        The key is the name the *emitted declaration* carries, enclosing template
+        arguments included (see :meth:`_member_qualifier`) — otherwise the member
+        alias of every specialization of one template keys on the bare
+        ``Traits::type`` and all but the first degrade, even though the domain
+        sees three distinct objects.
         """
         if symbol.kind == SymbolKind.NAMESPACE:
             return True
-        name = (symbol.qualified_name or symbol.spelling) + _spec_suffix(symbol)
+        qualified = self._member_qualifier(symbol)[1] if symbol.qualified_name else ""
+        name = (qualified or symbol.spelling) + _spec_suffix(symbol)
         if not name:
             return True
         conflict_class = "function" if symbol.kind in _FUNCTION_KINDS else _DIRECTIVE_FOR.get(symbol.kind, "cpp:type")

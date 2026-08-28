@@ -1,0 +1,29 @@
+{
+    "description": "@ref targets naming an operator keep the operator in the target -- the trailing punctuation stripped from `(see @ref foo)` is part of the name in `@ref Vec::operator[]`. A target that stops at the `operator` keyword names nothing and degrades to a code span.",
+    "raw": "/// @brief Links whose targets are operators.\n///\n/// Subscript @ref Vec::operator[], equality @ref Vec::operator==, call\n/// @ref Vec::operator() and compound @ref Vec::operator+=.\n/// In prose (see @ref Vec::operator[]) and at a stop @ref Vec::operator+.\n/// A bare @ref operator== resolves too. A conversion operator does not:\n/// @ref Vec::operator bool stops at the keyword, since the name carries a\n/// space and the argument ends there.\n",
+    "expected": {
+        "brief": "Links whose targets are operators.",
+        "detail": [
+            "Subscript {cpp:any}`Vec::operator[]`, equality {cpp:any}`Vec::operator==`, call {cpp:any}`Vec::operator()` and compound {cpp:any}`Vec::operator+=`. In prose (see {cpp:any}`Vec::operator[]`) and at a stop {cpp:any}`Vec::operator+`. A bare {cpp:any}`operator==` resolves too. A conversion operator does not: `Vec::operator` bool stops at the keyword, since the name carries a space and the argument ends there."
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {}
+    }
+}
