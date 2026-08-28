@@ -842,10 +842,24 @@ void scan_group_definitions(const std::string& raw, const std::string& file,
     std::size_t a = s.find_first_not_of(" \t\r");
     if (a == std::string::npos) return std::string{};
     s = s.substr(a);
+    // Strip exactly one recognized comment-decoration prefix, longest match
+    // first (so `///<`/`/**<` are not mistaken for the shorter `///`/`/**`),
+    // then stop. A greedy scan of every `/ * ! <` character would also
+    // consume markdown emphasis starting right after the decoration (e.g.
+    // `**Bold**` in ` * **Bold** text`), which isn't part of the marker.
+    auto marker = [&](std::string_view p) {
+      return s.compare(0, p.size(), p) == 0;
+    };
     std::size_t m = 0;
-    while (m < s.size() &&
-           (s[m] == '/' || s[m] == '*' || s[m] == '!' || s[m] == '<')) {
-      ++m;
+    if (marker("///<") || marker("//!<") || marker("/**<") || marker("/*!<")) {
+      m = 4;
+    } else if (marker("///") || marker("//!") || marker("/**") ||
+               marker("/*!")) {
+      m = 3;
+    } else if (marker("//") || marker("/*") || marker("*/")) {
+      m = 2;
+    } else if (!s.empty() && s[0] == '*') {
+      m = 1;
     }
     s = s.substr(m);
     // Trim trailing whitespace first so a trailing `*/` is stripped even when
@@ -860,9 +874,15 @@ void scan_group_definitions(const std::string& raw, const std::string& file,
     return a == std::string::npos ? std::string{} : s.substr(a, b - a + 1);
   };
 
+  bool blank_since_content = false;
   auto handle_line = [&](const std::string& rawline) {
     std::string l = clean(rawline);
-    if (!l.empty() && (l[0] == '@' || l[0] == '\\')) {
+    if (l.empty()) {
+      blank_since_content = true;
+      return;
+    }
+    if (l[0] == '@' || l[0] == '\\') {
+      blank_since_content = false;
       std::size_t e = l.find_first_of(" \t", 1);
       std::string cmd = l.substr(1, (e == std::string::npos ? l.size() : e) - 1);
       std::string rest = e == std::string::npos ? std::string{} : l.substr(e + 1);
@@ -903,14 +923,17 @@ void scan_group_definitions(const std::string& raw, const std::string& file,
       }
       return;
     }
-    if (current != nullptr && !l.empty()) {
+    if (current != nullptr) {
       if (current->brief.empty()) {
         current->brief = l;
       } else {
-        if (!current->detail.empty()) current->detail += ' ';
+        if (!current->detail.empty()) {
+          current->detail += blank_since_content ? "\n\n" : " ";
+        }
         current->detail += l;
       }
     }
+    blank_since_content = false;
   };
 
   while (i <= raw.size()) {
