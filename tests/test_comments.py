@@ -299,6 +299,24 @@ def test_doxygen_parse_keeps_closing_punctuation_out_of_markup() -> None:
     assert doxygen_parse(BRACKETED).detail == [expected]
 
 
+def test_doxygen_parse_collapses_a_wrapped_description() -> None:
+    # A continuation line keeps whatever indentation it carried past its marker,
+    # so joining the lines with a single space is not enough: the run has to
+    # collapse, the way the C++ parser's normalize_ws does. Without this the two
+    # parsers wrote different strings into comment_fields for the same comment.
+    model = doxygen_parse(
+        "/*!\n"
+        " * @brief Copies bytes between two buffers, stopping at the\n"
+        " *        first null byte.\n"
+        " *\n"
+        " * @param destination the buffer written to, which must be large\n"
+        " *                    enough to hold the whole string\n"
+        " */\n",
+    )
+    assert model.brief == "Copies bytes between two buffers, stopping at the first null byte."
+    assert model.params[0].description == ("the buffer written to, which must be large enough to hold the whole string")
+
+
 def test_model_from_fields_round_trips() -> None:
     rows = [
         ("brief", "", "A brief."),

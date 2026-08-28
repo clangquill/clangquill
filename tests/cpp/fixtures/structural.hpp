@@ -160,3 +160,12 @@ int coded_helper(int x);
   * colon after \p x: and a target like \ref some-page that names no C++ entity.
   */
 int inline_helper(int x);
+
+/** \ingroup shapes
+  * \brief Copies bytes between two buffers, stopping at the
+  *        first null byte.
+  *
+  * \param destination the buffer written to, which must be large
+  *                    enough to hold the whole string
+  */
+int wrapped_helper(char* destination, const char* source);

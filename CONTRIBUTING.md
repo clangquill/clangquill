@@ -108,6 +108,32 @@ To run a subset of tests:
 uv run pytest tests.test_clangquill
 ```
 
+### Golden pages
+
+`tests/golden/` holds byte-compared generator output: one directory per
+`(fixture, group_by)` pair, plus the two flat files the single-symbol render
+uses. Between them they render every bundled `templates/*.md.jinja`, so a
+formatting, ordering or whitespace change shows up as a diff rather than
+slipping past the substring assertions elsewhere in `tests/test_generator.py`.
+
+When a change is *meant* to alter the output, regenerate instead of hand-editing:
+
+```bash
+CLANGQUILL_REGEN_GOLDENS=1 uv run pytest tests/test_generator.py
+```
+
+Then read the diff — that is the review. A new bundled template fails
+`test_every_bundled_template_is_behind_a_golden_tree` until a golden tree
+renders it.
+
+### The comment corpus
+
+`tests/comment_corpus/*.json` is asserted by both comment parsers — the Python
+`doxygen_parse` and the C++ `DoxygenCommentParser::parse_raw_text` — so a case
+added there covers both, and a grammar change landing on only one side fails on
+the other. Prefer it to a parser-specific test whenever the behaviour is
+expressible as raw comment in, `CommentModel` out.
+
 ## Deploying
 
 TBD

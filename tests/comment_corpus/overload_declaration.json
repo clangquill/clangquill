@@ -1,0 +1,31 @@
+{
+    "description": "`\\overload` takes an optional declaration, which must stay with the command instead of being promoted to the brief -- the entity's own summary is the `\\brief` beside it. Nothing renders `custom`, so the declaration is dropped from the page, which is what Doxygen does with it too.",
+    "raw": "/**\n * @overload void spin(int turns)\n * @brief Spins the widget the given number of turns.\n */\n",
+    "expected": {
+        "brief": "Spins the widget the given number of turns.",
+        "detail": [],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {
+            "overload": [
+                "void spin(int turns)"
+            ]
+        }
+    }
+}

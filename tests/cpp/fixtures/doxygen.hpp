@@ -87,4 +87,25 @@ void sort_copy(const int* first, const int* last, int* out);
 /** @copydoc doc::sort_range(int*, int*) */
 void sort_again(int* first, int* last);
 
+//! @brief Spins the widget.
+//!
+//! @param turns how many turns to spin
+void spin(int turns);
+
+/**
+ * @overload void spin(int turns)
+ * @brief Spins the widget twice.
+ */
+void spin_twice();
+
+/**
+ * @brief Copies bytes between two buffers, stopping at the
+ *        first null byte.
+ *
+ * @param destination the buffer written to, which must be large
+ *                    enough to hold the whole string
+ * @return the number of bytes copied
+ */
+int copy_string(char* destination, const char* source);
+
 }  // namespace doc
