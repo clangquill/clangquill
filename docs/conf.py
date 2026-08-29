@@ -62,6 +62,7 @@ extensions = ['sphinx.ext.autodoc', 'sphinx.ext.viewcode', "autoapi.extension", 
 # error. We discover it the same way cmake/FindLibClang.cmake does, via
 # `llvm-config --includedir`.
 clangquill_input = [
+    "../src/cpp/comment/*.hpp",
     "../src/cpp/core/*.hpp",
     "../src/cpp/model/*.hpp",
     "../src/cpp/hash/*.hpp",

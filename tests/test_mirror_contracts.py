@@ -249,3 +249,27 @@ def test_the_symbol_column_list_matches_the_schema(tmp_path: Path) -> None:
     named = {c.strip() for c in Store._SYMBOL_COLUMNS.split(",")}  # noqa: SLF001
     assert named
     assert named <= schema_columns
+
+
+# --- 8. The CommentModel table in the parser guide (new) ----------------------
+#
+# `docs/guides/comment-parsers.md` documents the model field by field, which
+# made it a third hand-written copy of the field list next to the C++ macro and
+# the Python dataclass. It stays hand-written -- it carries prose the other two
+# do not -- but it no longer gets to be silently incomplete.
+
+_PARSER_GUIDE = _ROOT / "docs" / "guides" / "comment-parsers.md"
+
+
+def test_the_parser_guide_documents_every_comment_field() -> None:
+    """A field added to the model must be documented, or the guide is a lie."""
+    table = _PARSER_GUIDE.read_text(encoding="utf-8")
+    start = table.index("| Field | Type | From (Doxygen) |")
+    end = table.index("\n\n", start)
+
+    documented: set[str] = set()
+    for line in table[start:end].splitlines()[2:]:
+        first_column = line.split("|")[1]
+        documented.update(re.findall(r"`(\w+)`", first_column))
+
+    assert documented == {f.name for f in dataclasses.fields(CommentModel)}
