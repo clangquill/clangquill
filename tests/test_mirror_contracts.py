@@ -23,7 +23,8 @@ from clangquill.comments import CommentModel, CommentParam, CommentRetval, Comme
 from clangquill.store import Symbol, TemplateParameter
 
 _ROOT = Path(__file__).resolve().parents[1]
-_COMMENT_PARSER_CPP = _ROOT / "src" / "cpp" / "parser" / "comment_parser.cpp"
+_COMMENT_FIELDS_CPP = _ROOT / "src" / "cpp" / "comment" / "fields.cpp"
+_DOXYGEN_RAW_CPP = _ROOT / "src" / "cpp" / "comment" / "doxygen_raw.cpp"
 _DOXYGEN_PARSER_CPP = _ROOT / "src" / "cpp" / "parser" / "doxygen_comment_parser.cpp"
 _CONTENT_HASH_CPP = _ROOT / "src" / "cpp" / "hash" / "content_hash.cpp"
 _GENERATOR_PY = _ROOT / "src" / "clangquill" / "generator.py"
@@ -37,16 +38,22 @@ _MODULE_CPP = _ROOT / "src" / "cpp" / "bindings" / "module.cpp"
 def _cpp_param_directions() -> set[str]:
     """Return every ``direction`` spelling the C++ parsers can hand to ``param_arg``.
 
-    ``canonical_direction`` (the raw-text path) and ``explicit_direction`` (the
-    libclang-AST path) are the only two places that produce a ``CommentParam``'s
-    ``direction``; whatever they can return is what ``param_arg`` -- and so
-    ``_split_direction`` -- must round-trip.
+    ``canonical_direction`` (the raw-text scanner) and ``explicit_direction``
+    (the libclang-AST path) are the only two places that produce a
+    ``CommentParam``'s ``direction``; whatever they can return is what
+    ``encode_param_arg`` -- and so ``_split_direction`` -- must round-trip. The
+    two live in different translation units since the raw scanner was made
+    libclang-free, so both are read here.
     """
-    text = _DOXYGEN_PARSER_CPP.read_text(encoding="utf-8")
+    sources = {
+        "canonical_direction": _DOXYGEN_RAW_CPP,
+        "explicit_direction": _DOXYGEN_PARSER_CPP,
+    }
     directions = {""}
-    for fn in ("canonical_direction", "explicit_direction"):
+    for fn, path in sources.items():
+        text = path.read_text(encoding="utf-8")
         match = re.search(rf"std::string {fn}\(.*?\)\s*\{{(.*?)\n\}}", text, re.DOTALL)
-        assert match is not None, f"no `{fn}` function found in {_DOXYGEN_PARSER_CPP.name}"
+        assert match is not None, f"no `{fn}` function found in {path.name}"
         directions.update(re.findall(r'return "([^"]*)"', match.group(1)))
     return directions
 
@@ -66,9 +73,9 @@ def test_split_direction_inverts_param_arg_for_every_direction_cpp_can_write() -
     argument downstream, then check the Python regex actually inverts it for
     every direction the C++ parsers can produce.
     """
-    text = _COMMENT_PARSER_CPP.read_text(encoding="utf-8")
-    match = re.search(r"std::string param_arg\(.*?\)\s*\{(.*?)\n\}", text, re.DOTALL)
-    assert match is not None, "no `param_arg` function found in comment_parser.cpp"
+    text = _COMMENT_FIELDS_CPP.read_text(encoding="utf-8")
+    match = re.search(r"std::string encode_param_arg\(.*?\)\s*\{(.*?)\n\}", text, re.DOTALL)
+    assert match is not None, "no `encode_param_arg` function found in comment/fields.cpp"
     body = match.group(1)
     assert "p.direction.empty()" in body
     assert '"[" + p.direction + "] " + p.name' in body
@@ -183,14 +190,14 @@ def test_to_fields_json_key_set_matches_comment_model() -> None:
     corpus case, would pass every corpus test while the two models silently
     diverge. Compare the key sets directly instead.
     """
-    text = _COMMENT_PARSER_CPP.read_text(encoding="utf-8")
+    text = _COMMENT_FIELDS_CPP.read_text(encoding="utf-8")
     cpp_keys = set(_cpp_json_object_keys(text, start_marker="json j = {"))
     python_keys = {f.name for f in dataclasses.fields(CommentModel)}
     assert cpp_keys == python_keys
 
 
 def test_to_fields_json_nested_key_sets_match_their_python_dataclasses() -> None:
-    text = _COMMENT_PARSER_CPP.read_text(encoding="utf-8")
+    text = _COMMENT_FIELDS_CPP.read_text(encoding="utf-8")
 
     params_start = text.index("json params_to_json(")
     params_end = text.index("}\n", params_start)

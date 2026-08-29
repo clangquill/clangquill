@@ -1,8 +1,11 @@
-#include "parser/comment_parser.hpp"
+#include "comment/fields.hpp"
 
 #include <nlohmann/json.hpp>
 
-namespace clangquill::parser {
+#include <string>
+#include <vector>
+
+namespace clangquill::comment {
 namespace {
 
 using nlohmann::json;
@@ -17,16 +20,12 @@ json params_to_json(const std::vector<model::CommentParam>& items) {
   return arr;
 }
 
-// `comment_fields` has one slot for a field's argument, so a directed parameter
-// carries its direction there in the bracketed form Doxygen itself writes:
-// `[out] result`. model_from_fields (Python) splits it back off. An undirected
-// parameter is spelled exactly as before, so existing rows keep their meaning.
-std::string param_arg(const model::CommentParam& p) {
+}  // namespace
+
+std::string encode_param_arg(const model::CommentParam& p) {
   if (p.direction.empty()) return p.name;
   return "[" + p.direction + "] " + p.name;
 }
-
-}  // namespace
 
 std::string to_fields_json(const model::CommentModel& m) {
   json retvals = json::array();
@@ -81,8 +80,8 @@ std::vector<model::CommentField> to_comment_fields(
 
   if (!m.brief.empty()) add("brief", "", m.brief);
   for (const auto& d : m.detail) add("detail", "", d);
-  for (const auto& p : m.params) add("param", param_arg(p), p.description);
-  for (const auto& p : m.tparams) add("tparam", param_arg(p), p.description);
+  for (const auto& p : m.params) add("param", encode_param_arg(p), p.description);
+  for (const auto& p : m.tparams) add("tparam", encode_param_arg(p), p.description);
   if (!m.returns.empty()) add("returns", "", m.returns);
   for (const auto& r : m.retvals) add("retval", r.value, r.description);
   for (const auto& t : m.throws) add("throws", t.exception, t.description);
@@ -105,4 +104,4 @@ std::vector<model::CommentField> to_comment_fields(
   return fields;
 }
 
-}  // namespace clangquill::parser
+}  // namespace clangquill::comment
