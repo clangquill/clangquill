@@ -1,7 +1,10 @@
 #pragma once
 
+#include <cstddef>
+#include <iterator>
 #include <string>
 
+#include "model/enum_names.hpp"
 #include "model/symbol.hpp"
 
 /**
@@ -22,6 +25,20 @@ enum class RefKind {
   EnumIntegerType,  ///< An enum's fixed underlying integer type.
   Friend,           ///< A record to a befriended function/class.
 };
+
+/// @brief `RefKind` as the Python mirror spells it; see EnumEntry.
+inline constexpr EnumEntry kRefKinds[] = {
+    {"BASE_CLASS", static_cast<int>(RefKind::BaseClass)},
+    {"PARAM_TYPE", static_cast<int>(RefKind::ParamType)},
+    {"RETURN_TYPE", static_cast<int>(RefKind::ReturnType)},
+    {"FIELD_TYPE", static_cast<int>(RefKind::FieldType)},
+    {"VARIABLE_TYPE", static_cast<int>(RefKind::VariableType)},
+    {"UNDERLYING_TYPE", static_cast<int>(RefKind::UnderlyingType)},
+    {"ENUM_INTEGER_TYPE", static_cast<int>(RefKind::EnumIntegerType)},
+    {"FRIEND", static_cast<int>(RefKind::Friend)},
+};
+static_assert(std::size(kRefKinds) == static_cast<std::size_t>(RefKind::Friend) + 1,
+              "every RefKind enumerator needs a row in kRefKinds");
 
 /// @brief A directed edge in the cross-reference graph.
 ///

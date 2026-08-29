@@ -1,6 +1,10 @@
 #pragma once
 
+#include <cstddef>
+#include <iterator>
 #include <string>
+
+#include "model/enum_names.hpp"
 
 /**
  * @file
@@ -26,6 +30,15 @@ struct TemplateParameter {
     NonType,   ///< A non-type (value) parameter.
     Template,  ///< A template template parameter.
   };
+
+  /// @brief `Kind` as the Python mirror spells it; see EnumEntry.
+  static constexpr EnumEntry kKinds[] = {
+      {"TYPE", static_cast<int>(Kind::Type)},
+      {"NON_TYPE", static_cast<int>(Kind::NonType)},
+      {"TEMPLATE", static_cast<int>(Kind::Template)},
+  };
+  static_assert(std::size(kKinds) == static_cast<std::size_t>(Kind::Template) + 1,
+                "every TemplateParameter::Kind enumerator needs a row in kKinds");
 
   std::string owner_usr;     ///< USR of the template that owns this parameter.
   int index = 0;             ///< 0-based position in the template head.
