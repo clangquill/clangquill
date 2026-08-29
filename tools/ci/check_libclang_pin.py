@@ -64,6 +64,20 @@ def latest_with_both_arches(releases: list[dict]) -> str | None:
     return best_str
 
 
+def _set_step_output(name: str, value: str) -> None:
+    """Publish ``name=value`` as a step output when running under Actions.
+
+    The workflow's retest job reads ``latest`` to fetch and test against the
+    newer libclang before the pin is bumped, and ``stale`` to decide whether
+    that retest applies.
+    """
+    output_file = os.environ.get("GITHUB_OUTPUT")
+    if not output_file:
+        return
+    with open(output_file, "a", encoding="utf-8") as fh:
+        fh.write(f"{name}={value}\n")
+
+
 def fetch_releases() -> list[dict]:
     req = urllib.request.Request(  # noqa: S310 (hardcoded https GitHub API URL)
         RELEASES_URL,
@@ -81,6 +95,7 @@ def fetch_releases() -> list[dict]:
 
 def main() -> int:
     pin = pinned_version()
+    _set_step_output("stale", "false")
     try:
         releases = fetch_releases()
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
@@ -96,12 +111,17 @@ def main() -> int:
         print("::warning::no LLVM release with both Linux arches found; skipping")
         return 0
 
+    _set_step_output("latest", latest)
     print(f"pinned libclang: {pin}; latest with both Linux arches: {latest}")
     if _ver_tuple(latest) > _ver_tuple(pin):
+        _set_step_output("stale", "true")
         print(
             f"::error::A newer libclang ({latest}) ships both Linux arch tarballs. "
             f"Bump the pin from {pin} to {latest} in tools/ci/llvm-version.txt "
-            f"(the single source of truth; everything else reads it).",
+            f"(the single source of truth; everything else reads it). The retest "
+            f"job of this workflow has already run the Catch2 suite against "
+            f"{latest}; its result is the pre-bump check for a token-shape "
+            f"regression in the token-heuristic layer.",
         )
         return 1
 

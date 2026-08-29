@@ -43,6 +43,19 @@
 //   - specialization_form(): explicit specialization vs. explicit
 //     instantiation, told apart by whether template_head() finds a head at
 //     all (instantiation has none).
+//   - macro_signature(): a function-like macro's parameter list. It has its
+//     own bare depth counter over `(`/`)` rather than in_group(), and
+//     deliberately so (see issue #334): the parameter list of a function-like
+//     macro -- the only text its matching parens span -- is exactly where the
+//     C++ grammar allows nothing but identifiers, `,` and `...`. `[`/`{` and
+//     angle brackets cannot occur there, and everything after the list's
+//     closing `)` is the replacement body, which the loop stops before. Its
+//     signature can't be truncated the way a default-argument text can: the
+//     name and both parens are structure the function itself emits. Its audit
+//     trail is the macro family in the generative suite, which also confirms
+//     a body whose own parens (`(a) > (b)`) are never read as the parameter
+//     list. pretty_signature() needed no review for the same reason in
+//     reverse: it returns libclang's own pretty print and walks no tokens.
 //
 // When it bails: an owner with no `template` keyword, an unbalanced angle- or
 // group-nesting, or a token shape this file's parser doesn't recognize all
