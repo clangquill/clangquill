@@ -53,7 +53,7 @@
 //     signature can't be truncated the way a default-argument text can: the
 //     name and both parens are structure the function itself emits. Its audit
 //     trail is the macro family in the generative suite, which also confirms
-//     a body whose own parens (`(a) > (b)`) is never read as the parameter
+//     a body whose own parens (`(a) > (b)`) are never read as the parameter
 //     list. pretty_signature() needed no review for the same reason in
 //     reverse: it returns libclang's own pretty print and walks no tokens.
 //

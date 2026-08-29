@@ -1,6 +1,7 @@
 #include "parser/ast_visitor.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -666,9 +667,13 @@ void extract_template_parameters(CXCursor c, const std::string& usr,
 // and this notice is what keeps that change visible instead of just working
 // differently (issue #334).
 void note_friend_definition_signal(CXCursor gc) {
-  static bool noted = false;
-  if (noted || std::getenv("CLANGQUILL_DEBUG") == nullptr) return;
-  noted = true;
+  // Parse threads visit ASTs concurrently (ParseOptions::jobs); the exchange
+  // is what keeps the notice one-shot across them.
+  static std::atomic<bool> noted{false};
+  if (std::getenv("CLANGQUILL_DEBUG") == nullptr ||
+      noted.exchange(true, std::memory_order_relaxed)) {
+    return;
+  }
   auto [file, line] = cursor_file_line(gc);
   std::fprintf(stderr,
                "clangquill: debug: clang_isCursorDefinition() is true for "
