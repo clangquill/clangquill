@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "parser/compile_db.hpp"
+#include "parser/cursor_utils.hpp"
 
 using namespace clangquill;
 
@@ -92,6 +93,34 @@ TEST_CASE("CompileDb recognizes a source file spelled with different case",
   // path is cased.
   REQUIRE(db.lists_file(canonical_path));
   REQUIRE(db.lists_file(uppercased(canonical_path)));
+
+  std::filesystem::remove_all(dir);
+}
+
+// Windows-only, same rationale as above: NTFS/ReFS are case-insensitive, so
+// two #include spellings of one physical header ("Foo.h" vs "foo.h") must
+// collapse to the same tracked path (issue #329) instead of fragmenting the
+// files/inputs cache table and, in the docs, splitting a header's symbols
+// across two "files".
+TEST_CASE("normalized_path collapses differently-cased spellings of one file",
+         "[parser][windows]") {
+  const std::filesystem::path dir = unique_temp_dir("clangquill-normalized-path");
+  std::filesystem::create_directories(dir);
+  const std::filesystem::path lower = dir / "cased.hpp";
+  {
+    std::ofstream out(lower);
+    out << "// content\n";
+  }
+  const std::filesystem::path upper = dir.parent_path() /
+                                      uppercased(dir.filename().string()) /
+                                      "CASED.HPP";
+
+  const std::string from_lower = parser::normalized_path(lower.string());
+  const std::string from_upper = parser::normalized_path(upper.string());
+  CHECK(from_lower == from_upper);
+  // The collapsed path must still name the real file, in its real spelling --
+  // canonicalization should recover the on-disk case, not just fold it away.
+  CHECK(from_lower.find("cased.hpp") != std::string::npos);
 
   std::filesystem::remove_all(dir);
 }

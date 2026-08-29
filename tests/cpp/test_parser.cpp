@@ -15,6 +15,7 @@
 #include "model/module.hpp"
 
 #if defined(CLANGQUILL_HAVE_LIBCLANG)
+#include "parser/cursor_utils.hpp"
 #include "parser/parser.hpp"
 #endif
 
@@ -419,6 +420,43 @@ TEST_CASE("file hash cache serves repeats and notices edits", "[parser]") {
   REQUIRE(row3 != nullptr);
   CHECK(row3->sha256 != row1->sha256);
   CHECK(row3->size_bytes != row1->size_bytes);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("normalized_path collapses a symlink to its target's own path",
+          "[parser]") {
+  // The OS-level canonicalization normalized_path performs (issue #329) must
+  // resolve a symlink to the path its target actually lives at, not just
+  // normalize the symlink's own spelling -- the same guarantee that lets two
+  // #include spellings of one physical header (reached through different
+  // search-path symlinks, or, on a case-insensitive filesystem, differently
+  // cased) collapse to a single tracked path rather than fragmenting the
+  // files/inputs cache table and, in the docs, splitting a header's symbols
+  // across two "files". Symlinks are portable enough to test without a
+  // platform guard, unlike a real case-insensitive filesystem; a Windows-only
+  // test for that side of the fix lives in test_compile_db.cpp.
+  namespace fs = std::filesystem;
+  const fs::path dir = unique_temp_dir("clangquill-normalized-path-test");
+  fs::create_directories(dir);
+  const fs::path real = dir / "real.hpp";
+  {
+    std::ofstream out(real);
+    out << "// content\n";
+  }
+  const fs::path link = dir / "link.hpp";
+  std::error_code ec;
+  fs::create_symlink(real, link, ec);
+  // Symlink creation can fail without privilege (notably on Windows without
+  // Developer Mode or an elevated token); skip only the comparison that
+  // depends on it rather than failing the whole test over an environment gap
+  // unrelated to what's under test.
+  if (!ec) {
+    CHECK(parser::normalized_path(real.string()) ==
+         parser::normalized_path(link.string()));
+  }
+  // Either way, a real file's normalized path must still resolve to it.
+  CHECK(fs::equivalent(parser::normalized_path(real.string()), real));
 
   fs::remove_all(dir);
 }
