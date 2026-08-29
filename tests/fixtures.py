@@ -664,6 +664,18 @@ def _build_spec_db(path: Path) -> None:
             ),
             type_repr="void (GV &, const std::string &, const std::array<bool, 3> &)",
         )
+        # An enum nested in the *primary* template: `cpp:enum` has no grammar
+        # for a template head at all (issue #336), so unlike `create` above
+        # this member stays head-less on purpose -- see
+        # docs/development/cross-references.md.
+        cf_mode = cf_primary + "@E@Mode"
+        sym(
+            cf_mode,
+            cf_primary,
+            SymbolKind.ENUM,
+            "Mode",
+            "demo::ContainerFactory::Mode",
+        )
 
         for usr, brief in (
             (demo, "Demo namespace."),
@@ -678,6 +690,7 @@ def _build_spec_db(path: Path) -> None:
             ("c:@N@demo@is_dense_v>#d", "Doubles are dense."),
             (helper, "Adaptation helper."),
             (helper_ctor, "Construct an adaptation helper."),
+            (cf_mode, "How the factory picks a container implementation."),
         ):
             con.execute(
                 "INSERT INTO comments(symbol_usr, raw_text, format) VALUES(?, '/// fixture', 'doxygen')",

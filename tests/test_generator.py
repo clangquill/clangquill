@@ -1152,6 +1152,23 @@ def test_member_of_full_specialization_carries_the_empty_head(spec_gen: Generato
     )
 
 
+def test_enum_nested_in_class_template_has_no_qualifying_head(spec_gen: Generator, spec_store: Store) -> None:
+    # Unlike `create` above, this member stays head-less on purpose: Sphinx's
+    # `cpp:enum` directive has no grammar for a leading `template<...>` head at
+    # all, so there is no spelling that would let the C++ domain re-attach it
+    # to the template rather than a second, plain `ContainerFactory` symbol.
+    # Do not "fix" this by extending `_member_qualifier` to enums -- see
+    # docs/development/cross-references.md and issue #336.
+    from clangquill.store import SymbolKind  # noqa: PLC0415
+
+    mode = next(
+        s
+        for s in spec_store.symbols()
+        if s.kind == SymbolKind.ENUM and s.qualified_name == "demo::ContainerFactory::Mode"
+    )
+    assert spec_gen.signature(mode) == "demo::ContainerFactory::Mode"
+
+
 def test_variable_template_declaration_carries_its_head(spec_gen: Generator, spec_store: Store) -> None:
     # libclang leaves a variable template unexposed; the parser recovers the
     # head and the declaration text, and the directive has to carry both or the
