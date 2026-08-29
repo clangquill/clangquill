@@ -305,6 +305,34 @@ void record_comment(VisitCtx& ctx, const std::string& usr,
   register_symbol_groups(ctx, usr, raw);
 }
 
+// The type an alias declaration names, or an invalid type when the cursor is
+// not an alias (or names nothing this TU can spell).
+//
+// clang_getTypedefDeclUnderlyingType answers for `typedef T X` and for
+// `using X = T` alike -- both are TypedefNameDecls -- but not for an alias
+// *template* (`template <class T> using X = U<T>`), whose cursor is a
+// CXCursor_TypeAliasTemplateDecl wrapping the CXCursor_TypeAliasDecl that is
+// the alias proper. Asking the wrapper yields CXType_Invalid, so descend.
+CXType alias_underlying_type(CXCursor c) {
+  if (clang_getCursorKind(c) == CXCursor_TypeAliasTemplateDecl) {
+    CXCursor aliased = clang_getNullCursor();
+    clang_visitChildren(
+        c,
+        [](CXCursor child, CXCursor, CXClientData data) {
+          if (clang_getCursorKind(child) != CXCursor_TypeAliasDecl) {
+            return CXChildVisit_Continue;
+          }
+          *static_cast<CXCursor*>(data) = child;
+          return CXChildVisit_Break;
+        },
+        &aliased);
+    // A null cursor is not a declaration, so the query below answers
+    // CXType_Invalid for it -- the same answer, without a special case.
+    c = aliased;
+  }
+  return clang_getTypedefDeclUnderlyingType(c);
+}
+
 // Fields a caller recovered itself, for a cursor libclang does not describe.
 // Every member is optional: an empty one leaves the cursor's own value.
 struct SymbolOverrides {
@@ -415,10 +443,17 @@ std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx,
   }
   if (kind == model::SymbolKind::Enum) extract_enum(c, usr, ctx);
 
-  if (kind == model::SymbolKind::Typedef) {
-    CXType u = clang_getTypedefDeclUnderlyingType(c);
-    ctx.mod->references.push_back(
-        make_type_ref(usr, model::RefKind::UnderlyingType, u, 0));
+  if (kind == model::SymbolKind::Typedef ||
+      kind == model::SymbolKind::TypeAlias) {
+    // What an alias *is* is its whole content, so record the target even when
+    // it names no symbol to point at: a dependent type (`T`, `typename
+    // Pair<T, U>::first`) resolves to nothing, and the written spelling is all
+    // the declaration has to say. An invalid type is the one thing not worth a
+    // row -- an alias template whose TypeAliasDecl child libclang withheld.
+    if (CXType u = alias_underlying_type(c); u.kind != CXType_Invalid) {
+      ctx.mod->references.push_back(
+          make_type_ref(usr, model::RefKind::UnderlyingType, u, 0));
+    }
   } else if (kind == model::SymbolKind::Field ||
              kind == model::SymbolKind::Variable) {
     model::RefKind rk = kind == model::SymbolKind::Field
