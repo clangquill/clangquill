@@ -1,6 +1,11 @@
 #include "hash/content_hash.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "hash/sha256.hpp"
 
@@ -23,7 +28,69 @@ void update_length(Sha256& h, std::uint64_t len) {
   h.update(be, sizeof(be));
 }
 
+/// @brief Feeds one length-framed field into the digest.
+using FieldSink = void (*)(void*, std::string_view);
+
+/// @brief One Symbol field folded into the hash, in hashing order.
+struct SymbolHashField {
+  const char* name;  ///< The `Symbol` member's name, as Python spells it.
+  /// @brief Feeds this field's value into @p sink.
+  void (*feed)(const model::Symbol&, FieldSink, void*);
+};
+
+/// @brief Every Symbol field the hash covers, in the order it covers them.
+///
+/// content_hash() walks this table and content_hash_symbol_fields() exports it,
+/// so a field cannot be hashed without being exported or exported without being
+/// hashed. That matters because the Python side derives the *complement* from
+/// it: `Generator._wide_tokens` must cover exactly the `Symbol` fields left out
+/// here, or a custom template renders from data no fingerprint tracks.
+///
+/// The order and the framing are the on-disk hash. Changing either invalidates
+/// every incremental cache in existence; `tests/cpp/test_hash.cpp` pins the
+/// digest of a fully-populated symbol so that cannot happen by accident.
+constexpr SymbolHashField kSymbolHashFields[] = {
+    {"usr",
+     [](const model::Symbol& s, FieldSink f, void* h) { f(h, s.usr); }},
+    {"kind",
+     [](const model::Symbol& s, FieldSink f, void* h) {
+       f(h, std::to_string(static_cast<int>(s.kind)));
+     }},
+    {"qualified_name",
+     [](const model::Symbol& s, FieldSink f, void* h) { f(h, s.qualified_name); }},
+    {"signature",
+     [](const model::Symbol& s, FieldSink f, void* h) { f(h, s.signature); }},
+    {"type_repr",
+     [](const model::Symbol& s, FieldSink f, void* h) { f(h, s.type_repr); }},
+    {"access",
+     [](const model::Symbol& s, FieldSink f, void* h) {
+       f(h, std::to_string(static_cast<int>(s.access)));
+     }},
+    {"storage",
+     [](const model::Symbol& s, FieldSink f, void* h) {
+       f(h, std::to_string(static_cast<int>(s.storage)));
+     }},
+    {"is_definition",
+     [](const model::Symbol& s, FieldSink f, void* h) {
+       f(h, s.is_definition ? "1" : "0");
+     }},
+};
+
+/// @brief The FieldSink that writes into a Sha256.
+void feed_sha256(void* h, std::string_view v) {
+  Sha256& sha = *static_cast<Sha256*>(h);
+  update_length(sha, v.size());
+  sha.update(v);
+}
+
 }  // namespace
+
+std::vector<std::string> content_hash_symbol_fields() {
+  std::vector<std::string> names;
+  names.reserve(std::size(kSymbolHashFields));
+  for (const SymbolHashField& f : kSymbolHashFields) names.emplace_back(f.name);
+  return names;
+}
 
 std::string content_hash(const model::Symbol& sym,
                          const std::vector<model::FunctionParameter>& params,
@@ -34,14 +101,7 @@ std::string content_hash(const model::Symbol& sym,
     h.update(v);
   };
 
-  field(sym.usr);
-  field(std::to_string(static_cast<int>(sym.kind)));
-  field(sym.qualified_name);
-  field(sym.signature);
-  field(sym.type_repr);
-  field(std::to_string(static_cast<int>(sym.access)));
-  field(std::to_string(static_cast<int>(sym.storage)));
-  field(sym.is_definition ? "1" : "0");
+  for (const SymbolHashField& f : kSymbolHashFields) f.feed(sym, feed_sha256, &h);
   update_length(h, params.size());
   for (const auto& p : params) {
     field(p.type_repr);

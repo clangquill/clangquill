@@ -5,17 +5,31 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
+#include "comment/doxygen_raw.hpp"
+#include "comment/doxygen_raw_detail.hpp"
+#include "comment/fields.hpp"
 #include "core/version.hpp"
+#include "hash/content_hash.hpp"
 #include "model/diagnostic.hpp"
+#include "model/enum_names.hpp"
+#include "model/parameters.hpp"
+#include "model/reference.hpp"
+#include "model/symbol.hpp"
 #include "store/schema.hpp"
 
 #if defined(CLANGQUILL_HAVE_LIBCLANG)
@@ -47,6 +61,72 @@ std::string libclang_version() {
 #else
   return {};
 #endif
+}
+
+// One `comment_fields` row as it crosses into Python: (name, arg, value). The
+// ordinal is implicit in the list order, and the USR is the caller's, so
+// neither is carried.
+using CommentFieldRow = std::tuple<std::string, std::string, std::string>;
+
+std::vector<CommentFieldRow> rows_of(
+    const std::vector<clangquill::model::CommentField>& fields) {
+  std::vector<CommentFieldRow> rows;
+  rows.reserve(fields.size());
+  for (const auto& f : fields) rows.emplace_back(f.name, f.arg, f.value);
+  return rows;
+}
+
+std::vector<clangquill::model::CommentField> fields_of(
+    const std::vector<CommentFieldRow>& rows) {
+  std::vector<clangquill::model::CommentField> fields;
+  fields.reserve(rows.size());
+  int ordinal = 0;
+  for (const auto& [name, arg, value] : rows) {
+    clangquill::model::CommentField f;
+    f.name = name;
+    f.arg = arg;
+    f.value = value;
+    f.ordinal = ordinal++;
+    fields.push_back(std::move(f));
+  }
+  return fields;
+}
+
+// Parses a raw Doxygen comment and hands back the flattened rows the IR would
+// have persisted. Python rebuilds its CommentModel from exactly the same rows
+// it gets out of SQLite, so `doxygen_parse` and a stored comment travel the
+// same decoder.
+std::vector<CommentFieldRow> parse_doxygen_comment(const std::string& raw) {
+  return rows_of(clangquill::comment::to_comment_fields(
+      "", clangquill::comment::doxygen_parse_raw(raw)));
+}
+
+// Decodes rows into a CommentModel and re-encodes them. A test hook: feeding it
+// any row list must return that list unchanged, which is what pins the Python
+// decoder against the C++ one without binding CommentModel itself.
+std::vector<CommentFieldRow> comment_fields_roundtrip(
+    const std::vector<CommentFieldRow>& rows) {
+  return rows_of(clangquill::comment::to_comment_fields(
+      "", clangquill::comment::from_comment_fields(fields_of(rows))));
+}
+
+// Splits a cross-reference target off its trailing punctuation, or returns
+// None when nothing qualifies. The renderer calls this for every `\ref`, and it
+// has to be the same rule the scanner applies.
+std::optional<std::pair<std::string, std::string>> split_xref_target(
+    const std::string& token) {
+  std::string target = token;
+  std::string tail;
+  if (!clangquill::comment::detail::split_xref_target(target, tail)) {
+    return std::nullopt;
+  }
+  return std::make_pair(target, tail);
+}
+
+nb::dict enum_dict(const clangquill::model::EnumEntry* entries, std::size_t n) {
+  nb::dict d;
+  for (std::size_t i = 0; i < n; ++i) d[entries[i].name] = entries[i].value;
+  return d;
 }
 
 // nanobind-friendly mirror of parser::ParseOptions.
@@ -272,6 +352,53 @@ NB_MODULE(_core, m) {
   m.doc() = "clangquill C++ core (libclang-backed API extraction)";
   m.attr("__core_version__") = clangquill::core_version();
   m.attr("SCHEMA_VERSION") = clangquill::store::kSchemaVersion;
+
+  // Everything from here to the parse entry points is available in the stub
+  // backend too: it comes from the libclang-free half of the core. That is the
+  // point -- the Python side derives its enums, its schema and its comment
+  // routing from these rather than transcribing them, so the definitions cannot
+  // drift, and the drift tests that remain are not vacuous against a wheel.
+  m.attr("SCHEMA_DDL") = clangquill::store::kSchemaDDL;
+  m.attr("SYMBOL_KINDS") =
+      enum_dict(clangquill::model::kSymbolKinds,
+                std::size(clangquill::model::kSymbolKinds));
+  m.attr("ACCESS_KINDS") =
+      enum_dict(clangquill::model::kAccessKinds,
+                std::size(clangquill::model::kAccessKinds));
+  m.attr("STORAGE_KINDS") =
+      enum_dict(clangquill::model::kStorageKinds,
+                std::size(clangquill::model::kStorageKinds));
+  m.attr("REF_KINDS") = enum_dict(clangquill::model::kRefKinds,
+                                  std::size(clangquill::model::kRefKinds));
+  m.attr("TEMPLATE_PARAM_KINDS") =
+      enum_dict(clangquill::model::TemplateParameter::kKinds,
+                std::size(clangquill::model::TemplateParameter::kKinds));
+  m.attr("CONTENT_HASH_FIELDS") =
+      nb::tuple(nb::cast(clangquill::hash::content_hash_symbol_fields()));
+
+  {
+    // row name -> (CommentModel attribute, shape). `clangquill.comments` builds
+    // its field routing from this instead of repeating the encoder's table.
+    nb::dict fields;
+    for (const auto& info : clangquill::comment::comment_field_table()) {
+      fields[info.row_name] = nb::make_tuple(info.member, info.shape);
+    }
+    m.attr("COMMENT_FIELDS") = fields;
+  }
+
+  m.def("parse_doxygen_comment", &parse_doxygen_comment, nb::arg("raw"),
+        "Parse a raw Doxygen comment into (name, arg, value) comment_fields "
+        "rows, in ordinal order.");
+  m.def("split_param_arg", &clangquill::comment::split_param_arg,
+        nb::arg("arg"),
+        "Split a comment_fields arg into (parameter name, direction).");
+  m.def("split_xref_target", &split_xref_target, nb::arg("token"),
+        "Split a cross-reference target off its trailing punctuation, or None "
+        "when no prefix of it is a whole C++ name.");
+  m.def("comment_fields_roundtrip", &comment_fields_roundtrip, nb::arg("rows"),
+        "Decode rows into a CommentModel and re-encode them; returns the rows "
+        "unchanged. A test hook for pinning the Python decoder.");
+
   m.def("have_libclang", &have_libclang,
         "Whether the core was built against libclang.");
   m.def("libclang_version", &libclang_version,

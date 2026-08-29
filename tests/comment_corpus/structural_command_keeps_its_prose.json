@@ -1,0 +1,33 @@
+{
+    "description": "A structural command (@class) takes only the entity name; the paragraphs after it document that entity and must stay in brief/detail rather than being swallowed into the command's argument.",
+    "raw": "/**\n * @class Circle\n * A circle in the plane.\n *\n * More detail here.\n */\n",
+    "expected": {
+        "brief": "A circle in the plane.",
+        "detail": [
+            "More detail here."
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {
+            "class": [
+                "Circle"
+            ]
+        }
+    }
+}

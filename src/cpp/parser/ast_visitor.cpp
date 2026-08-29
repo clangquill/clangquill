@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include "comment/doxygen_raw.hpp"
+#include "comment/fields.hpp"
 #include "hash/content_hash.hpp"
 #include "parser/comment_parser.hpp"
 #include "parser/cursor_utils.hpp"
@@ -297,7 +299,7 @@ void record_comment(VisitCtx& ctx, const std::string& usr,
   comment.format = ctx.comment_parser->format();
   ctx.mod->comments.push_back(std::move(comment));
 
-  auto fields = to_comment_fields(usr, parsed);
+  auto fields = comment::to_comment_fields(usr, parsed);
   ctx.mod->comment_fields.insert(ctx.mod->comment_fields.end(), fields.begin(),
                                  fields.end());
 
@@ -806,7 +808,7 @@ void register_symbol_groups(VisitCtx& ctx, const std::string& usr,
                             const std::string& raw) {
   // libclang's parsed-comment tree does not surface `\ingroup`, so recover the
   // membership from a raw scan of the symbol's own comment.
-  model::CommentModel cm = DoxygenCommentParser::parse_raw_text(raw);
+  model::CommentModel cm = comment::doxygen_parse_raw(raw);
   auto it = cm.custom.find("ingroup");
   if (it == cm.custom.end()) return;
   // `\ingroup` accepts several space-separated group ids; register each.

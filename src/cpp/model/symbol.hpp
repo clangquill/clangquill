@@ -1,6 +1,10 @@
 #pragma once
 
+#include <cstddef>
+#include <iterator>
 #include <string>
+
+#include "model/enum_names.hpp"
 
 /**
  * @file
@@ -35,6 +39,31 @@ enum class SymbolKind {
   Macro,             ///< A preprocessor `#define`.
 };
 
+/// @brief `SymbolKind` as the Python mirror spells it; see EnumEntry.
+inline constexpr EnumEntry kSymbolKinds[] = {
+    {"UNKNOWN", static_cast<int>(SymbolKind::Unknown)},
+    {"NAMESPACE", static_cast<int>(SymbolKind::Namespace)},
+    {"CLASS", static_cast<int>(SymbolKind::Class)},
+    {"STRUCT", static_cast<int>(SymbolKind::Struct)},
+    {"UNION", static_cast<int>(SymbolKind::Union)},
+    {"FUNCTION", static_cast<int>(SymbolKind::Function)},
+    {"METHOD", static_cast<int>(SymbolKind::Method)},
+    {"CONSTRUCTOR", static_cast<int>(SymbolKind::Constructor)},
+    {"DESTRUCTOR", static_cast<int>(SymbolKind::Destructor)},
+    {"FIELD", static_cast<int>(SymbolKind::Field)},
+    {"VARIABLE", static_cast<int>(SymbolKind::Variable)},
+    {"ENUM", static_cast<int>(SymbolKind::Enum)},
+    {"ENUMERATOR", static_cast<int>(SymbolKind::Enumerator)},
+    {"TYPEDEF", static_cast<int>(SymbolKind::Typedef)},
+    {"TYPE_ALIAS", static_cast<int>(SymbolKind::TypeAlias)},
+    {"FUNCTION_TEMPLATE", static_cast<int>(SymbolKind::FunctionTemplate)},
+    {"CLASS_TEMPLATE", static_cast<int>(SymbolKind::ClassTemplate)},
+    {"CONCEPT", static_cast<int>(SymbolKind::Concept)},
+    {"MACRO", static_cast<int>(SymbolKind::Macro)},
+};
+static_assert(std::size(kSymbolKinds) == static_cast<std::size_t>(SymbolKind::Macro) + 1,
+              "every SymbolKind enumerator needs a row in kSymbolKinds");
+
 /// @brief C++ access specifier.
 ///
 /// `None` is used for namespace- and file-scope entities that have no access
@@ -46,6 +75,16 @@ enum class AccessKind {
   Private,    ///< `private`.
 };
 
+/// @brief `AccessKind` as the Python mirror spells it; see EnumEntry.
+inline constexpr EnumEntry kAccessKinds[] = {
+    {"NONE", static_cast<int>(AccessKind::None)},
+    {"PUBLIC", static_cast<int>(AccessKind::Public)},
+    {"PROTECTED", static_cast<int>(AccessKind::Protected)},
+    {"PRIVATE", static_cast<int>(AccessKind::Private)},
+};
+static_assert(std::size(kAccessKinds) == static_cast<std::size_t>(AccessKind::Private) + 1,
+              "every AccessKind enumerator needs a row in kAccessKinds");
+
 /// @brief Storage class of a symbol; `None` means "unspecified".
 enum class StorageKind {
   None = 0,     ///< No explicit storage class.
@@ -55,6 +94,18 @@ enum class StorageKind {
   ThreadLocal,  ///< `thread_local`.
   Auto,         ///< `auto` storage duration.
 };
+
+/// @brief `StorageKind` as the Python mirror spells it; see EnumEntry.
+inline constexpr EnumEntry kStorageKinds[] = {
+    {"NONE", static_cast<int>(StorageKind::None)},
+    {"STATIC", static_cast<int>(StorageKind::Static)},
+    {"EXTERN", static_cast<int>(StorageKind::Extern)},
+    {"REGISTER", static_cast<int>(StorageKind::Register)},
+    {"THREAD_LOCAL", static_cast<int>(StorageKind::ThreadLocal)},
+    {"AUTO", static_cast<int>(StorageKind::Auto)},
+};
+static_assert(std::size(kStorageKinds) == static_cast<std::size_t>(StorageKind::Auto) + 1,
+              "every StorageKind enumerator needs a row in kStorageKinds");
 
 /// @brief Where a symbol is declared/defined.
 ///

@@ -1,0 +1,34 @@
+{
+    "description": "@internal takes no argument at all, so the command after it is still a command and the trailing prose is still the brief -- the Eigen idiom that needs the raw scanner's per-line rescan.",
+    "raw": "/// @internal\n/// @ingroup enums\n/// A summary line.\n",
+    "expected": {
+        "brief": "A summary line.",
+        "detail": [],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {
+            "ingroup": [
+                "enums"
+            ],
+            "internal": [
+                ""
+            ]
+        }
+    }
+}

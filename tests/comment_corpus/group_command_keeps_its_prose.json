@@ -1,0 +1,31 @@
+{
+    "description": "@ingroup takes whitespace-separated group ids and nothing else; prose following the ids belongs to the symbol, not to the command.",
+    "raw": "/// @ingroup Geometry Shapes\n/// Computes the area of a circle.\n",
+    "expected": {
+        "brief": "Computes the area of a circle.",
+        "detail": [],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {
+            "ingroup": [
+                "Geometry Shapes"
+            ]
+        }
+    }
+}

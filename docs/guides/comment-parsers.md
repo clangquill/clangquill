@@ -23,6 +23,10 @@ A `CommentModel` is a plain dataclass of structured fields the templates render:
 | `author`, `version`, `date` | `list[str]` | `@author` / `@authors`, `@version`, `@date` |
 | `custom` | `dict[str, list[str]]` | **any unrecognized command**, keyed by its name |
 
+This table is asserted against the dataclass by
+`tests/test_mirror_contracts.py`, so a field added to the model has to be
+documented here too.
+
 `@details` and `@par` are prose: their text joins `detail`, the same as an
 unmarked paragraph. A second `@brief` in one comment is joined onto the first
 rather than dropped, which is what Doxygen does with it.
@@ -121,13 +125,22 @@ repeats its marker on every line and has no continuation column, so `/// * item`
 is a bullet, and `**bold**` opening a line glues the `*` to the word it
 decorates in either style. All of it survives into the model intact.
 
-The Doxygen parser exists twice -- the C++ raw scanner in
-`parser/doxygen_comment_parser.cpp` and the pure-Python
-{py:func}`~clangquill.comments.doxygen_parse` that is the reference
-implementation for this seam. `tests/comment_corpus/*.json` is the corpus that
-keeps them honest: both test suites assert the same model against it, so a
-grammar change landing on only one side fails on the other. Add a case there
+There is one Doxygen grammar, the C++ raw scanner in
+`comment/doxygen_raw.cpp`. {py:func}`~clangquill.comments.doxygen_parse` binds
+onto it: the scanner returns the flattened `comment_fields` rows the IR would
+have persisted, and {py:func}`~clangquill.comments.model_from_fields` rebuilds
+the model from them -- the same decoder a stored comment goes through. The
+scanner needs no libclang, so this works in the stub backend too.
+
+`tests/comment_corpus/*.json` still pins the grammar, and is still the right
+place for a fix: the Python suite asserts *scanner plus decoder* against each
+case while the C++ suite asserts *scanner plus serializer*, so the two agreeing
+is what proves the flatten and the rebuild are inverses. Add a case there
 whenever you touch marker stripping, paragraph breaks, or command routing.
+
+Because the grammar is compiled, a change to it needs
+`uv sync --reinstall-package clangquill` before the Python suite sees it --
+editable installs do not rebuild the extension.
 
 ## Selecting a parser
 

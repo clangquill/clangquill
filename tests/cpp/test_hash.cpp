@@ -95,3 +95,35 @@ TEST_CASE("content_hash changes when a field value moves across a field "
 
   CHECK(content_hash(a, {}, "") != content_hash(b, {}, ""));
 }
+
+TEST_CASE("content_hash is stable for a fully-populated symbol", "[hash]") {
+  // A known-answer test, not a property: `symbols.content_hash` is persisted in
+  // the IR and drives the incremental cache, so a change to the field list, the
+  // field order or the length framing silently invalidates every user's cache
+  // and re-renders every page. The properties above would not notice any of
+  // that. If this digest changes, the change is either a mistake or a schema
+  // bump -- it is never incidental.
+  Symbol sym;
+  sym.usr = "c:@N@geo@S@Circle@F@area#1";
+  sym.parent_usr = "c:@N@geo@S@Circle";
+  sym.kind = clangquill::model::SymbolKind::Method;
+  sym.spelling = "area";
+  sym.qualified_name = "geo::Circle::area";
+  sym.display_name = "area(int) const";
+  sym.signature = "double area(int precision) const";
+  sym.type_repr = "double (int) const";
+  sym.access = clangquill::model::AccessKind::Public;
+  sym.storage = clangquill::model::StorageKind::None;
+  sym.is_definition = true;
+  sym.is_documented = true;
+  sym.location.file_path = "/src/geo.hpp";
+  sym.location.line = 42;
+
+  FunctionParameter p;
+  p.type_repr = "int";
+  p.name = "precision";
+  p.default_value = "2";
+
+  CHECK(content_hash(sym, {p}, "/// @brief The area.") ==
+        "42f3a18c284f2d4ed8541fbddb47c8789a98a0631c04709add615011f5b01426");
+}

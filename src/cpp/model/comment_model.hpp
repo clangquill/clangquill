@@ -36,6 +36,44 @@ struct CommentThrow {
   std::string description;  ///< The condition under which it is thrown.
 };
 
+/// @brief Every named CommentModel field, in flatten order.
+///
+/// `X(member, "row name")` -- the member of CommentModel, and the
+/// `comment_fields.name` it is persisted under. The two differ where Doxygen's
+/// command is singular but the model holds a list (`retvals` / `"retval"`).
+///
+/// One list, four consumers: CommentModel::empty(), to_comment_fields(),
+/// from_comment_fields() and to_fields_json() all walk it, so they cannot
+/// disagree about which fields exist -- and the bindings export it, so the
+/// Python read side derives its routing table from it rather than repeating it.
+///
+/// The order is the flatten order, and flatten order is the persisted
+/// `comment_fields.ordinal`. Reordering this list rewrites the IR.
+///
+/// `custom` is deliberately absent: it is the open bucket every *unlisted*
+/// command falls into, so it has no row name of its own.
+#define CLANGQUILL_COMMENT_FIELDS(X) \
+  X(brief, "brief")                  \
+  X(detail, "detail")                \
+  X(params, "param")                 \
+  X(tparams, "tparam")               \
+  X(returns, "returns")              \
+  X(retvals, "retval")               \
+  X(throws, "throws")                \
+  X(see, "see")                      \
+  X(since, "since")                  \
+  X(deprecated, "deprecated")        \
+  X(note, "note")                    \
+  X(warning, "warning")              \
+  X(pre, "pre")                      \
+  X(post, "post")                    \
+  X(invariant, "invariant")          \
+  X(todo, "todo")                    \
+  X(bug, "bug")                      \
+  X(author, "author")                \
+  X(version, "version")              \
+  X(date, "date")
+
 /// @brief Format-agnostic structured documentation comment.
 ///
 /// Produced by an ICommentParser (the default being the Doxygen parser) from a
@@ -68,13 +106,11 @@ struct CommentModel {
   /// @brief True when no field carries any documentation.
   /// @return `true` if every member is empty.
   bool empty() const {
-    return brief.empty() && detail.empty() && params.empty() &&
-           tparams.empty() && returns.empty() && retvals.empty() &&
-           throws.empty() && see.empty() && since.empty() &&
-           deprecated.empty() && note.empty() && warning.empty() &&
-           pre.empty() && post.empty() && invariant.empty() && todo.empty() &&
-           bug.empty() && author.empty() && version.empty() && date.empty() &&
-           custom.empty();
+    bool none = custom.empty();
+#define CLANGQUILL_COMMENT_FIELD_EMPTY(member, row) none = none && member.empty();
+    CLANGQUILL_COMMENT_FIELDS(CLANGQUILL_COMMENT_FIELD_EMPTY)
+#undef CLANGQUILL_COMMENT_FIELD_EMPTY
+    return none;
   }
 };
 

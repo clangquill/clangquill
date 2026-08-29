@@ -44,9 +44,15 @@ set(CLANGQUILL_WITH_LIBCLANG "AUTO" CACHE STRING "Link libclang: ON, OFF or AUTO
 include(cmake/FindLibClang.cmake)
 
 # --- Core static library -----------------------------------------------------
-# Always-built, libclang-independent sources (store + hashing). The parser
-# sources additionally need libclang and are added below only when available.
+# Always-built, libclang-independent sources: the store, hashing, and the
+# comment layer (the raw Doxygen scanner and the comment_fields codec). The
+# comment sources live outside parser/ precisely so their libclang-freeness is
+# structural -- the bindings export them, so the stub backend parses comments
+# and the Python drift tests are not vacuous against a wheel. Only the sources
+# that genuinely need a CXCursor are added below.
 set(CLANGQUILL_CORE_SOURCES
+    src/cpp/comment/doxygen_raw.cpp
+    src/cpp/comment/fields.cpp
     src/cpp/hash/sha256.cpp
     src/cpp/hash/content_hash.cpp
     src/cpp/store/sqlite_store.cpp)
@@ -56,7 +62,6 @@ if(CLANGQUILL_LIBCLANG_FOUND)
        src/cpp/parser/cursor_utils.cpp
        src/cpp/parser/compile_db.cpp
        src/cpp/parser/references.cpp
-       src/cpp/parser/comment_parser.cpp
        src/cpp/parser/doxygen_comment_parser.cpp
        src/cpp/parser/ast_visitor.cpp
        src/cpp/parser/parser.cpp)

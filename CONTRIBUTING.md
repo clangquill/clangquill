@@ -128,11 +128,16 @@ renders it.
 
 ### The comment corpus
 
-`tests/comment_corpus/*.json` is asserted by both comment parsers — the Python
-`doxygen_parse` and the C++ `DoxygenCommentParser::parse_raw_text` — so a case
-added there covers both, and a grammar change landing on only one side fails on
-the other. Prefer it to a parser-specific test whenever the behaviour is
+`tests/comment_corpus/*.json` pins the one Doxygen grammar
+(`comment/doxygen_raw.cpp`) from both sides: the Python suite runs the scanner
+through the bindings and rebuilds the model from its flattened rows, the C++
+suite runs the same scanner and serializes it directly. A case added there
+covers both, and the two agreeing is what proves the flatten and the rebuild
+are inverses. Prefer it to a parser-specific test whenever the behaviour is
 expressible as raw comment in, `CommentModel` out.
+
+The scanner is compiled, so run `uv sync --reinstall-package clangquill` after
+changing it or the Python suite will test the old one.
 
 ## Deploying
 

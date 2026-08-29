@@ -329,6 +329,42 @@ class RenderedPage:
 _DEP_RECORD_SEP = "\x1e"
 _DEP_FIELD_SEP = "\x1f"
 
+# The ``Symbol`` fields the wide fingerprint covers: exactly the ones the C++
+# ``content_hash`` leaves out. Spelled as a tuple rather than inline so the
+# invariant is checkable against ``_core.CONTENT_HASH_FIELDS`` by set algebra
+# instead of by scraping this function's body -- if the two ever overlap or
+# leave a gap, a custom template renders from data no fingerprint tracks.
+_WIDE_SYMBOL_FIELDS = (
+    "spelling",
+    "display_name",
+    "parent_usr",
+    "is_documented",
+    "file_id",
+    "line",
+)
+
+# ``TemplateParameter`` is not covered by ``content_hash`` at all, so the wide
+# fingerprint carries every field of it.
+_WIDE_TEMPLATE_PARAM_FIELDS = (
+    "idx",
+    "param_kind",
+    "name",
+    "type_repr",
+    "default_repr",
+)
+
+
+def _dep_value(value: object) -> str:
+    """Render one dependency-token field.
+
+    ``bool`` is spelled as ``0``/``1`` rather than ``False``/``True``: the token
+    text is a cache key, and changing how a value is written invalidates every
+    memoised page in every existing build directory.
+    """
+    if isinstance(value, bool):
+        return str(int(value))
+    return str(value)
+
 
 @dataclass(frozen=True)
 class PagePlan:
@@ -1594,27 +1630,14 @@ class Generator:
         """
         return [
             _DEP_FIELD_SEP.join(
-                (
-                    "W",
-                    symbol.usr,
-                    symbol.spelling,
-                    symbol.display_name,
-                    symbol.parent_usr,
-                    str(int(symbol.is_documented)),
-                    str(symbol.file_id),
-                    str(symbol.line),
-                ),
+                ("W", symbol.usr, *(_dep_value(getattr(symbol, f)) for f in _WIDE_SYMBOL_FIELDS)),
             ),
             *(
                 _DEP_FIELD_SEP.join(
                     (
                         "WT",
                         symbol.usr,
-                        str(tp.idx),
-                        str(tp.param_kind),
-                        tp.name,
-                        tp.type_repr,
-                        tp.default_repr,
+                        *(_dep_value(getattr(tp, f)) for f in _WIDE_TEMPLATE_PARAM_FIELDS),
                     ),
                 )
                 for tp in self.store.template_parameters(symbol.usr)
