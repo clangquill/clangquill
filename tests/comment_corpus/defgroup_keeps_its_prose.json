@@ -1,0 +1,31 @@
+{
+    "description": "@defgroup takes an id and a title; the paragraph after them is the group's own description and must not join the command argument.",
+    "raw": "/**\n * @defgroup Geometry Geometry helpers\n * Everything geometric.\n */\n",
+    "expected": {
+        "brief": "Everything geometric.",
+        "detail": [],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {
+            "defgroup": [
+                "Geometry Geometry helpers"
+            ]
+        }
+    }
+}

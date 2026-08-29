@@ -1,0 +1,31 @@
+{
+    "description": "@relates names a single entity; the prose after it documents the function carrying the comment.",
+    "raw": "/// @relates Circle\n/// Prints a circle to a stream.\n",
+    "expected": {
+        "brief": "Prints a circle to a stream.",
+        "detail": [],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {
+            "relates": [
+                "Circle"
+            ]
+        }
+    }
+}

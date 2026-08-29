@@ -1,6 +1,6 @@
 {
-    "description": "The prose and section commands: `\\details` and `\\par` are the detailed description itself, `\\remark` is a note by another name, and `\\invariant`, `\\todo`, `\\bug`, `\\version` and `\\date` each have a field of their own. None of them may land in `custom`, which the bundled templates render nothing from.",
-    "raw": "\n/**\n * @brief A summary.\n * @details The long story.\n * @par Rationale\n * Because it is.\n * @remark worth knowing\n * @invariant the buffer stays sorted\n * @todo handle the empty case\n * @bug loops on a null node\n * @author Ada\n * @version 2.1\n * @date 2026-08-01\n */\n",
+    "description": "The prose and section commands: `\\details` and `\\par` are the detailed description itself, `\\remark` is a note by another name, and `\\pre`, `\\post`, `\\invariant`, `\\todo`, `\\bug`, `\\version` and `\\date` each have a field of their own. None of them may land in `custom`, which the bundled templates render nothing from.",
+    "raw": "\n/**\n * @brief A summary.\n * @details The long story.\n * @par Rationale\n * Because it is.\n * @remark worth knowing\n * @pre the buffer is allocated\n * @post the buffer stays allocated\n * @invariant the buffer stays sorted\n * @todo handle the empty case\n * @bug loops on a null node\n * @author Ada\n * @version 2.1\n * @date 2026-08-01\n */\n",
     "expected": {
         "brief": "A summary.",
         "detail": [
@@ -19,8 +19,12 @@
             "worth knowing"
         ],
         "warning": [],
-        "pre": [],
-        "post": [],
+        "pre": [
+            "the buffer is allocated"
+        ],
+        "post": [
+            "the buffer stays allocated"
+        ],
         "invariant": [
             "the buffer stays sorted"
         ],

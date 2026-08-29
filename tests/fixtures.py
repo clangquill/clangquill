@@ -2,27 +2,34 @@
 
 The generator reads the SQLite IR, so its tests can run against a database
 built directly in Python — no libclang needed. To stay faithful to the real
-schema, the DDL is lifted verbatim from the C++ ``schema.hpp`` rather than
-duplicated here, then a small but representative set of symbols is inserted.
+schema, the DDL comes from the compiled core (``_core.SCHEMA_DDL``) rather
+than being duplicated here, then a small but representative set of symbols is
+inserted.
 """
 
 from __future__ import annotations
 
 import sqlite3
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from clangquill import _core
 from clangquill.store import AccessKind, RefKind, SymbolKind
 
-_SCHEMA_HPP = Path(__file__).resolve().parents[1] / "src" / "cpp" / "store" / "schema.hpp"
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _schema_ddl() -> str:
-    """Return the IR schema DDL extracted from the C++ source of truth."""
-    text = _SCHEMA_HPP.read_text(encoding="utf-8")
-    return text.split('R"SQL(', 1)[1].rsplit(')SQL"', 1)[0]
+    """Return the IR schema DDL, straight from the compiled core.
+
+    ``_core.SCHEMA_DDL`` is ``kSchemaDDL`` itself, so a fixture database is by
+    construction the schema the writer creates -- there is nothing to keep in
+    sync, and nothing to extract from a source tree that an installed wheel
+    does not ship.
+    """
+    return _core.SCHEMA_DDL
 
 
 def _build_fixture_db(path: Path) -> None:
