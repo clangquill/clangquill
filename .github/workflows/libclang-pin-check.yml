@@ -14,6 +14,10 @@ on:
   schedule:
     - cron: 0 6 * * 1
   workflow_dispatch:
+# The check job only queries the public LLVM releases API (the token just
+# raises its rate limit) and the retest job only reads the checkout.
+permissions:
+  contents: read
 jobs:
   check:
     name: libclang pin freshness
