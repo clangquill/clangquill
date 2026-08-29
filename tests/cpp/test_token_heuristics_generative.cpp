@@ -103,11 +103,20 @@ struct ParamCase {
   std::string label;
 };
 
+// One generated macro signature: what macro_signature() must recover for the
+// #define with the given name (an object-like macro expects its bare name).
+struct MacroCase {
+  std::string name;
+  std::string expected_signature;
+  std::string label;
+};
+
 struct Generated {
   std::ostringstream source;
   std::vector<HeadDefaultCase> head_defaults;
   std::vector<HeadOnlyCase> heads;
   std::vector<ParamCase> params;
+  std::vector<MacroCase> macros;
   int uid = 0;
   std::string next_name(const std::string& prefix) {
     return prefix + std::to_string(uid++);
@@ -253,6 +262,28 @@ void add_string_literal_param(Generated& g, const std::string& literal_body) {
   g.params.push_back({func, lit, "string literal " + lit});
 }
 
+// #define NAME(params) body: macro_signature()'s parameter-list recovery.
+// This family exists for issue #334, which audited the one token-heuristic
+// function #310 hadn't covered: the only text its paren matching spans is the
+// parameter list itself, where the grammar allows nothing but identifiers,
+// `,` and `...` -- no brackets, no braces, no angle brackets, and therefore
+// nothing for in_group()/angle_closes() to do. What these cases pin down
+// instead is the boundary with the replacement body that follows: its own
+// parens, commas and string literals must never be read as parameters.
+void add_macro(Generated& g, const std::string& params, const std::string& body,
+               const std::string& label) {
+  std::string name = g.next_name("CQ_GEN_MACRO_");
+  g.source << "#define " << name;
+  std::string expected = name;
+  if (!params.empty()) {
+    // No space: a space before `(` would make the macro object-like.
+    g.source << "(" << params << ")";
+    expected += "(" + params + ")";
+  }
+  g.source << body << "\n";
+  g.macros.push_back({name, expected, label});
+}
+
 }  // namespace
 
 TEST_CASE("token heuristics round-trip generatively across libclang's raw lex",
@@ -310,6 +341,15 @@ TEST_CASE("token heuristics round-trip generatively across libclang's raw lex",
   g.heads.push_back({"ConstrainedWithArg", "template<ConvertibleTo2 < int > T>",
                      "concept constraint with explicit template argument"});
 
+  // macro_signature()'s parameter-list recovery (issue #334; see add_macro).
+  add_macro(g, "", " 1", "object-like macro");
+  add_macro(g, "a", " (a)", "single parameter");
+  add_macro(g, "a, b", " ((a) > (b) ? (a) : (b))", "two parameters, paren body");
+  add_macro(g, "", "", "object-like macro, empty body");
+  add_macro(g, "fmt, ...", " log(fmt, __VA_ARGS__)", "variadic macro");
+  add_macro(g, "x", " ((x) \",)\")", "paren and comma inside a string literal");
+  add_macro(g, "a, b", "", "function-like macro, empty body");
+
   namespace fs = std::filesystem;
   const fs::path dir = unique_temp_dir("clangquill-token-heuristics-generative");
   std::filesystem::create_directories(dir);
@@ -329,7 +369,8 @@ TEST_CASE("token heuristics round-trip generatively across libclang's raw lex",
   CHECK(m.diagnostics.empty());
   INFO("generated " << g.head_defaults.size() << " head-default cases, "
                     << g.heads.size() << " head-only cases, "
-                    << g.params.size() << " function-parameter cases");
+                    << g.params.size() << " function-parameter cases, "
+                    << g.macros.size() << " macro cases");
 
   for (const auto& c : g.head_defaults) {
     INFO(c.label << " (owner " << c.owner << ")");
@@ -363,6 +404,14 @@ TEST_CASE("token heuristics round-trip generatively across libclang's raw lex",
     const auto* p0 = fparam(m, fn->usr, 0);
     REQUIRE(p0 != nullptr);
     CHECK(p0->default_value == c.expected_default);
+  }
+
+  for (const auto& c : g.macros) {
+    INFO(c.label << " (macro " << c.name << ")");
+    const auto* macro = find_symbol(m, c.name);
+    REQUIRE(macro != nullptr);
+    REQUIRE(macro->kind == model::SymbolKind::Macro);
+    CHECK(macro->signature == c.expected_signature);
   }
 }
 

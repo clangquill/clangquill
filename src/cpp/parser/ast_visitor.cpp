@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <optional>
 #include <string_view>
@@ -656,6 +658,26 @@ void extract_template_parameters(CXCursor c, const std::string& usr,
       &tctx);
 }
 
+// Fires once, only with CLANGQUILL_DEBUG set in the environment, the first
+// time clang_isCursorDefinition() reports true for a hidden friend's function
+// child. friend_decl_has_inline_body() exists because that is documented to
+// be impossible under CXTranslationUnit_SkipFunctionBodies; when a libclang
+// bump stops truncating the friend's body it quietly becomes the path taken,
+// and this notice is what keeps that change visible instead of just working
+// differently (issue #334).
+void note_friend_definition_signal(CXCursor gc) {
+  static bool noted = false;
+  if (noted || std::getenv("CLANGQUILL_DEBUG") == nullptr) return;
+  noted = true;
+  auto [file, line] = cursor_file_line(gc);
+  std::fprintf(stderr,
+               "clangquill: debug: clang_isCursorDefinition() is true for "
+               "hidden friend '%s' (%s:%u) under SkipFunctionBodies: the "
+               "offset probe in friend_decl_has_inline_body() is now the "
+               "fallback, not the only answer\n",
+               display_name(gc).c_str(), file.c_str(), line);
+}
+
 // Whether @p friend_decl (a CXCursor_FriendDecl) gives its befriended
 // function a body right here -- the "hidden friend" idiom -- rather than
 // merely declaring it.
@@ -763,8 +785,9 @@ void extract_friends(CXCursor record, const std::string& usr, VisitCtx& ctx) {
                 // only when this is false means a libclang change degrades to
                 // using the direct signal instead of quietly trusting a
                 // now-stale offset assumption.
-                bool has_body =
-                    clang_isCursorDefinition(gc) != 0 || in.has_body;
+                bool is_definition = clang_isCursorDefinition(gc) != 0;
+                if (is_definition) note_friend_definition_signal(gc);
+                bool has_body = is_definition || in.has_body;
                 if (has_body) in.func_def = gc;
                 return CXChildVisit_Break;
               }

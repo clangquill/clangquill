@@ -3,6 +3,12 @@
 # Linux arch tarballs (the packages tools/ci/fetch-libclang.sh downloads). Runs
 # on a schedule so a red run is the signal to bump LLVM_VERSION; also dispatchable
 # on demand.
+#
+# A red run does not stop at the flag: the token-heuristic layer
+# (src/cpp/parser/cursor_utils.cpp) is the most libclang-version-sensitive code
+# in the repo, so before the pin is bumped the Catch2 suite — most of all
+# tests/cpp/test_token_heuristics_generative.cpp — is rebuilt and run against
+# the newer libclang right here (the retest job below), per issue #334.
 name: libclang-pin-check
 on:
   schedule:
@@ -12,12 +18,57 @@ jobs:
   check:
     name: libclang pin freshness
     runs-on: ubuntu-24.04
+    outputs:
+      latest: ${{ steps.pin.outputs.latest }}
+      stale: ${{ steps.pin.outputs.stale }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.13'
       - name: Check for a newer libclang with both Linux arches
+        id: pin
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python tools/ci/check_libclang_pin.py
+
+  retest:
+    name: Run the C++ suite against the newer libclang
+    # Only when a newer libclang exists: the check job failed, so this job's
+    # result (not the check itself) is the signal of whether the pin bump is
+    # safe. `always()` keeps a skip — not a failure — from reading as a red
+    # retest on a green scheduled run.
+    if: always() && needs.check.result == 'failure' && needs.check.outputs.stale == 'true'
+    needs: check
+    runs-on: ubuntu-24.04
+    env:
+      LLVM_VERSION: ${{ needs.check.outputs.latest }}
+      X_VCPKG_ASSET_SOURCES: >-
+        clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
+        {url} {sha512} {dst}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Fetch the newer libclang (${{ needs.check.outputs.latest }})
+        run: sudo tools/ci/fetch-libclang.sh /opt/libclang
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install nanobind (build-time dependency)
+        run: python -m pip install nanobind
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build
+      - name: Configure against the newer libclang
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCLANGQUILL_WITH_LIBCLANG=ON
+          -DCLANGQUILL_BUILD_TESTS=ON
+          -DCMAKE_BUILD_TYPE=Debug
+          -DLibClang_ROOT=/opt/libclang
+          -DPython_EXECUTABLE="$(which python)"
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
