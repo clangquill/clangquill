@@ -53,7 +53,8 @@ C++ headers → _core.parse_*_to_sqlite (libclang) → SQLite IR → Store (read
   incremental rebuilds), `bindings/module.cpp` (the entire Python surface of the
   core — `have_libclang`, `libclang_version`, `parse_to_sqlite`,
   `parse_tus_to_sqlite`, `parse_tu_to_sqlite`, `parse_doxygen_comment`,
-  `split_param_arg`, `comment_fields_roundtrip`, `SCHEMA_VERSION`,
+  `split_param_arg`, `split_xref_target`, `comment_fields_roundtrip`,
+  `SCHEMA_VERSION`,
   `SCHEMA_DDL`, `SYMBOL_KINDS`, `ACCESS_KINDS`, `STORAGE_KINDS`, `REF_KINDS`,
   `TEMPLATE_PARAM_KINDS`, `CONTENT_HASH_FIELDS`, `COMMENT_FIELDS`). Everything
   but the three parse entry points works in the stub backend.

@@ -22,10 +22,17 @@ exist as contracts. This page records what replaced each one, and what is left.
 | 4 | `CommentModel` shape | Regexes over `to_fields_json`'s object literal | One `CLANGQUILL_COMMENT_FIELDS` list drives the flatten, the rebuild and the JSON; `_core.COMMENT_FIELDS` exports it and `clangquill.comments` derives its routing from it |
 | 5 | `SCHEMA_VERSION` | Already bound to `kSchemaVersion` | Unchanged |
 | 6 | The Doxygen grammar itself | Two independent implementations (972 lines of C++, 470 of Python) held equal by `tests/comment_corpus/` | One scanner. `doxygen_parse` is `model_from_fields(_core.parse_doxygen_comment(raw))` |
+| 6b | Cross-reference target splitting | `split_xref_target` written twice, once for the scanner and once for the renderer | `_core.split_xref_target`; a `@ref` cannot resolve differently depending on which side saw it |
 | 7 | `store.py`'s SQL column lists | *Not inventoried, not covered at all* | Every `Store` reader runs against a database built from `_core.SCHEMA_DDL`, so sqlite validates every column in every query |
 | 8 | The `CommentModel` field table in `docs/guides/comment-parsers.md` | *Not inventoried, a third hand-copy* | Asserted against `dataclasses.fields(CommentModel)` |
 
-Contract 6 was the one that had actually drifted, and nothing caught it: a
+Contract 6 is the one that kept costing. Three separate fixes — the
+`copy_target` depth counting, the operator-name handling in `is_cpp_name`, and
+`split_xref_target` itself — were each written twice, "command for command with
+the C++", because a grammar change landing on one side alone published
+different output. That is the work this removes.
+
+It had also actually drifted, and nothing caught it: a
 comment opening with `\ingroup`, `\class`, `\defgroup`, `\relates` or
 `\internal` had its whole brief and detail swallowed into the command's
 argument by the Python parser, because that side had no notion of a command

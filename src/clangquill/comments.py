@@ -157,6 +157,22 @@ def model_from_fields(rows: Iterable[tuple[str, str, str]]) -> CommentModel:
     return model
 
 
+def split_xref_target(token: str) -> tuple[str, str] | None:
+    """Split ``token`` into a C++ cross-reference target and its trailing punctuation.
+
+    Trailing punctuation cannot simply be stripped from the right before the
+    target is checked: ``[]``, ``()`` and ``,`` are sentence punctuation in
+    ``(see @ref parse_files)`` but part of the name in ``@ref Vec::operator[]``.
+    So the longest prefix that is a whole C++ name wins. ``None`` means no
+    prefix qualifies, and the caller degrades the reference to a code span.
+
+    The rule comes from the core, which is also what the scanner applies when it
+    renders inline markup -- a ``@ref`` must not resolve differently depending
+    on which of the two saw it.
+    """
+    return _core.split_xref_target(token)
+
+
 # --- The default Doxygen parser ----------------------------------------------
 
 

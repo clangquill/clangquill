@@ -56,6 +56,19 @@ bool is_group_command(const std::string& name);
 /// @return `true` when the command decorates the next word.
 bool is_inline_command(const std::string& name);
 
+/// @brief Splits @p token into a C++ cross-reference target and its trailing
+///        punctuation.
+///
+/// Trailing punctuation cannot simply be stripped before the target is checked:
+/// `[]`, `()` and `,` close a sentence in `(see \@ref parse_files)` but are part
+/// of the name in `\@ref Vec::operator[]`. The longest prefix that is a whole
+/// C++ name wins. The renderer needs the same split the scanner uses, or a
+/// `\@ref` would resolve differently depending on which one saw it.
+/// @param token The candidate target; trimmed to the target on success.
+/// @param tail Receives the punctuation that followed it.
+/// @return `true` when a prefix qualifies; @p token is untouched otherwise.
+bool split_xref_target(std::string& token, std::string& tail);
+
 /// @brief Routes one command's text into the model.
 /// @param m The model to write into.
 /// @param name The lowercased command word.

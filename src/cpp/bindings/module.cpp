@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "comment/doxygen_raw.hpp"
+#include "comment/doxygen_raw_detail.hpp"
 #include "comment/fields.hpp"
 #include "core/version.hpp"
 #include "hash/content_hash.hpp"
@@ -107,6 +108,19 @@ std::vector<CommentFieldRow> comment_fields_roundtrip(
     const std::vector<CommentFieldRow>& rows) {
   return rows_of(clangquill::comment::to_comment_fields(
       "", clangquill::comment::from_comment_fields(fields_of(rows))));
+}
+
+// Splits a cross-reference target off its trailing punctuation, or returns
+// None when nothing qualifies. The renderer calls this for every `\ref`, and it
+// has to be the same rule the scanner applies.
+std::optional<std::pair<std::string, std::string>> split_xref_target(
+    const std::string& token) {
+  std::string target = token;
+  std::string tail;
+  if (!clangquill::comment::detail::split_xref_target(target, tail)) {
+    return std::nullopt;
+  }
+  return std::make_pair(target, tail);
 }
 
 nb::dict enum_dict(const clangquill::model::EnumEntry* entries, std::size_t n) {
@@ -378,6 +392,9 @@ NB_MODULE(_core, m) {
   m.def("split_param_arg", &clangquill::comment::split_param_arg,
         nb::arg("arg"),
         "Split a comment_fields arg into (parameter name, direction).");
+  m.def("split_xref_target", &split_xref_target, nb::arg("token"),
+        "Split a cross-reference target off its trailing punctuation, or None "
+        "when no prefix of it is a whole C++ name.");
   m.def("comment_fields_roundtrip", &comment_fields_roundtrip, nb::arg("rows"),
         "Decode rows into a CommentModel and re-encode them; returns the rows "
         "unchanged. A test hook for pinning the Python decoder.");
