@@ -85,7 +85,7 @@ C++ headers → _core.parse_*_to_sqlite (libclang) → SQLite IR → Store (read
 builds (store + hashing only) as the "stub backend" — same extension module, no
 parser sources. Tests that need a parse are gated on
 `pytest.mark.skipif(not _core.have_libclang(), ...)`, and CI has dedicated jobs
-for both the no-libclang path and LLVM 22 (the version bundled in wheels).
+for both the no-libclang path and LLVM 23 (the version bundled in wheels).
 Never let a parse-dependent test fail hard when the backend is absent, and never
 let a stub-path test silently skip because a libclang happened to be linked.
 

@@ -107,7 +107,7 @@ Each run writes a timestamped pair into `benchmarks/results/` (gitignored):
 The `benchmark` GitHub Actions workflow (`.github/workflows/benchmark.yml`) runs
 on version tags (`v*`) and on manual dispatch. It installs the locked
 sphinx/myst toolchain, **builds clangquill from the checked-out source** (against
-LLVM 22 from apt.llvm.org, the same libclang major the release wheels bundle) so
+LLVM 23 from apt.llvm.org, the same libclang major the release wheels bundle) so
 the published numbers measure the commit they are labeled with, runs the
 harness, appends the report to the job summary, uploads the raw results
 as an artifact, and — on a tagged run, or a manual dispatch with the

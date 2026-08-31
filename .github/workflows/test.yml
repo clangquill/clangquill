@@ -79,7 +79,7 @@ jobs:
           fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
     # Docs build on the distro libclang (18). The C++23/26 dogfood header is
-    # gated on libclang >= 22, so here it is omitted — exercising the graceful
+    # gated on libclang >= 23, so here it is omitted — exercising the graceful
     # "older toolchain never fails the docs build" path. One interpreter is
     # enough for that: this asserts a libclang-version behaviour, not a Python
     # one, and the docs toolchain gets its own job below.
@@ -89,12 +89,12 @@ jobs:
           uv sync --frozen --extra docs
           uv run make -C docs html
   pytest-newer-llvm:
-    # pytest against LLVM 22 — the libclang major bundled into release wheels.
+    # pytest against LLVM 23 — the libclang major bundled into release wheels.
     # The matrix job above runs on the distro libclang (18), so without this the
-    # only parses ever done against 22 are the weekly verify-extraction run and
+    # only parses ever done against 23 are the weekly verify-extraction run and
     # the docs build below (which renders pages but asserts nothing about them).
     runs-on: ubuntu-24.04
-    name: pytest (clang 22)
+    name: pytest (clang 23)
     env:
           # sqlite.org 403s vcpkg's default downloader, so distfiles go through
           # a browser-User-Agent script (SHA512 is still checked by vcpkg).
@@ -105,9 +105,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.1
           # The repository-controlled installer (pinned key fingerprint, pinned
-          # llvm-toolchain-<codename>-22 suite), as used by verify-extraction.
-      - name: Install LLVM 22 from apt.llvm.org
-        run: bash tools/ci/install-llvm-22-apt.sh
+          # llvm-toolchain-<codename>-23 suite), as used by verify-extraction.
+      - name: Install LLVM 23 from apt.llvm.org
+        run: bash tools/ci/install-llvm-apt.sh
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
       - name: Set up Python
@@ -116,7 +116,7 @@ jobs:
           python-version: '3.13'
       - name: Install dependencies
         env:
-          SKBUILD_CMAKE_DEFINE: CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/usr/lib/llvm-22
+          SKBUILD_CMAKE_DEFINE: CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/usr/lib/llvm-23
         run: uv sync --frozen --extra ci
           # The assert is load-bearing: a core that silently linked the distro
           # libclang would make this job a duplicate of the matrix one, and the
@@ -124,13 +124,13 @@ jobs:
           # No coverage upload: same lines as the matrix job, different backend.
       - name: run pytest
         run: |
-          uv run python -c "from clangquill._libclang import libclang_major; assert (libclang_major() or 0) >= 22, libclang_major()"
+          uv run python -c "from clangquill._libclang import libclang_major; assert (libclang_major() or 0) >= 23, libclang_major()"
           uv run pytest
   docs-newer-llvm:
-    # The published/pages docs build: install clang 22 from apt.llvm.org so the
+    # The published/pages docs build: install clang 23 from apt.llvm.org so the
     # core links against it and actually parses the C++23/26 dogfood header.
     runs-on: ubuntu-24.04
-    name: docs (clang 22 dogfood)
+    name: docs (clang 23 dogfood)
     env:
           # sqlite.org 403s vcpkg's default downloader, so distfiles go through
           # a browser-User-Agent script (SHA512 is still checked by vcpkg).
@@ -141,23 +141,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.1
           # The repository-controlled installer (pinned key fingerprint, pinned
-          # llvm-toolchain-<codename>-22 suite), as used by pytest-newer-llvm
+          # llvm-toolchain-<codename>-23 suite), as used by pytest-newer-llvm
           # and verify-extraction -- not the unpinned `apt.llvm.org/llvm.sh`.
-      - name: Install LLVM 22 from apt.llvm.org
-        run: bash tools/ci/install-llvm-22-apt.sh
+      - name: Install LLVM 23 from apt.llvm.org
+        run: bash tools/ci/install-llvm-apt.sh
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:
           python-version: '3.13'
-      - name: Build core against libclang 22 and render docs
-      # FindLibClang resolves llvm-config-22; LibClang_ROOT pins the prefix.
+      - name: Build core against libclang 23 and render docs
+      # FindLibClang resolves llvm-config-23; LibClang_ROOT pins the prefix.
         env:
-          SKBUILD_CMAKE_DEFINE: CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/usr/lib/llvm-22
+          SKBUILD_CMAKE_DEFINE: CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/usr/lib/llvm-23
         run: |-
           uv sync --frozen --extra docs
-          uv run python -c "from clangquill._libclang import libclang_major; assert (libclang_major() or 0) >= 22, libclang_major()"
+          uv run python -c "from clangquill._libclang import libclang_major; assert (libclang_major() or 0) >= 23, libclang_major()"
           uv run make -C docs html
   py-check-no-libclang:
     # Every job above builds with libclang linked, so the `not have_libclang()`
