@@ -41,7 +41,7 @@ uv pip install clangquill
 
 (Plain `pip install clangquill` works too.)
 
-The Linux wheels bundle a self-contained **libclang 22** from the official LLVM
+The Linux wheels bundle a self-contained **libclang 23** from the official LLVM
 release, so parsing works out of the box with no system LLVM required. That
 bundled libclang needs **glibc ≥ 2.34** (manylinux_2_34); on older distributions,
 [build from source](#building-from-source) against your own libclang instead.
