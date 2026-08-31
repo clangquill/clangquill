@@ -145,6 +145,20 @@ Nothing is timed. Four checks per project, all of which must pass:
   whatever order a config lists them in; this check is what says whether it is
   also *right*. It costs one extra parse per project.
 
+  A symbol is compared by USR, qualified name, kind, documented flag and the
+  file it was attributed to; only the middle three gate. The USR is reported
+  instead because libclang spells a dependent template argument differently
+  depending on how much of the translation unit it has seen. The file is
+  reported because the IR only ever records a file the symbol really is
+  declared in, and a symbol declared in two of them — a namespace every header
+  re-opens, or a member whose out-of-line definition lives elsewhere, as
+  `Eigen::DenseBase::begin` is declared in `DenseBase.h` and defined in
+  `StlIterators.h` — is kept under the declaring header when the umbrella sees
+  both files at once and under the defining one when each is its own
+  translation unit. That is a promotion rule rather than preprocessor state
+  leaking across a batch; the count moves when the rule does, and the symbols
+  are listed in the JSON artifact.
+
 Doxygen's own warnings are not gated because they are not evidence about
 ClangQuill. Real projects make Doxygen warn for reasons no generated Doxyfile
 can fix: abseil's `friend Type;` and `extern template` declarations are valid

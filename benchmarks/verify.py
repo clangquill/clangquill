@@ -21,7 +21,11 @@ Four checks per project, all of which must pass:
                 yielded a documented symbol in ClangQuill's IR too.
     isolation   re-parsing at ``--tu-batch 1`` yields the same symbols as the
                 default umbrella batching, i.e. batching really is only an
-                optimisation on this project's headers.
+                optimisation on this project's headers. Which file each symbol
+                was attributed to is compared too, and reported rather than
+                gated: a symbol declared in two headers is kept under a
+                different one of them depending on the batching, which is a
+                promotion rule rather than a leak.
 
 The extraction check is the reason both tools are run, and it is what this
 driver is for: a parse can be clean and the output still be wrong, and a regression that
@@ -197,8 +201,8 @@ def _documented(element: ET.Element) -> bool:
     return _has_text(element.find("briefdescription")) or _has_text(element.find("detaileddescription"))
 
 
-def _relative_to_root(raw: str, root: Path) -> str | None:
-    """Return ``raw`` relative to ``root``, or ``None`` if it lies outside.
+def _resolved_under(raw: str, root: Path) -> Path:
+    """Resolve ``raw`` the way the tool that recorded it spelled it.
 
     A path either tool records may be relative, and a relative path must be
     joined onto ``root`` rather than resolved against this process's working
@@ -206,19 +210,43 @@ def _relative_to_root(raw: str, root: Path) -> str | None:
     forced-include prologue leaves ``./x/y.h`` in the IR, and resolving that
     against wherever ``verify.py`` was launched from yields a path outside the
     project — dropping every symbol in it from the comparison.
+    """
+    path = Path(raw)
+    if not path.is_absolute():
+        path = root / path
+    return path.resolve()
+
+
+def _relative_to_root(raw: str, root: Path) -> str | None:
+    """Return ``raw`` relative to ``root``, or ``None`` if it lies outside.
 
     The result is spelled with forward slashes on every platform. It is a key in
     the per-file comparison and a value in the JSON artifact, never a path to
     open, so a separator that changes with the host would make two runs' reports
     incomparable for no gain.
     """
-    path = Path(raw)
-    if not path.is_absolute():
-        path = root / path
     try:
-        return path.resolve().relative_to(root).as_posix()
+        return _resolved_under(raw, root).relative_to(root).as_posix()
     except ValueError:
         return None
+
+
+def _owning_file(raw: str | None, root: Path) -> str:
+    """Return a symbol's file as a spelling-independent comparison key.
+
+    Unlike :func:`_relative_to_root` this never drops a path: a symbol the IR
+    attributes outside the project still has to compare equal to itself across
+    two parses, so an outside path comes back resolved and absolute rather than
+    as ``None``. A symbol with no file at all — the IR allows it — compares as
+    the empty string, which no path can collide with.
+    """
+    if not raw:
+        return ""
+    resolved = _resolved_under(raw, root)
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError:
+        return resolved.as_posix()
 
 
 def _location(element: ET.Element, root: Path) -> str | None:
@@ -397,17 +425,51 @@ def xref_health(myst_dir: Path, ir_path: Path) -> dict:
     }
 
 
-def symbol_rows(ir_path: Path) -> set[tuple]:
+def symbol_rows(ir_path: Path, source_root: Path) -> set[tuple]:
     """Return the identity of every symbol in an IR, order-insensitively.
 
     ``is_documented`` rides along in the tuple, so a symbol whose doc comment
     stops being attached shows up as a pair — once on each side of the
-    comparison — rather than silently matching.
+    comparison — rather than silently matching. The owning file rides along for
+    the same reason: without it, a symbol the two parses attribute to *different*
+    files compares as identical, and batching really does move symbols between
+    the files that declare them — the effect the ``{source_dir}`` placeholder in
+    :mod:`harness` exists to keep out of rendered names. Normalised through
+    :func:`_owning_file`, so a relative-versus-absolute spelling of one file is
+    not itself the difference; :func:`check_isolation` decides what to do with
+    what remains.
     """
     from clangquill.store import Store  # noqa: PLC0415 - optional at import time, required here
 
     with Store.open(ir_path) as store:
-        return {(s.usr, s.qualified_name, s.kind, s.is_documented) for s in store.symbols()}
+        paths = {f.id: f.path for f in store.files()}
+        return {
+            (s.usr, s.qualified_name, s.kind, s.is_documented, _owning_file(paths.get(s.file_id), source_root))
+            for s in store.symbols()
+        }
+
+
+def _drop_file(rows: Counter[tuple]) -> Counter[tuple]:
+    """Re-key ``(name, kind, documented, file)`` counts on identity alone."""
+    dropped: Counter[tuple] = Counter()
+    for row, count in rows.items():
+        dropped[row[:-1]] += count
+    return dropped
+
+
+def _files_by_identity(rows: Counter[tuple]) -> dict[tuple, set[str]]:
+    """Map each ``(name, kind, documented)`` identity to the files it sat in."""
+    files: dict[tuple, set[str]] = {}
+    for row in rows:
+        files.setdefault(row[:-1], set()).add(row[-1])
+    return files
+
+
+def _describe(identity: tuple, files: dict[tuple, set[str]]) -> str:
+    """Render one identity and where it was attributed, for a detail line."""
+    name, kind, documented = identity
+    where = ", ".join(sorted(files.get(identity, set()))) or "no file"
+    return f"{name} ({kind}, documented={documented}) in {where}"
 
 
 # --------------------------------------------------------------------------- #
@@ -489,6 +551,13 @@ def check_isolation(ctx: RepoContext, clangquill_cmd: list[str], logs: Path) -> 
     their batch-mates left behind. Canonical input ordering makes the outcome
     reproducible; only this check says whether it is also *right*.
 
+    A symbol is compared by USR, qualified name, kind, documented flag *and* the
+    file it was attributed to — without the file, a symbol the two parses filed
+    under different headers reads as identical, which is the one difference
+    umbrella batching is known to produce. Of those five, only the name, kind and
+    documented flag gate: see the pairings below for why the other two are
+    counted instead.
+
     Compared against the IR the parse check already built, so a project costs one
     extra parse rather than two. Diagnostics are counted into the summary but do
     not decide it: libclang reports a batched diagnostic through the synthetic
@@ -518,35 +587,79 @@ def check_isolation(ctx: RepoContext, clangquill_cmd: list[str], logs: Path) -> 
             detail=_tail(run.output),
         )
 
-    batched = symbol_rows(batched_ir)
-    isolated = symbol_rows(isolated_ir)
-    # A symbol that agrees on name, kind and documented but not on USR is not a
-    # difference this project can act on: libclang renders a dependent template
-    # argument differently depending on how much of the translation unit it has
-    # seen, so abseil's FormatConvertImpl overloads come out with
-    # ArgConvertResult<absl::FormatConversionCharSet::v> one way and
-    # ArgConvertResult<524288> the other, and `<! X` versus `<!X`. Counted into
-    # the summary, never gated on — the same treatment doxygen's warnings get.
-    # The multiset intersection is what pairs those up; whatever is left over is
-    # a symbol that really is present on one side only.
-    batched_only = Counter(row[1:] for row in batched - isolated)
-    isolated_only = Counter(row[1:] for row in isolated - batched)
-    drift = sum((batched_only & isolated_only).values())
-    missing_when_batched = isolated_only - batched_only
-    missing_when_isolated = batched_only - isolated_only
+    source_root = ctx.source_dir.resolve()
+    batched = symbol_rows(batched_ir, source_root)
+    isolated = symbol_rows(isolated_ir, source_root)
+    # Rows are (usr, qualified name, kind, documented, file), and two pairings
+    # run in sequence over what one side has and the other does not. Each folds
+    # out a difference that is *not* a symbol going missing, so that whatever
+    # survives both is one that really is present on one side only.
+    #
+    # First, the USR. A symbol that agrees on name, kind, documented and file
+    # but not on USR is not a difference this project can act on: libclang
+    # renders a dependent template argument differently depending on how much of
+    # the translation unit it has seen, so abseil's FormatConvertImpl overloads
+    # come out with ArgConvertResult<absl::FormatConversionCharSet::v> one way
+    # and ArgConvertResult<524288> the other, and `<! X` versus `<!X`. Counted
+    # into the summary, never gated on — the same treatment doxygen's warnings
+    # get. The multiset intersection is what pairs those up.
+    batched_rows = Counter(row[1:] for row in batched - isolated)
+    isolated_rows = Counter(row[1:] for row in isolated - batched)
+    drift = sum((batched_rows & isolated_rows).values())
+    only_batched = batched_rows - isolated_rows
+    only_isolated = isolated_rows - batched_rows
 
-    drift_note = "" if not drift else f"; {drift} symbol(s) differ only in libclang's USR spelling"
+    # Then the file. What pairs up here is one symbol both parses saw and filed
+    # under different paths — the difference the comparison was blind to before,
+    # and the reason `harness.py` has a `{source_dir}` placeholder at all.
+    #
+    # Counted into the summary and listed, never gated on, because the IR only
+    # ever records a file the symbol really is declared in: both spellings name
+    # a declaration site, and what differs is which of them the merge kept.
+    # Running the three per-push configs says the same thing three times. Every
+    # move on eigen (51) and abseil (6) is a member whose out-of-line definition
+    # lives in another header — Eigen::DenseBase::begin, declared in DenseBase.h
+    # and defined in StlIterators.h — kept under the declaring header when the
+    # umbrella saw both files at once and under the defining one when each was
+    # its own translation unit. The rest, on all three, are namespaces, which
+    # every header that adds to them re-opens and which therefore have no single
+    # file to move *from*. Neither is preprocessor state leaking across a batch,
+    # which is what this check exists to catch, and gating on either would paint
+    # two of the three per-push projects red for a promotion rule nobody is
+    # changing in the same breath. The count is the signal: it moves when that
+    # rule does.
+    batched_ids = _drop_file(only_batched)
+    isolated_ids = _drop_file(only_isolated)
+    batched_files = _files_by_identity(only_batched)
+    isolated_files = _files_by_identity(only_isolated)
+    moved = batched_ids & isolated_ids
+    missing_when_batched = isolated_ids - batched_ids
+    missing_when_isolated = batched_ids - isolated_ids
+
+    notes = "" if not drift else f"; {drift} symbol(s) differ only in libclang's USR spelling"
+    if moved:
+        notes += f"; {sum(moved.values())} symbol(s) kept under another file that declares them"
+    moved_detail = [
+        f"another declaration kept: {name} ({kind}, documented={doc}) in "
+        f"{', '.join(sorted(batched_files.get((name, kind, doc), set())))} when batched, "
+        f"{', '.join(sorted(isolated_files.get((name, kind, doc), set())))} when isolated"
+        for name, kind, doc in sorted(moved)
+    ]
     if not missing_when_batched and not missing_when_isolated:
         return Check(
             "isolation",
             passed=True,
-            summary=f"{len(batched)} symbol(s) identical under --tu-batch 1{drift_note}",
+            summary=f"{len(batched)} symbol(s) identical under --tu-batch 1{notes}",
+            # Carried on a passing check so the ungated count stays actionable:
+            # the JSON artifact keeps it, and the Markdown report — which prints
+            # detail for failures only — stays about what actually failed.
+            detail=moved_detail[:MAX_REPORTED_LINES],
         )
-    detail = [
-        f"only when batched: {name} ({kind}, documented={doc})" for name, kind, doc in sorted(missing_when_isolated)
-    ]
+    # The gated differences come first: they are what the run is red for, and
+    # the shared line budget must not be spent on the ungated list above them.
+    detail = [f"only when batched: {_describe(identity, batched_files)}" for identity in sorted(missing_when_isolated)]
     detail += [
-        f"only when isolated: {name} ({kind}, documented={doc})" for name, kind, doc in sorted(missing_when_batched)
+        f"only when isolated: {_describe(identity, isolated_files)}" for identity in sorted(missing_when_batched)
     ]
     return Check(
         "isolation",
@@ -554,9 +667,9 @@ def check_isolation(ctx: RepoContext, clangquill_cmd: list[str], logs: Path) -> 
         summary=(
             f"batching changes the IR: {sum(missing_when_isolated.values())} symbol(s) only when batched, "
             f"{sum(missing_when_batched.values())} only when isolated, "
-            f"of {len(batched)} vs {len(isolated)}{drift_note}"
+            f"of {len(batched)} vs {len(isolated)}{notes}"
         ),
-        detail=detail[:MAX_REPORTED_LINES],
+        detail=(detail + moved_detail)[:MAX_REPORTED_LINES],
     )
 
 

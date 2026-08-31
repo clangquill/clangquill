@@ -254,3 +254,114 @@ def test_xref_health_keeps_operator_targets_whole(
     # None of them is in the fixture IR, so each is reported under its own name
     # rather than collapsed onto a mangled prefix.
     assert sorted(health["examples"]) == sorted([*operators, "geo::operator=="])
+
+
+# --------------------------------------------------------------------------- #
+# The isolation gate
+#
+# `check_isolation` re-parses at `--tu-batch 1` and compares two IRs. These
+# tests supply both IRs directly and stub the re-parse out: what is under test
+# is the comparison, not clangquill's ability to run twice.
+# --------------------------------------------------------------------------- #
+def _isolation_ctx(verify, fixture_db: Path, tmp_path: Path, monkeypatch, mutate) -> SimpleNamespace:
+    """Stage a batched and an isolated IR, ``mutate`` applied to the latter."""
+    bench = tmp_path / "bench"
+    cache, isolated = bench / "cache", bench / "cache-isolated"
+    for directory in (cache, isolated):
+        directory.mkdir(parents=True)
+    shutil.copy2(fixture_db, cache / "clangquill.sqlite")
+    shutil.copy2(fixture_db, isolated / "clangquill.sqlite")
+    con = sqlite3.connect(isolated / "clangquill.sqlite")
+    mutate(con)
+    con.commit()
+    con.close()
+    source = tmp_path / "src"
+    source.mkdir()
+    # The isolated build is staged above, so neither running it nor wiping the
+    # directory it would have written into may happen here.
+    monkeypatch.setattr(verify, "wipe", lambda _path: None)
+    monkeypatch.setattr(verify, "clangquill_build_argv", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(verify, "run_logged", lambda _argv, _cwd, log: verify.Run(0, log))
+    return SimpleNamespace(source_dir=source, cache_dir=cache, bench_dir=bench)
+
+
+def _add_file(con: sqlite3.Connection, file_id: int, path: str) -> None:
+    con.execute("INSERT INTO files(id, path, sha256, size_bytes) VALUES(?, ?, 'cafe', 64)", (file_id, path))
+
+
+def test_isolation_reports_a_symbol_kept_under_another_file(
+    fixture_db: Path,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # The blind spot this check used to have: `geo::Circle::area` is one symbol
+    # in both IRs, attributed to two different headers. Reported and named --
+    # both spellings, so the difference is actionable -- but not gated, because
+    # a file the IR records is always one the symbol is declared in, and which
+    # declaration a merge keeps is a promotion rule rather than a batching leak.
+    verify = _load_verify(monkeypatch)
+
+    def move_area(con: sqlite3.Connection) -> None:
+        _add_file(con, 2, "circle_impl.hpp")
+        con.execute("UPDATE symbols SET file_id = 2 WHERE usr = 'c:@N@geo@S@Circle@F@area'")
+
+    ctx = _isolation_ctx(verify, fixture_db, tmp_path, monkeypatch, move_area)
+    check = verify.check_isolation(ctx, ["clangquill"], tmp_path)
+
+    assert check.passed, check.summary
+    assert "1 symbol(s) kept under another file that declares them" in check.summary
+    assert any(
+        "geo::Circle::area" in line and "geo.hpp" in line and "circle_impl.hpp" in line for line in check.detail
+    ), check.detail
+
+
+def test_isolation_ignores_a_second_spelling_of_one_file(
+    fixture_db: Path,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # The other half: a forced-include prologue leaves `./geo.hpp` in one IR
+    # where the umbrella carries the absolute path. Same file, two spellings --
+    # and reporting that as a difference would bury the real ones under it.
+    verify = _load_verify(monkeypatch)
+    source = tmp_path / "src"
+
+    def respell(con: sqlite3.Connection) -> None:
+        # Spelled as a string, not through `Path`, which would fold the `./`
+        # away before it ever reached the IR.
+        con.execute("UPDATE files SET path = ? WHERE id = 1", (f"{source}/./geo.hpp",))
+
+    ctx = _isolation_ctx(verify, fixture_db, tmp_path, monkeypatch, respell)
+    check = verify.check_isolation(ctx, ["clangquill"], tmp_path)
+
+    assert check.passed, check.summary
+    assert "kept under another file" not in check.summary
+    assert check.detail == []
+
+
+def test_isolation_still_fails_on_a_symbol_only_one_parse_saw(
+    fixture_db: Path,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # The gate itself, which the file dimension must not weaken: a symbol the
+    # isolated parse produced and the batched one did not is what "batching is
+    # only an optimisation" is false about, and the failure names the file it
+    # was in.
+    verify = _load_verify(monkeypatch)
+
+    def add_symbol(con: sqlite3.Connection) -> None:
+        _add_file(con, 2, "extra.hpp")
+        con.execute(
+            "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, display_name, "
+            "signature, type_repr, access, is_definition, is_documented, content_hash, file_id, line) "
+            "VALUES('c:@N@geo@S@Ghost', 'c:@N@geo', 2, 'Ghost', 'geo::Ghost', 'geo::Ghost', "
+            "'', '', 0, 1, 1, 'hash-ghost', 2, 0)",
+        )
+
+    ctx = _isolation_ctx(verify, fixture_db, tmp_path, monkeypatch, add_symbol)
+    check = verify.check_isolation(ctx, ["clangquill"], tmp_path)
+
+    assert not check.passed
+    assert "1 only when isolated" in check.summary
+    assert any("only when isolated: geo::Ghost" in line and "extra.hpp" in line for line in check.detail), check.detail
