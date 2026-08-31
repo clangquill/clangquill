@@ -87,10 +87,25 @@ jobs:
             SKBUILD_CMAKE_DEFINE="CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/opt/libclang"
             X_VCPKG_ASSET_SOURCES="clear;x-script,/opt/vcpkg-asset-fetch.sh {url}
             {sha512} {dst}"
-          CIBW_TEST_COMMAND: >-
-            python -c "from clangquill import _core;
-            assert _core.have_libclang();
-            print(_core.__core_version__, _core.libclang_version())"
+          # A manylinux_2_35 wheel cannot be installed in the manylinux_2_34
+          # image that built it — pip there sees glibc 2.34 and rejects the tag,
+          # and the GLIBCXX_3.4.30 import would fail even if it did not. So the
+          # in-container test is skipped and the identical check runs in the
+          # step below instead.
+          CIBW_TEST_SKIP: '*-manylinux_*'
+      - name: Verify the repaired wheel outside the build image
+          # Debian 12 (glibc 2.36) clears the wheel's 2.35 floor and ships no
+          # system LLVM, so importing `_core` here proves the wheel carries a
+          # working libclang of its own before anything is published.
+        run: >-
+          docker run --rm -v "$PWD:/work" -w /work python:3.13-slim-bookworm
+          bash -ec '
+          for w in wheelhouse/*.whl; do
+          python -m pip install --force-reinstall "$w";
+          python -c "from clangquill import _core;
+          assert _core.have_libclang();
+          print(_core.__core_version__, _core.libclang_version())";
+          done'
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: wheels-linux-${{ matrix.arch }}
