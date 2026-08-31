@@ -88,20 +88,30 @@ jobs:
             SKBUILD_CMAKE_DEFINE="CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/opt/libclang"
             X_VCPKG_ASSET_SOURCES="clear;x-script,/opt/vcpkg-asset-fetch.sh {url}
             {sha512} {dst}"
+          # A manylinux_2_35 wheel cannot be installed in the manylinux_2_34
+          # image that built it — pip there sees glibc 2.34 and rejects the tag,
+          # and the GLIBCXX_3.4.30 import would fail even if it did not. So the
+          # in-container test is skipped and the identical suite runs in the
+          # step below instead.
+          CIBW_TEST_SKIP: '*-manylinux_*'
+      - name: Test the repaired wheel outside the build image
           # The wheel is tested by the real suite, not an import smoke:
           # aarch64 ships to users on the strength of this run, and a
           # parse-heavy suite is what exercises the paths that actually differ
           # per platform. The `_core` assert stays in front of it because every
           # parser test is skipped (not failed) when libclang is missing, so
           # pytest alone could go green on a wheel that bundles nothing.
-          CIBW_TEST_REQUIRES: >-
-            pytest pytest-cov pytest-datadir pytest-regressions sphinx
-            myst-parser
-          CIBW_TEST_COMMAND: >-
-            python -c "from clangquill import _core;
-            assert _core.have_libclang();
-            print(_core.__core_version__, _core.libclang_version())" &&
-            pytest {project}/tests
+          # Debian 12 (glibc 2.36) clears the wheel's 2.35 floor and ships no
+          # system LLVM, so this also proves the bundled libclang stands alone.
+        run: >-
+          docker run --rm -v "$PWD:/work" -w /work python:3.13-slim-bookworm
+          bash -ec '
+          python -m pip install wheelhouse/*.whl pytest pytest-cov
+          pytest-datadir pytest-regressions sphinx myst-parser;
+          python -c "from clangquill import _core;
+          assert _core.have_libclang();
+          print(_core.__core_version__, _core.libclang_version())";
+          pytest tests'
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: wheels-${{ matrix.os }}
