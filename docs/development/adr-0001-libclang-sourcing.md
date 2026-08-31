@@ -125,16 +125,27 @@ vendors that libclang.so (plus libstdc++/libgcc).
 Consequences:
 
 * That libclang requires **GLIBC_2.34**, so the wheels are built in the
-  **manylinux_2_34** image (`CIBW_MANYLINUX_*_IMAGE`). The wheels therefore
-  install on glibc ≥ 2.34 systems; older systems build from source.
+  **manylinux_2_34** image (`CIBW_MANYLINUX_*_IMAGE`) — still the newest image
+  pypa publishes for x86_64/aarch64.
+* From **LLVM 23** the release libclang also imports
+  `std::condition_variable::wait` at **GLIBCXX_3.4.30** (GCC 12's libstdc++),
+  above the 3.4.29 cap of auditwheel's `manylinux_2_34` policy, so the wheels are
+  repaired to **manylinux_2_35** — the lowest policy that admits that symbol
+  (`CIBW_REPAIR_WHEEL_COMMAND_LINUX`). The build image is unchanged: libclang is a
+  prebuilt binary the image's own GCC never compiles against. The wheels
+  therefore install on glibc ≥ 2.35 systems; older ones — including the glibc
+  2.34 of RHEL/AlmaLinux/Rocky 9 — build from source. The floor tracks whatever
+  the bundled libclang needs, so it moves again when a future LLVM raises it.
 * Wheel size is larger than the ~24 MB PyPI-wheel estimate (the self-contained
   libclang.so is ~200 MB uncompressed), but still avoids the monolithic shared
   `libLLVM`.
 * `CLANGQUILL_WITH_LIBCLANG=ON` is set in the wheel build so a missing libclang
   fails loudly; `CIBW_TEST_COMMAND` asserts `have_libclang()`, and a separate
-  `smoke_test` job installs the repaired wheel in a clean manylinux_2_34 image
-  (no system LLVM, no `LD_LIBRARY_PATH`) and parses a header to prove the
-  bundled libclang is self-sufficient.
+  `smoke_test` job installs the repaired wheel in a clean `python:*-slim-bookworm`
+  image (no system LLVM, no `LD_LIBRARY_PATH`) and parses a header to prove the
+  bundled libclang is self-sufficient. Debian 12 rather than a manylinux image
+  because pip in the 2_34 image would refuse a manylinux_2_35 wheel, and pypa
+  publishes no 2_35 image for these arches.
 * The LLVM license ships in the wheel as `LICENSE-LLVM.txt`. It is **not** tracked
   in git: `tools/ci/fetch-libclang.sh` downloads `clang/LICENSE.TXT` from the
   matching LLVM source tag (`llvmorg-<LLVM_VERSION>`) into the libclang prefix, and
