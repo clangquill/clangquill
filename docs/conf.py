@@ -160,7 +160,14 @@ def _write_compile_commands():
 
     flags = [f"-std={clangquill_std}"]
     flags += [f"-I{(this_dir / d).resolve()}" for d in clangquill_include_dirs]
-    flags += clangquill_compile_args
+    # clangquill_compile_args is deliberately absent: a compile database
+    # overrides std/include_dirs/defines, so those have to be spelled out here,
+    # but clangquill appends compile_args (and clang_resource_dir) to every
+    # command it builds, this one included. Re-injecting them would hide a
+    # regression -- the `-I<llvm includedir>` above them is what lets these
+    # headers resolve <clang-c/Index.h>, so if it stopped reaching a
+    # database-matched command the `-W` docs build would go red, which is the
+    # point.
     flags.append("-xc++")  # the inputs are headers, not .cpp files
 
     entries = []

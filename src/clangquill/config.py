@@ -123,7 +123,8 @@ class Config:
     input: list[str] = field(default_factory=list)
     #: Directory holding a ``compile_commands.json`` (overrides std/include/define).
     compile_commands: str | None = None
-    #: Extra compiler arguments appended verbatim when no compile DB is used.
+    #: Extra compiler arguments appended verbatim to every command, whether it
+    #: came from the compile DB or from ``std``/``include_dirs``/``defines``.
     compile_args: list[str] = field(default_factory=list)
     #: ``-I`` include directories.
     include_dirs: list[str] = field(default_factory=list)
@@ -131,7 +132,11 @@ class Config:
     std: str = "c++20"
     #: ``-D`` preprocessor definitions (``NAME`` or ``NAME=value``).
     defines: list[str] = field(default_factory=list)
-    #: Clang resource directory (``-resource-dir``); ``None`` lets clang decide.
+    #: Clang resource directory (``-resource-dir``), appended to every command
+    #: like :attr:`compile_args` and winning over any the compile DB carries.
+    #: ``None`` lets clang decide -- which works only when the libclang doing
+    #: the parse sits next to its own builtin headers, so a bundled libclang
+    #: (the wheels ship one) generally needs this set.
     clang_resource_dir: str | None = None
     #: Translation units are parsed concurrently across this many threads. ``0``
     #: (the default) auto-detects the CPU count; ``1`` forces a serial parse.

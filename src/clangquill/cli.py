@@ -112,11 +112,19 @@ def build(  # noqa: PLR0913
     ] = None,
     compile_arg: Annotated[
         list[str] | None,
-        typer.Option("--compile-arg", help="Extra compiler argument (repeatable)."),
+        typer.Option(
+            "--compile-arg",
+            help="Extra compiler argument (repeatable). Applied to every command, "
+            "including the ones --compile-commands supplies.",
+        ),
     ] = None,
     clang_resource_dir: Annotated[
         Path | None,
-        typer.Option("--clang-resource-dir", help="Clang resource directory (-resource-dir)."),
+        typer.Option(
+            "--clang-resource-dir",
+            help="Clang resource directory (-resource-dir). Applied to every command, "
+            "including the ones --compile-commands supplies.",
+        ),
     ] = None,
     template_dir: Annotated[
         list[Path] | None,

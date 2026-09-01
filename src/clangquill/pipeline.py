@@ -334,7 +334,16 @@ def _parse_options(
     opt.defines = list(config.defines)
     extra = list(config.compile_args)
     if config.clang_resource_dir:
-        extra.append(f"-resource-dir={Path(config.clang_resource_dir).expanduser()}")
+        # Resolved against the base directory, like ``include_dirs`` above. The
+        # core appends these to a compile-database command too, and such a
+        # command is replayed under the entry's own ``-working-directory`` -- so
+        # a relative path left relative would mean one directory for a
+        # database-matched file and another for a fallback one.
+        resource_dir = (base_dir / Path(config.clang_resource_dir).expanduser()).resolve()
+        extra.append(f"-resource-dir={resource_dir}")
+    # Applied to every command the core builds, the compile database's included:
+    # they describe the toolchain doing the parse, not the project, so unlike
+    # std/include_dirs/defines the database does not get to override them.
     opt.extra_args = extra
     opt.jobs = config.jobs
     opt.tu_batch = config.tu_batch

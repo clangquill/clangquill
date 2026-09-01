@@ -17,11 +17,11 @@ The field-name-to-front-end mapping is mechanical:
 |-------|--------------|---------|-------------|
 | `input` | `clangquill_input` | `[]` | Header/source paths (or globs) to parse, relative to the base directory (the Sphinx srcdir or CWD). |
 | `compile_commands` | `clangquill_compile_commands` | `None` | Directory holding a `compile_commands.json` (the file itself is accepted too). **Required by the Sphinx extension**; optional for the CLI and the Python API. When set it supplies the compiler flags and **overrides** `std`/`include_dirs`/`defines`. Headers usually have no entry of their own; if `foo.hpp` isn't listed, clangquill falls back to the same-directory `foo.cpp`'s entry before giving up and using `std`/`include_dirs`/`defines`. See [compile databases](#compile-databases). |
-| `compile_args` | `clangquill_compile_args` | `[]` | Extra compiler arguments appended verbatim when no compile database is used. |
+| `compile_args` | `clangquill_compile_args` | `[]` | Extra compiler arguments appended verbatim to every command — both the ones a compile database supplies and the `std`/`include_dirs`/`defines` fallback. Appended last, so they win over what the database entry says. See [how an entry's command line is replayed](#how-an-entrys-command-line-is-replayed). |
 | `include_dirs` | `clangquill_include_dirs` | `[]` | `-I` include directories. |
 | `std` | `clangquill_std` | `"c++20"` | C++ standard, passed verbatim as `-std=<std>` (see note). |
 | `defines` | `clangquill_defines` | `[]` | `-D` preprocessor definitions (`NAME` or `NAME=value`). |
-| `clang_resource_dir` | `clangquill_clang_resource_dir` | `None` | Clang resource directory (`-resource-dir`); `None` lets clang decide. |
+| `clang_resource_dir` | `clangquill_clang_resource_dir` | `None` | Clang resource directory (`-resource-dir`) — where clang finds its own builtin headers (`stddef.h`, `stdarg.h`, …). `None` lets clang decide, which only works when the libclang doing the parse sits next to its resource directory; the bundled libclang in the wheels does not, so set this if a parse fails with `'stddef.h' file not found`. Applied like `compile_args`: to every command, winning over any `-resource-dir` a database entry carries. See [builtin headers and the resource directory](#builtin-headers-and-the-resource-directory). |
 | `jobs` | `clangquill_jobs` | `0` | Number of threads used to parse translation units concurrently. `0` auto-detects the CPU count; `1` forces a serial parse. Has no effect on the generated output. |
 | `tu_batch` | `clangquill_tu_batch` | `0` | Number of input files grouped into one libclang translation unit. Grouping amortises the dominant parse cost — re-parsing the shared `#include` closure — across the batch, which makes cold builds several times faster. `0` picks a sensible batch size; `1` parses every input as its own fully isolated translation unit. With `compile_commands` set this is an upper bound rather than the batch size: a translation unit can only be given one compiler command, so inputs are grouped by the command the database answers with first — see [batching under a compile database](#batching-under-a-compile-database). For self-contained headers the extracted IR is identical either way. Headers that are *not* self-contained (e.g. designed to be included only through an umbrella header) see the preprocessor state of the other files in their batch, which usually parses them *more* faithfully; which files those are is fixed by the input set — never by the order you list them in — but it does depend on this value, so set `1` if you need exact per-file isolation. |
 | `extract_anonymous_namespaces` | `clangquill_extract_anonymous_namespaces` | `False` | Extract what anonymous namespaces (`namespace { ... }`) contain. Off by default, matching Doxygen's `EXTRACT_ANON_NSPACES = NO`: an anonymous namespace has internal linkage, so its contents are one translation unit's implementation detail rather than API anyone else can name, include or link against. Turn it on to document a project's internals — they are then qualified by `@anonymous` (`demo::@anonymous::helper`), the Sphinx C++ domain's spelling for an anonymous entity, so they are never mistaken for members of the enclosing namespace and the emitted declaration still parses. |
@@ -328,7 +328,7 @@ Two consequences worth knowing:
 
 ### How an entry's command line is replayed
 
-An entry's arguments are handed to libclang almost verbatim. Five adjustments
+An entry's arguments are handed to libclang almost verbatim. Six adjustments
 are made. Three exist because libclang appends arguments of its own — the
 source file and `-fsyntax-only` — after whatever it is given:
 
@@ -383,6 +383,67 @@ And the fifth is about what a parse may do to your disk:
   race to write it — and a relative path resolves against the *process*
   directory (the Sphinx srcdir), not the entry's `directory`, so the files land
   next to your sources.
+
+The sixth is about the toolchain the parse actually runs in rather than the one
+the build recorded:
+
+- **`compile_args` and `clang_resource_dir` are appended**, exactly as they are
+  on the fallback path. Unlike `std`, `include_dirs` and `defines` — which
+  describe the project, and which the database therefore overrides — these
+  describe the compiler doing the parsing, which is never the compiler the
+  entry was recorded for. They go on after everything the entry supplied, so
+  they win over it — clang takes the last of a repeated option. An `-x` among
+  them is the exception: it is ignored here exactly as it is on the fallback
+  path, because `compile_args` is one global list and a `-x c++` in it would
+  take every documented header out of header mode at once (see the language
+  bullet above). Being identical for every input, they never affect
+  [batching](#batching-under-a-compile-database).
+
+(builtin-headers-and-the-resource-directory)=
+
+### Builtin headers and the resource directory
+
+Clang's *resource directory* holds the headers the compiler owns rather than
+the platform: `stddef.h`, `stdarg.h`, `stdint.h`, the intrinsics headers. It is
+not on any `-I` path. A real `clang++` finds it by looking next to its own
+executable, which is why a `compile_commands.json` produced by a real build
+essentially never contains `-resource-dir`: the compiler was never told, it
+worked it out.
+
+clangquill never execs that compiler. It replays the entry's arguments into
+libclang, which does no such lookup — so a bundled libclang, shipped without a
+resource directory of its own, has nowhere to find those headers. The failure
+is not subtle: the first standard header that reaches `#include <stddef.h>`
+takes the whole translation unit down.
+
+```text
+/usr/include/stdlib.h:32:10: error: 'stddef.h' file not found
+/usr/include/stdlib.h:102:8: error: unknown type name 'size_t'
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+```
+
+Point `clang_resource_dir` at the resource directory of a clang whose major
+version matches the libclang doing the parse, and it is appended to every
+command — database-matched or not:
+
+```python
+import subprocess
+
+# In conf.py. `-print-resource-dir` is the supported way to ask a clang where
+# its builtin headers live; the answer looks like /usr/lib/llvm-N/lib/clang/N.
+clangquill_clang_resource_dir = subprocess.run(
+    ["clang++", "-print-resource-dir"],
+    capture_output=True,
+    text=True,
+    check=True,
+).stdout.strip()
+```
+
+Ask a clang whose **major version matches the libclang doing the parse** — for
+the bundled one that is {{ libclang_major }}, so `clang++-{{ libclang_major }}`
+rather than whatever `clang++` happens to be first on `PATH`. A resource
+directory from a different major is worse than none: its builtin headers assume
+compiler internals the parsing libclang may not have.
 
 ## Toctree / root
 

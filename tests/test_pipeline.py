@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1769,6 +1770,131 @@ def test_header_only_project_builds_from_a_tests_only_database(tmp_path: Path) -
     # Nothing was written next to the sources or into the build.
     assert not list(tmp_path.glob("*.d"))
     assert not list(tmp_path.glob("*.o"))
+
+
+@requires_libclang
+def test_compile_args_reach_a_command_the_database_supplied(tmp_path: Path) -> None:
+    """``compile_args`` applies to database-matched files, not just the fallback.
+
+    The database supplies the project's flags; ``compile_args`` describes the
+    toolchain replaying them, which is never the compiler the entry was recorded
+    for. ``clang_resource_dir`` is the reason it has to reach here: a real
+    compile_commands.json never carries ``-resource-dir`` -- the compiler works
+    it out from its own install location -- so a bundled libclang parsing a
+    database-matched header could not find ``stddef.h`` and failed outright.
+    """
+    # The entry below defines nothing: only compile_args can make this visible.
+    (tmp_path / "demo.hpp").write_text(
+        "#pragma once\n#ifdef FROM_COMPILE_ARGS\n" + FIXTURE + "#endif\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "compile_commands.json").write_text(
+        json.dumps(
+            [
+                {
+                    "directory": str(tmp_path),
+                    "file": str(tmp_path / "demo.hpp"),
+                    "arguments": ["c++", "-std=c++20", "-c", str(tmp_path / "demo.hpp")],
+                },
+            ],
+        ),
+        encoding="utf-8",
+    )
+
+    config = Config(
+        input=["demo.hpp"],
+        output_dir="api",
+        compile_commands=".",
+        compile_args=["-DFROM_COMPILE_ARGS=1"],
+    )
+    result = build(config, base_dir=tmp_path)
+
+    assert result.symbol_count > 0
+    assert result.diagnostics == []
+
+
+@requires_libclang
+def test_clang_resource_dir_reaches_a_database_matched_command(tmp_path: Path) -> None:
+    """The knob issue #348 is about, observed on the path that ignored it.
+
+    A resource directory is where clang keeps the headers it owns rather than
+    the platform's, and it is searched as a system include directory -- so a
+    header that resolves only from inside one is proof the flag reached
+    libclang's argv. Probed with a header of our own rather than ``stddef.h``,
+    so the test does not depend on what this machine's real builtin tree holds.
+    """
+    (tmp_path / "res" / "include").mkdir(parents=True)
+    (tmp_path / "res" / "include" / "quill_probe.h").write_text(
+        "#pragma once\nnamespace demo { inline int probe() { return 1; } }\n",
+        encoding="utf-8",
+    )
+    # Nothing standard is included, so pointing -resource-dir at a tree with no
+    # real builtin headers costs this parse nothing.
+    (tmp_path / "demo.hpp").write_text(
+        "#pragma once\n#include <quill_probe.h>\n" + FIXTURE,
+        encoding="utf-8",
+    )
+    (tmp_path / "compile_commands.json").write_text(
+        json.dumps(
+            [
+                {
+                    "directory": str(tmp_path),
+                    "file": str(tmp_path / "demo.hpp"),
+                    "arguments": ["c++", "-std=c++20", "-c", str(tmp_path / "demo.hpp")],
+                },
+            ],
+        ),
+        encoding="utf-8",
+    )
+    config = Config(input=["demo.hpp"], output_dir="api", compile_commands=".")
+
+    without = build(replace(config, output_dir="without"), base_dir=tmp_path)
+    with_dir = build(
+        replace(config, clang_resource_dir=str(tmp_path / "res")),
+        base_dir=tmp_path,
+    )
+
+    # The control is what makes the assertion below non-vacuous: the include is
+    # unresolvable until -resource-dir points somewhere that has it.
+    assert any("quill_probe.h" in d for d in without.diagnostics)
+    assert with_dir.diagnostics == []
+    assert with_dir.symbol_count > 0
+
+
+def test_parse_options_carry_extra_args_under_a_compile_database(tmp_path: Path) -> None:
+    """Both knobs land in ``extra_args`` whether or not a database is configured.
+
+    ``extra_args`` is the one channel the core applies on both paths, so the
+    resource directory has to be in it in either case -- and be spelled the way
+    clang expects, since a `-resource-dir` that silently does nothing looks
+    exactly like the bug it is meant to fix.
+    """
+    (tmp_path / "compile_commands.json").write_text(
+        json.dumps([{"directory": str(tmp_path), "file": "a.cpp", "arguments": ["c++", "-c", "a.cpp"]}]),
+        encoding="utf-8",
+    )
+    resource_dir = tmp_path / "res"
+    resource_dir.mkdir()
+    config = Config(
+        compile_args=["-DA=1"],
+        clang_resource_dir=str(resource_dir),
+        compile_commands=".",
+    )
+
+    with_db = pipeline._parse_options(config, tmp_path)  # noqa: SLF001
+    without_db = pipeline._parse_options(replace(config, compile_commands=None), tmp_path)  # noqa: SLF001
+
+    expected = ["-DA=1", f"-resource-dir={resource_dir.resolve()}"]
+    assert list(with_db.extra_args) == expected
+    assert list(without_db.extra_args) == expected
+    assert with_db.compile_commands_dir == str(tmp_path)
+
+    # Relative spellings resolve against the base directory, like include_dirs.
+    # A command the database supplied is replayed under the entry's own
+    # -working-directory, so leaving it relative would point it somewhere else
+    # than on the fallback path.
+    relative = pipeline._parse_options(replace(config, clang_resource_dir="res"), tmp_path)  # noqa: SLF001
+    assert list(relative.extra_args) == expected
 
 
 @requires_libclang

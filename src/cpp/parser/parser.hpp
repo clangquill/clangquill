@@ -22,7 +22,13 @@ struct ParseOptions {
   std::string std_flag = "c++20";  ///< C++ standard, passed as `-std=<flag>`.
   std::vector<std::string> include_dirs;  ///< `-I` include directories.
   std::vector<std::string> defines;       ///< `-D` preprocessor definitions.
-  std::vector<std::string> extra_args;    ///< Extra compiler arguments appended verbatim.
+  /// Extra compiler arguments appended verbatim to every command -- a
+  /// compilation database entry's as much as the `-std`/`-I`/`-D` fallback's.
+  /// They describe the toolchain doing the parse rather than the project, so
+  /// unlike `std_flag`/`include_dirs`/`defines` the database does not override
+  /// them; `-resource-dir` is the flag that forces this, since a recorded
+  /// build command never carries one.
+  std::vector<std::string> extra_args;
   std::optional<std::string> compile_commands_dir;  ///< Directory holding a compile_commands.json.
   bool keep_going = true;  ///< Continue past recoverable parse errors.
   /// Capture every libclang diagnostic — warnings, remarks and each
@@ -114,9 +120,10 @@ class Parser {
 
  private:
   // Compiler arguments for @p path: the compilation database entry when there
-  // is one, else the configured -std/-I/-D fallback. Sets `*from_compile_db`
-  // (when given) to which of the two it was, so a failure can name the source
-  // of the flags it is blaming. @p main_file, when given, is the file libclang
+  // is one, else the configured -std/-I/-D fallback, with `extra_args` appended
+  // after either. Sets `*from_compile_db` (when given) to which of the two the
+  // command came from, so a failure can name the source of the flags it is
+  // blaming. @p main_file, when given, is the file libclang
   // will actually be handed -- the synthetic umbrella for a batch -- and
   // decides the appended `-x` language; it defaults to @p path.
   std::vector<std::string> build_args(const std::string& path,
