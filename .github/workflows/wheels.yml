@@ -103,9 +103,12 @@ jobs:
           # pytest alone could go green on a wheel that bundles nothing.
           # Debian 12 (glibc 2.36) clears the wheel's 2.35 floor and ships no
           # system LLVM, so this also proves the bundled libclang stands alone.
+          # The slim image also ships no git, which the benchmark-harness tests
+          # shell out to; the manylinux image had it, so it is installed here.
         run: >-
           docker run --rm -v "$PWD:/work" -w /work python:3.13-slim-bookworm
           bash -ec '
+          apt-get -qq update && apt-get -qq install -y --no-install-recommends git;
           python -m pip install wheelhouse/*.whl pytest pytest-cov
           pytest-datadir pytest-regressions sphinx myst-parser;
           python -c "from clangquill import _core;
