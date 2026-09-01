@@ -393,10 +393,12 @@ the build recorded:
   describe the compiler doing the parsing, which is never the compiler the
   entry was recorded for. They go on after everything the entry supplied, so
   they win over it — clang takes the last of a repeated option. An `-x` among
-  them is the exception: it is ignored here exactly as it is on the fallback
-  path, because `compile_args` is one global list and a `-x c++` in it would
-  take every documented header out of header mode at once (see the language
-  bullet above). Being identical for every input, they never affect
+  them is the exception: it is dropped, on this path and the fallback alike.
+  The language is a per-file decision — the entry's when it made one, the
+  input's extension otherwise — while `compile_args` is one global list, so a
+  `-x c++` in it would take every documented header out of header mode at once
+  (see the language bullet above). Being identical for every input, these
+  arguments never affect
   [batching](#batching-under-a-compile-database).
 
 (builtin-headers-and-the-resource-directory)=

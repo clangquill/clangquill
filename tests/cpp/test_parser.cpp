@@ -9,6 +9,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "hash/content_hash.hpp"
@@ -1388,8 +1389,12 @@ TEST_CASE("a -x among the extra arguments does not decide the language",
   namespace fs = std::filesystem;
   const fs::path dir = unique_temp_dir("clangquill-extra-args-language");
   fs::remove_all(dir);
-  fs::create_directories(dir);
+  fs::create_directories(dir / "stated");
   std::ofstream(dir / "widget.hpp")
+      << "#pragma once\nnamespace demo { inline int widget_value() { return 15; } }\n";
+  // The second database's entry names its own copy; libclang interpolates the
+  // command for the file actually asked about either way.
+  std::ofstream(dir / "stated" / "widget.hpp")
       << "#pragma once\nnamespace demo { inline int widget_value() { return 15; } }\n";
 
   {
@@ -1400,16 +1405,36 @@ TEST_CASE("a -x among the extra arguments does not decide the language",
           "\"-std=c++20\", \"-c\", \"widget.hpp\"]}]";
   }
 
+  {
+    // An entry that *does* state the language, in the separated spelling CMake
+    // writes for header sets. Obeying it means appending no language of our
+    // own -- so an `-x` left in the extra arguments would be the last in the
+    // command and would win, which is why they are dropped rather than
+    // overridden.
+    std::ofstream cc(dir / "stated" / "compile_commands.json");
+    cc << "[{\"directory\": \"" << (dir / "stated").generic_string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-x\", \"c++-header\", \"-c\", \"widget.hpp\"]}]";
+  }
+
   parser::ParseOptions base;
   base.extra_args = {"-xc++"};
   base.capture_all_diagnostics = true;
-  parser::ParseOptions with_db = base;
-  with_db.compile_commands_dir = dir.string();
+  parser::ParseOptions inferred_language = base;
+  inferred_language.compile_commands_dir = dir.string();
+  parser::ParseOptions stated_language = base;
+  stated_language.compile_commands_dir = (dir / "stated").string();
 
-  // Both paths, because agreeing is the point.
-  for (const auto& opts : {with_db, base}) {
+  // All three paths, because agreeing is the point. Each database is asked
+  // about the file sitting beside it, so the entry it answers with is that
+  // file's own.
+  const std::vector<std::pair<parser::ParseOptions, fs::path>> cases{
+      {inferred_language, dir / "widget.hpp"},
+      {stated_language, dir / "stated" / "widget.hpp"},
+      {base, dir / "widget.hpp"}};
+  for (const auto& [opts, input] : cases) {
     model::ParsedModule mod;
-    REQUIRE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+    REQUIRE(parser::Parser(opts).parse_file(input.string(), mod));
     CHECK(find(mod, "demo::widget_value") != nullptr);
     for (const auto& d : mod.diagnostics) {
       CHECK(d.text.find("pragma-once-outside-header") == std::string::npos);

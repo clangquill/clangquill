@@ -125,6 +125,7 @@ class Config:
     compile_commands: str | None = None
     #: Extra compiler arguments appended verbatim to every command, whether it
     #: came from the compile DB or from ``std``/``include_dirs``/``defines``.
+    #: A ``-x`` here is dropped: the language stays a per-file decision.
     compile_args: list[str] = field(default_factory=list)
     #: ``-I`` include directories.
     include_dirs: list[str] = field(default_factory=list)

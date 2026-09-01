@@ -27,7 +27,8 @@ struct ParseOptions {
   /// They describe the toolchain doing the parse rather than the project, so
   /// unlike `std_flag`/`include_dirs`/`defines` the database does not override
   /// them; `-resource-dir` is the flag that forces this, since a recorded
-  /// build command never carries one.
+  /// build command never carries one. A `-x` here is the one exception: the
+  /// language stays a per-file decision, so append_extra_args drops it.
   std::vector<std::string> extra_args;
   std::optional<std::string> compile_commands_dir;  ///< Directory holding a compile_commands.json.
   bool keep_going = true;  ///< Continue past recoverable parse errors.
@@ -129,6 +130,12 @@ class Parser {
   std::vector<std::string> build_args(const std::string& path,
                                       bool* from_compile_db = nullptr,
                                       const std::string* main_file = nullptr) const;
+
+  // Appends `extra_args` to @p args, dropping any `-x`: the language is a
+  // per-file decision and the extra arguments are one global list, so an `-x`
+  // in them must not decide it for every input at once. Shared by both
+  // argument paths so they agree on that.
+  void append_extra_args(std::vector<std::string>& args) const;
 
   // The -std/-I/-D fallback arguments for @p path, independent of any database
   // entry. Only the trailing `-x` depends on the path: a header is parsed as

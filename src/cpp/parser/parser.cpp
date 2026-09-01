@@ -281,12 +281,37 @@ Parser::~Parser() {
   if (index_) clang_disposeIndex(as_index(index_));
 }
 
+void Parser::append_extra_args(std::vector<std::string>& args) const {
+  for (std::size_t i = 0; i < options_.extra_args.size(); ++i) {
+    const std::string& a = options_.extra_args[i];
+    // `-x` is dropped, in either spelling. The language is a per-file decision
+    // -- the database entry's when it made one, this input's extension
+    // otherwise -- while the extra arguments are one global list applied to
+    // every input, the synthetic umbrella .cpp a batch is parsed as included.
+    // Honouring an `-x c++` there would take every documented header out of
+    // header mode at once and turn each one's `#pragma once` into
+    // -Wpragma-once-outside-header, an error under the `-Werror` a database
+    // entry replays.
+    //
+    // Dropped rather than left to be overridden, because on the database path
+    // there is nothing to override it with: an entry that states the language
+    // is obeyed by *not* appending one, so a surviving `-x` would be the last
+    // in the command and would win.
+    if (a == "-x") {
+      ++i;  // The language is the next token; drop it with the flag.
+      continue;
+    }
+    if (a.rfind("-x", 0) == 0) continue;  // Joined spelling, e.g. `-xc++`.
+    args.push_back(a);
+  }
+}
+
 std::vector<std::string> Parser::default_args(const std::string& path) const {
   std::vector<std::string> args;
   args.push_back("-std=" + options_.std_flag);
   for (const auto& inc : options_.include_dirs) args.push_back("-I" + inc);
   for (const auto& def : options_.defines) args.push_back("-D" + def);
-  for (const auto& extra : options_.extra_args) args.push_back(extra);
+  append_extra_args(args);
   // Parse headers as C++ even without a .cpp extension, and as headers rather
   // than main files -- see language_flag_for.
   args.push_back(language_flag_for(path));
@@ -347,8 +372,6 @@ std::vector<std::string> Parser::build_args(const std::string& path,
 
   if (from_compile_db != nullptr) *from_compile_db = true;
 
-  // Computed before the extra arguments are appended, so only the entry's own
-  // `-x` counts -- see the language note below.
   const bool entry_sets_language =
       std::any_of(args.begin(), args.end(), [](const std::string& a) {
         return a == "-x" || a.rfind("-x", 0) == 0;
@@ -376,21 +399,20 @@ std::vector<std::string> Parser::build_args(const std::string& path,
   // Identical for every input, so this cannot change how compile_flag_keys
   // groups inputs into umbrella translation units: that key is the database's
   // answer alone, and every command gains the same tail.
-  for (const auto& extra : options_.extra_args) args.push_back(extra);
+  //
+  // Minus any `-x`, which append_extra_args drops: the language stays a
+  // per-file decision, and an entry that stated it is obeyed by appending none
+  // below -- so a surviving `-x` would be the last in the command and would
+  // silently win over the entry's.
+  append_extra_args(args);
 
   // Supply the language -- but only when the entry has not already said what
   // the file is. `-x` applies to the inputs that follow it and libclang appends
   // the source last, so appending our own would win over the entry's, and an
   // entry that states the language knows better than we do. That matters for
-  // the `-x c++-header` commands CMake generates for header sets.
-  //
-  // A `-x` among the extra arguments does not count, matching default_args,
-  // which orders them the same way. It is one global list applied to every input
-  // -- including the synthetic umbrella .cpp a batch is parsed as -- so a
-  // `-x c++` there would take every documented header out of header mode at
-  // once, and each header's own `#pragma once` would come back as
-  // -Wpragma-once-outside-header, an error under the `-Werror` the entry
-  // replays. Only the entry's `-x` is per-file knowledge.
+  // the `-x c++-header` commands CMake generates for header sets. The scan
+  // above cannot see an extra argument's `-x`, and neither can the command:
+  // append_extra_args drops those.
   if (!entry_sets_language) args.push_back(language_flag_for(language_of));
   return args;
 }
