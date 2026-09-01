@@ -61,7 +61,7 @@ jobs:
         with:
           # The client ID is not secret; the private key is stored as a repo
           # secret. (client-id supersedes the now-deprecated app-id input.)
-          client-id: Iv23lit0Lli91kLFjRED
+          client-id: Iv23liYS0eRImqddBqlX
           private-key: ${{ secrets.BENCHMARK_APP_PRIVATE_KEY }}
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
