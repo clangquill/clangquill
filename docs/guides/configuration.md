@@ -17,7 +17,7 @@ The field-name-to-front-end mapping is mechanical:
 |-------|--------------|---------|-------------|
 | `input` | `clangquill_input` | `[]` | Header/source paths (or globs) to parse, relative to the base directory (the Sphinx srcdir or CWD). |
 | `compile_commands` | `clangquill_compile_commands` | `None` | Directory holding a `compile_commands.json` (the file itself is accepted too). **Required by the Sphinx extension**; optional for the CLI and the Python API. When set it supplies the compiler flags and **overrides** `std`/`include_dirs`/`defines`. Headers usually have no entry of their own; if `foo.hpp` isn't listed, clangquill falls back to the same-directory `foo.cpp`'s entry before giving up and using `std`/`include_dirs`/`defines`. See [compile databases](#compile-databases). |
-| `compile_args` | `clangquill_compile_args` | `[]` | Extra compiler arguments appended verbatim to every command — both the ones a compile database supplies and the `std`/`include_dirs`/`defines` fallback. Appended last, so they win over what the database entry says. See [how an entry's command line is replayed](#how-an-entrys-command-line-is-replayed). |
+| `compile_args` | `clangquill_compile_args` | `[]` | Extra compiler arguments appended to every command — both the ones a compile database supplies and the `std`/`include_dirs`/`defines` fallback. Appended last, so they win over what the database entry says. One exception: a `-x` here is dropped, because the language is decided per file rather than per run. See [how an entry's command line is replayed](#how-an-entrys-command-line-is-replayed). |
 | `include_dirs` | `clangquill_include_dirs` | `[]` | `-I` include directories. |
 | `std` | `clangquill_std` | `"c++20"` | C++ standard, passed verbatim as `-std=<std>` (see note). |
 | `defines` | `clangquill_defines` | `[]` | `-D` preprocessor definitions (`NAME` or `NAME=value`). |
@@ -431,21 +431,24 @@ command — database-matched or not:
 ```python
 import subprocess
 
-# In conf.py. `-print-resource-dir` is the supported way to ask a clang where
-# its builtin headers live; the answer looks like /usr/lib/llvm-N/lib/clang/N.
+# In conf.py. Name the clang explicitly by major version -- an unqualified
+# `clang++` is whatever happens to be first on PATH, which may be a different
+# major than the libclang doing the parse (see the note below for which).
+# `-print-resource-dir` is the supported way to ask; the answer looks like
+# /usr/lib/llvm-N/lib/clang/N.
 clangquill_clang_resource_dir = subprocess.run(
-    ["clang++", "-print-resource-dir"],
+    ["clang++-22", "-print-resource-dir"],
     capture_output=True,
     text=True,
     check=True,
 ).stdout.strip()
 ```
 
-Ask a clang whose **major version matches the libclang doing the parse** — for
-the bundled one that is {{ libclang_major }}, so `clang++-{{ libclang_major }}`
-rather than whatever `clang++` happens to be first on `PATH`. A resource
-directory from a different major is worse than none: its builtin headers assume
-compiler internals the parsing libclang may not have.
+Substitute the **major version that matches the libclang doing the parse** for
+the `22` above — for the bundled libclang that is {{ libclang_major }}, so
+`clang++-{{ libclang_major }}`. A resource directory from a different major is
+worse than none: its builtin headers assume compiler internals the parsing
+libclang may not have.
 
 ## Toctree / root
 
