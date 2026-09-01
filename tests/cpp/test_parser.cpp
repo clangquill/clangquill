@@ -9,6 +9,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "hash/content_hash.hpp"
@@ -1265,6 +1266,217 @@ TEST_CASE("an entry's own -x survives, and is supplied when it has none",
   for (const auto& d : mod.diagnostics) {
     CHECK(d.severity < model::kSeverityError);
   }
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("extra arguments reach a command the database supplied",
+          "[parser]") {
+  // The flags a build recorded describe the project; the extra arguments
+  // describe the toolchain doing the parsing, which is never the compiler the
+  // entry was recorded for. `-resource-dir` is why this matters: a real
+  // compile_commands.json never carries one, because a real compiler derives it
+  // from its own install location when the OS execs it -- and nothing is exec'd
+  // here. A database-matched header that could not see the builtin headers
+  // failed to parse at all, with no configuration that could fix it.
+  //
+  // Observed with a define rather than a resource directory, so the case does
+  // not depend on where this machine keeps its builtin headers.
+  namespace fs = std::filesystem;
+  const fs::path dir = unique_temp_dir("clangquill-cc-extra-args");
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.hpp")
+      << "#pragma once\nnamespace demo {\n#ifdef FROM_EXTRA_ARGS\n"
+         "inline int extra_value() { return 11; }\n#endif\n}\n";
+
+  {
+    // The entry does not define it: only the extra arguments can.
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.generic_string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-c\", \"widget.hpp\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  opts.extra_args = {"-DFROM_EXTRA_ARGS=1"};
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+  CHECK(find(mod, "demo::extra_value") != nullptr);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("an extra argument wins over the database entry's own", "[parser]") {
+  // Appended after the entry, so clang -- which takes the last of a repeated
+  // option -- resolves the conflict in the configuration's favour. Deliberate
+  // for the case this exists for: an entry's `-resource-dir` points at the
+  // build compiler's tree, which may be a different LLVM major than the
+  // libclang replaying the command, so the value the user set is the more
+  // trustworthy one. The opposite of `-working-directory`, which is prepended
+  // so that the entry still wins.
+  namespace fs = std::filesystem;
+  const fs::path dir = unique_temp_dir("clangquill-cc-extra-wins");
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "widget.hpp")
+      << "#pragma once\nnamespace demo {\n#if WIDGET_PICK == 2\n"
+         "inline int picked_extra() { return 12; }\n#else\n"
+         "inline int picked_entry() { return 13; }\n#endif\n}\n";
+
+  {
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.generic_string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-DWIDGET_PICK=1\", \"-c\", \"widget.hpp\"]}]";
+  }
+
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  opts.extra_args = {"-DWIDGET_PICK=2"};
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+  CHECK(find(mod, "demo::picked_extra") != nullptr);
+  CHECK(find(mod, "demo::picked_entry") == nullptr);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("extra arguments do not displace the fallback flags", "[parser]") {
+  // The extra arguments are appended to a command the database supplied, which
+  // is decided by that command being non-empty. Appending them any earlier
+  // makes every command look non-empty, and the -std/-I/-D fallback -- which
+  // appends them itself -- is skipped for a file the database has nothing for.
+  // The symptom is quiet: an `-I` that never arrives means the declarations
+  // behind that include go missing rather than failing.
+  namespace fs = std::filesystem;
+  const fs::path dir = unique_temp_dir("clangquill-extra-args-fallback");
+  fs::remove_all(dir);
+  fs::create_directories(dir / "include");
+  std::ofstream(dir / "include" / "dep.hpp")
+      << "#pragma once\nnamespace demo { inline int dep_value() { return 14; } }\n";
+  std::ofstream(dir / "widget.hpp")
+      << "#pragma once\n#include <dep.hpp>\nnamespace demo {\n"
+         "#ifdef FROM_EXTRA_ARGS\n"
+         "inline int fallback_value() { return dep_value(); }\n#endif\n}\n";
+
+  parser::ParseOptions opts;
+  opts.include_dirs = {(dir / "include").string()};
+  opts.extra_args = {"-DFROM_EXTRA_ARGS=1"};
+  opts.capture_all_diagnostics = true;
+  model::ParsedModule mod;
+  REQUIRE(parser::Parser(opts).parse_file((dir / "widget.hpp").string(), mod));
+  // Both halves matter: the extra define reached the parse *and* the include
+  // directory it shares the command with did too.
+  CHECK(find(mod, "demo::fallback_value") != nullptr);
+  for (const auto& d : mod.diagnostics) {
+    CHECK(d.severity < model::kSeverityError);
+  }
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("a -x among the extra arguments does not decide the language",
+          "[parser]") {
+  // The extra arguments are one global list applied to every input, so a `-x`
+  // in them is not the per-file knowledge an entry's own `-x` is: honouring it
+  // would take every documented header out of header mode at once, and each
+  // header's `#pragma once` would come back as -Wpragma-once-outside-header --
+  // an error under a project's own -Werror, on a header that compiles cleanly.
+  // default_args already ignores it, so ignoring it here is also what keeps one
+  // configuration meaning one thing whether or not the database matched.
+  namespace fs = std::filesystem;
+  const fs::path dir = unique_temp_dir("clangquill-extra-args-language");
+  fs::remove_all(dir);
+  fs::create_directories(dir / "stated");
+  std::ofstream(dir / "widget.hpp")
+      << "#pragma once\nnamespace demo { inline int widget_value() { return 15; } }\n";
+  // The second database's entry names its own copy; libclang interpolates the
+  // command for the file actually asked about either way.
+  std::ofstream(dir / "stated" / "widget.hpp")
+      << "#pragma once\nnamespace demo { inline int widget_value() { return 15; } }\n";
+
+  {
+    // No -x of its own, so the language is clangquill's to supply.
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.generic_string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-c\", \"widget.hpp\"]}]";
+  }
+
+  {
+    // An entry that *does* state the language, in the separated spelling CMake
+    // writes for header sets. Obeying it means appending no language of our
+    // own -- so an `-x` left in the extra arguments would be the last in the
+    // command and would win, which is why they are dropped rather than
+    // overridden.
+    std::ofstream cc(dir / "stated" / "compile_commands.json");
+    cc << "[{\"directory\": \"" << (dir / "stated").generic_string()
+       << "\", \"file\": \"widget.hpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-x\", \"c++-header\", \"-c\", \"widget.hpp\"]}]";
+  }
+
+  parser::ParseOptions base;
+  base.extra_args = {"-xc++"};
+  base.capture_all_diagnostics = true;
+  parser::ParseOptions inferred_language = base;
+  inferred_language.compile_commands_dir = dir.string();
+  parser::ParseOptions stated_language = base;
+  stated_language.compile_commands_dir = (dir / "stated").string();
+
+  // All three paths, because agreeing is the point. Each database is asked
+  // about the file sitting beside it, so the entry it answers with is that
+  // file's own.
+  const std::vector<std::pair<parser::ParseOptions, fs::path>> cases{
+      {inferred_language, dir / "widget.hpp"},
+      {stated_language, dir / "stated" / "widget.hpp"},
+      {base, dir / "widget.hpp"}};
+  for (const auto& [opts, input] : cases) {
+    model::ParsedModule mod;
+    REQUIRE(parser::Parser(opts).parse_file(input.string(), mod));
+    CHECK(find(mod, "demo::widget_value") != nullptr);
+    for (const auto& d : mod.diagnostics) {
+      CHECK(d.text.find("pragma-once-outside-header") == std::string::npos);
+    }
+  }
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("extra arguments reach an umbrella batch's command", "[parser]") {
+  // A batch is parsed under one command, built for its first member, and that
+  // is the path every real Sphinx build takes. Nothing about batching may drop
+  // the extra arguments on the way -- if it did, the fix would hold only for
+  // tu_batch = 1.
+  namespace fs = std::filesystem;
+  const fs::path dir = unique_temp_dir("clangquill-cc-extra-args-batch");
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "a_widget.hpp")
+      << "#ifdef FROM_EXTRA_ARGS\ninline int batched_a() { return 16; }\n#endif\n";
+  std::ofstream(dir / "b_widget.hpp")
+      << "#ifdef FROM_EXTRA_ARGS\ninline int batched_b() { return 17; }\n#endif\n";
+  std::ofstream(dir / "target.cpp") << "int target();\n";
+
+  {
+    // One entry the two headers both borrow, so they share a command and land
+    // in one umbrella unit.
+    std::ofstream cc(dir / "compile_commands.json");
+    cc << "[{\"directory\": \"" << dir.generic_string()
+       << "\", \"file\": \"target.cpp\", \"arguments\": [\"c++\", "
+          "\"-std=c++20\", \"-c\", \"target.cpp\"]}]";
+  }
+
+  const std::vector<std::string> inputs{(dir / "a_widget.hpp").string(),
+                                        (dir / "b_widget.hpp").string()};
+  parser::ParseOptions opts;
+  opts.compile_commands_dir = dir.string();
+  opts.extra_args = {"-DFROM_EXTRA_ARGS=1"};
+
+  const auto batched = parser::parse_files(inputs, opts);
+  CHECK(find(batched, "batched_a") != nullptr);
+  CHECK(find(batched, "batched_b") != nullptr);
 
   fs::remove_all(dir);
 }

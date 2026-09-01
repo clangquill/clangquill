@@ -281,12 +281,37 @@ Parser::~Parser() {
   if (index_) clang_disposeIndex(as_index(index_));
 }
 
+void Parser::append_extra_args(std::vector<std::string>& args) const {
+  for (std::size_t i = 0; i < options_.extra_args.size(); ++i) {
+    const std::string& a = options_.extra_args[i];
+    // `-x` is dropped, in either spelling. The language is a per-file decision
+    // -- the database entry's when it made one, this input's extension
+    // otherwise -- while the extra arguments are one global list applied to
+    // every input, the synthetic umbrella .cpp a batch is parsed as included.
+    // Honouring an `-x c++` there would take every documented header out of
+    // header mode at once and turn each one's `#pragma once` into
+    // -Wpragma-once-outside-header, an error under the `-Werror` a database
+    // entry replays.
+    //
+    // Dropped rather than left to be overridden, because on the database path
+    // there is nothing to override it with: an entry that states the language
+    // is obeyed by *not* appending one, so a surviving `-x` would be the last
+    // in the command and would win.
+    if (a == "-x") {
+      ++i;  // The language is the next token; drop it with the flag.
+      continue;
+    }
+    if (a.rfind("-x", 0) == 0) continue;  // Joined spelling, e.g. `-xc++`.
+    args.push_back(a);
+  }
+}
+
 std::vector<std::string> Parser::default_args(const std::string& path) const {
   std::vector<std::string> args;
   args.push_back("-std=" + options_.std_flag);
   for (const auto& inc : options_.include_dirs) args.push_back("-I" + inc);
   for (const auto& def : options_.defines) args.push_back("-D" + def);
-  for (const auto& extra : options_.extra_args) args.push_back(extra);
+  append_extra_args(args);
   // Parse headers as C++ even without a .cpp extension, and as headers rather
   // than main files -- see language_flag_for.
   args.push_back(language_flag_for(path));
@@ -337,18 +362,57 @@ std::vector<std::string> Parser::build_args(const std::string& path,
     }
   }
 
+  // Checked before the extra arguments below are appended: an empty answer from
+  // the database is what says "no command for this file", and this file falls
+  // back to -std/-I/-D -- which default_args appends the extra arguments to
+  // itself. Appending them first would make `args` non-empty and silently skip
+  // that fallback, leaving the file with no standard, no include directories
+  // and no defines.
   if (args.empty()) return default_args(language_of);
 
   if (from_compile_db != nullptr) *from_compile_db = true;
-  // Supply the language -- but only when the entry has not already said what
-  // the file is. `-x` applies to the inputs that follow it and libclang appends
-  // the source last, so appending our own would win over the entry's, and an
-  // entry that states the language knows better than we do. That matters for
-  // the `-x c++-header` commands CMake generates for header sets.
+
   const bool entry_sets_language =
       std::any_of(args.begin(), args.end(), [](const std::string& a) {
         return a == "-x" || a.rfind("-x", 0) == 0;
       });
+
+  // The extra arguments apply wherever the rest of the command came from,
+  // because they describe the toolchain rather than the project. `-resource-dir`
+  // is the case that forces it: it names the builtin header tree (`stddef.h`,
+  // `stdarg.h`, ...) of *this* libclang, and a compile_commands.json essentially
+  // never carries one -- a build records the flags the compiler binary was
+  // given, and that binary works its resource directory out from its own install
+  // location when the OS execs it. Nothing is exec'd here; the stored argv is
+  // replayed into a libclang that may not even be the same LLVM major. So a
+  // database-matched header that reaches <stdlib.h> died on "'stddef.h' file not
+  // found" -- and it was the files the database *did* match, and only those,
+  // that had no way to be told otherwise.
+  //
+  // After everything the entry supplied, so a configured value beats one the
+  // entry happens to carry: clang takes the last `-resource-dir`, and the
+  // entry's names the build compiler's tree. Deliberately the opposite of the
+  // `-working-directory` rule in CompileDb::args_for, which is prepended so the
+  // entry wins -- a working directory is a property of the entry, a resource
+  // directory is a property of whoever is doing the parse.
+  //
+  // Identical for every input, so this cannot change how compile_flag_keys
+  // groups inputs into umbrella translation units: that key is the database's
+  // answer alone, and every command gains the same tail.
+  //
+  // Minus any `-x`, which append_extra_args drops: the language stays a
+  // per-file decision, and an entry that stated it is obeyed by appending none
+  // below -- so a surviving `-x` would be the last in the command and would
+  // silently win over the entry's.
+  append_extra_args(args);
+
+  // Supply the language -- but only when the entry has not already said what
+  // the file is. `-x` applies to the inputs that follow it and libclang appends
+  // the source last, so appending our own would win over the entry's, and an
+  // entry that states the language knows better than we do. That matters for
+  // the `-x c++-header` commands CMake generates for header sets. The scan
+  // above cannot see an extra argument's `-x`, and neither can the command:
+  // append_extra_args drops those.
   if (!entry_sets_language) args.push_back(language_flag_for(language_of));
   return args;
 }
@@ -999,6 +1063,11 @@ void merge_into(model::ParsedModule& out, model::ParsedModule& part,
 // Every key is empty when the database will not load: then every input falls
 // back to the same -std/-I/-D defaults, which is the no-database case, and
 // batching them together is exactly what that case already does.
+//
+// The configured extra arguments are not part of the key and do not need to be.
+// `Parser::build_args` appends the same list, in the same order, to every
+// command alike, so two commands agree in full exactly when they agree on this
+// key -- there is nothing to plumb `ParseOptions` in here for.
 std::vector<std::string> compile_flag_keys(const std::vector<std::string>& inputs,
                                            const std::string& dir) {
   std::vector<std::string> keys(inputs.size());
