@@ -1291,6 +1291,93 @@ TEST_CASE("SqliteStore replaces a symbol's comment fields, never adds to them",
   std::remove(path.c_str());
 }
 
+TEST_CASE("SqliteStore clears the projections of a comment that lost them",
+          "[store]") {
+  // The delete set comes from the raw comments a write records, not from the
+  // rows they project to. A comment edited down -- its `\ingroup` dropped, or
+  // emptied altogether -- projects to no comment_fields and no group_members
+  // row at all, so a set built from the projections would skip the one symbol
+  // whose stored rows are now wrong and leave the new raw text sitting next to
+  // them.
+  //
+  // The per-file delete in write_tus() does not cover this either: the symbol
+  // is anchored to nb.hpp, which this write does not replace. That is the
+  // ordinary case for a namespace, whose anchor is whichever file declared it
+  // first.
+  model::Symbol ns;
+  ns.usr = "c:@N@demo";
+  ns.kind = model::SymbolKind::Namespace;
+  ns.spelling = "demo";
+  ns.qualified_name = "demo";
+  ns.display_name = "demo";
+  ns.is_documented = true;
+  ns.location.file_path = "/tmp/nb.hpp";
+
+  model::ParsedModule first;
+  model::SourceFile fb;
+  fb.path = "/tmp/nb.hpp";
+  fb.sha256 = std::string(64, 'b');
+  first.files.push_back(fb);
+  first.symbols.push_back(ns);
+  first.groups.push_back(titled_group());
+
+  model::RawComment documented;
+  documented.symbol_usr = ns.usr;
+  documented.text = "/** \\brief Demo.\n *  \\ingroup geometry\n */";
+  first.comments.push_back(documented);
+
+  model::CommentField brief;
+  brief.symbol_usr = ns.usr;
+  brief.name = "brief";
+  brief.value = "Demo.";
+  first.comment_fields.push_back(brief);
+  first.group_members.push_back(membership(ns.usr));
+
+  std::string path = temp_db_path();
+  {
+    store::SqliteStore writer(path);
+    writer.write(first, store::Meta::current());
+  }
+
+  // na.hpp is re-parsed and its comment now carries neither: one raw comment
+  // row, no fields, no membership. Its symbol is anchored to na.hpp, the file
+  // it declares the namespace in -- so the delete-by-file above runs against
+  // na.hpp while the stored row still says nb.hpp, and misses it. That
+  // ordering is what leaves a namespace's rows behind in a real re-parse.
+  model::ParsedModule reparse;
+  model::SourceFile fa;
+  fa.path = "/tmp/na.hpp";
+  fa.sha256 = std::string(64, 'a');
+  reparse.files.push_back(fa);
+  model::Symbol reopened = ns;
+  reopened.location.file_path = "/tmp/na.hpp";
+  reparse.symbols.push_back(reopened);
+
+  model::RawComment bare;
+  bare.symbol_usr = ns.usr;
+  bare.text = "/** */";
+  reparse.comments.push_back(bare);
+
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(
+        writer.write_tus(reparse, store::Meta::current(), {"/tmp/na.hpp"}));
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  REQUIRE(got.comments.size() == 1);
+  CHECK(got.comments[0].text == "/** */");
+  CHECK(got.comment_fields.empty());
+  CHECK(got.group_members.empty());
+  // The group itself is untouched: only the member's own rows were cleared.
+  REQUIRE(got.groups.size() == 1);
+  CHECK(got.groups[0].title == "Geometry helpers");
+
+  std::remove(path.c_str());
+}
+
 TEST_CASE("SqliteStore leaves the comment fields of symbols a write omits",
           "[store]") {
   // The replace above is scoped to the USRs the write actually documents: an

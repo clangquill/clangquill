@@ -497,6 +497,44 @@ def test_a_shared_namespace_comment_is_recorded_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_dropping_ingroup_drops_the_membership(tmp_path: Path) -> None:
+    # A namespace is anchored to whichever file declared it first, so an
+    # incremental re-parse of the file that *documents* it does not replace its
+    # symbol row and the per-file delete never reaches its group memberships.
+    # Removing the `\ingroup` then has to clear the membership by itself --
+    # a re-parse contributes no membership row for it, so the write has to know
+    # to clear from the raw comment it recorded, not from the rows it projects.
+    a = tmp_path / "a.hpp"
+    b = tmp_path / "b.hpp"
+    b.write_text("#pragma once\nnamespace demo { int b(); }\n")
+
+    def write_a(*, grouped: bool) -> None:
+        a.write_text(
+            "#pragma once\n"
+            "/** \\defgroup grp Group title\n *  Description.\n */\n"
+            "/** \\brief The demo namespace.\n"
+            + (" *  \\ingroup grp\n" if grouped else "")
+            + " */\nnamespace demo { int a(); }\n",
+        )
+
+    opts = _core.ParseOptions()
+    opts.tu_batch = 1
+    db = tmp_path / "out.sqlite"
+    write_a(grouped=True)
+    _core.parse_to_sqlite([str(a), str(b)], str(db), opts)
+
+    def memberships() -> list[tuple[str, str]]:
+        with sqlite3.connect(db) as con:
+            return [(g, m) for g, m in con.execute("SELECT group_id, member_usr FROM group_members")]
+
+    assert memberships() == [("grp", "c:@N@demo")]
+
+    write_a(grouped=False)
+    _core.parse_tus_to_sqlite([str(a)], str(db), opts)
+    assert memberships() == []
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
 def test_a_def_block_is_retargeted_onto_the_macro_it_names(tmp_path: Path) -> None:
     # `\def` names the macro it documents, so a block carrying it belongs to
     # that macro wherever it was written -- here below the `#define`, which is

@@ -448,6 +448,17 @@ void SqliteStore::insert_rows(const model::ParsedModule& module,
     }
   }
 
+  // The USRs whose documentation this write restates: every raw comment it
+  // records. The projections below (comment_fields, group_members) are derived
+  // from those comments, so this -- not the projections themselves -- is the
+  // set whose stale rows have to go. A comment edited down to nothing parsed
+  // (emptied, or with its `\ingroup` dropped) contributes no projected row at
+  // all, so a delete set built from the projections alone would skip exactly
+  // the symbol whose old rows are now wrong.
+  std::unordered_set<std::string> documented;
+  documented.reserve(module.comments.size());
+  for (const auto& cm : module.comments) documented.insert(cm.symbol_usr);
+
   {
     Stmt c(db_,
            "INSERT OR REPLACE INTO comments(symbol_usr, raw_text, format) "
@@ -483,11 +494,13 @@ void SqliteStore::insert_rows(const model::ParsedModule& module,
     // comment (INSERT OR REPLACE above) and the fields parsed out of it,
     // rather than pairing one write's raw text with another's fields.
     Stmt dcf(db_, "DELETE FROM comment_fields WHERE symbol_usr = ?;");
-    std::unordered_set<std::string> replaced;
+    std::unordered_set<std::string> replaced = documented;
     for (const auto& field : module.comment_fields) {
-      if (!replaced.insert(field.symbol_usr).second) continue;
+      replaced.insert(field.symbol_usr);
+    }
+    for (const auto& usr : replaced) {
       dcf.reset();
-      dcf.bind(1, field.symbol_usr);
+      dcf.bind(1, usr);
       dcf.step();
     }
 
@@ -597,12 +610,14 @@ void SqliteStore::insert_rows(const model::ParsedModule& module,
     // the member rather than the group so a write only clears the memberships
     // of the symbols it carries, leaving the rest of the group alone.
     Stmt dgm(db_, "DELETE FROM group_members WHERE member_usr = ?;");
-    std::unordered_set<std::string> replaced;
+    std::unordered_set<std::string> replaced = documented;
     for (const auto& member : module.group_members) {
       if (member.member_usr.empty()) continue;
-      if (!replaced.insert(member.member_usr).second) continue;
+      replaced.insert(member.member_usr);
+    }
+    for (const auto& usr : replaced) {
       dgm.reset();
-      dgm.bind(1, member.member_usr);
+      dgm.bind(1, usr);
       dgm.step();
     }
 
