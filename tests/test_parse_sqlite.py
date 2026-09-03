@@ -460,6 +460,103 @@ def test_structural_block_resolves_the_same_under_any_batching(tmp_path: Path) -
 
 
 @pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_a_shared_namespace_comment_is_recorded_once(tmp_path: Path) -> None:
+    # libclang answers clang_Cursor_getRawCommentText for a redeclaration with
+    # the comment written on another one, so every unit that reaches the header
+    # documenting a namespace sees that comment on its own reopening of it. The
+    # documentation must land in the database once all the same: dune-gdt's
+    # `Dune` page rendered the same block 198 times, once per unit.
+    shared = tmp_path / "shared.hpp"
+    shared.write_text(
+        "#pragma once\n/** \\brief The shared namespace. */\nnamespace shared { struct Thing {}; }\n",
+    )
+    users = []
+    for i in range(6):
+        user = tmp_path / f"user{i}.hpp"
+        user.write_text(f'#pragma once\n#include "shared.hpp"\nnamespace shared {{ int f{i}(); }}\n')
+        users.append(user)
+
+    def briefs(db_name: str, tu_batch: int) -> list[str]:
+        opts = _core.ParseOptions()
+        opts.tu_batch = tu_batch
+        db = tmp_path / db_name
+        _core.parse_to_sqlite([str(shared), *(str(u) for u in users)], str(db), opts)
+        with Store.open(db) as store:
+            usr = next(s.usr for s in store.symbols() if s.qualified_name == "shared")
+            with sqlite3.connect(db) as con:
+                rows = con.execute(
+                    "SELECT value FROM comment_fields WHERE symbol_usr = ? AND name = 'brief'",
+                    (usr,),
+                ).fetchall()
+        return [row[0] for row in rows]
+
+    # tu_batch=1 is the interesting one (a write per header, which is how
+    # dune-gdt builds), but the umbrella path must not regress either.
+    assert briefs("isolated.sqlite", 1) == ["The shared namespace."]
+    assert briefs("batched.sqlite", 0) == ["The shared namespace."]
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_a_def_block_documents_its_macro_not_the_next_declaration(tmp_path: Path) -> None:
+    # `\def` names the macro it documents, so the block belongs to that macro
+    # wherever it was written -- not to the namespace that happens to open
+    # below it, which is where libclang attaches it. dune-gdt writes exactly
+    # this shape and had a macro's documentation on its `Dune` namespace.
+    header = tmp_path / "tuple.hpp"
+    header.write_text(
+        "#pragma once\n"
+        "#define TUPLE_TYPEDEFS_2_TUPLE(t_, s_) int\n"
+        "\n"
+        "/**\n"
+        " * \\def TUPLE_TYPEDEFS_2_TUPLE( t_, s_ )\n"
+        " *\n"
+        " * \\brief extracts the types of a tuple's elements.\n"
+        " */\n"
+        "\n"
+        "namespace outer::inner { struct Thing {}; }\n",
+    )
+    db = tmp_path / "out.sqlite"
+    _core.parse_to_sqlite([str(header)], str(db), _core.ParseOptions())
+
+    with Store.open(db) as store:
+        by_name = {s.qualified_name: s for s in store.symbols()}
+        macro = by_name["TUPLE_TYPEDEFS_2_TUPLE"]
+        assert macro.kind == SymbolKind.MACRO
+        comment = store.comment(macro.usr)
+        assert comment is not None
+        assert comment.brief == "extracts the types of a tuple's elements."
+
+        for namespace in ("outer", "outer::inner"):
+            assert not by_name[namespace].is_documented
+            assert store.comment(by_name[namespace].usr) is None
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_a_structural_block_naming_its_own_declaration_still_documents_it(
+    tmp_path: Path,
+) -> None:
+    # The flip side: the usual `\class Foo` directly above `class Foo` names
+    # the declaration it sits on, so it stays that declaration's own comment.
+    header = tmp_path / "own.hpp"
+    header.write_text(
+        "#pragma once\n"
+        "namespace ns {\n"
+        "/** \\class Foo\n * \\brief Documented from a block above it.\n */\n"
+        "class Foo { public: int v = 0; };\n"
+        "}\n",
+    )
+    db = tmp_path / "out.sqlite"
+    _core.parse_to_sqlite([str(header)], str(db), _core.ParseOptions())
+
+    with Store.open(db) as store:
+        foo = next(s for s in store.symbols() if s.qualified_name == "ns::Foo")
+        assert foo.is_documented
+        comment = store.comment(foo.usr)
+        assert comment is not None
+        assert comment.brief == "Documented from a block above it."
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
 def test_parse_releases_the_gil(tmp_path: Path) -> None:
     """Another Python thread must keep running while a parse is in flight.
 

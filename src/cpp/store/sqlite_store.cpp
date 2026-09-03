@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "core/version.hpp"
 #include "store/schema.hpp"
@@ -461,6 +462,35 @@ void SqliteStore::insert_rows(const model::ParsedModule& module,
   }
 
   {
+    // Replace per symbol, never plain append. A symbol's comment_fields are one
+    // set written together and carry no key of their own, so a second write
+    // that documents the same USR used to leave both sets in the table -- and
+    // every stage downstream reads *all* of them, so the symbol's brief and
+    // prose were rendered once per write.
+    //
+    // Two writes documenting one USR is the norm, not a corner case:
+    // clang_Cursor_getRawCommentText answers for a redeclaration with the
+    // comment written on another one, so a namespace reopened in 200 headers
+    // picks up the comment of whichever header documented it in every single
+    // one of them. The per-file delete in write_tus() does not catch that --
+    // it deletes by the symbol row's anchor file, and a namespace is anchored
+    // to whichever file declared it first, which no later write replaces.
+    // dune-gdt rendered the `TUPLE_TYPEDEFS_2_TUPLE` block on its `Dune`
+    // namespace page 198 times that way.
+    //
+    // Deleting by symbol touches only the USRs this write actually carries
+    // documentation for, and leaves the last writer owning both the raw
+    // comment (INSERT OR REPLACE above) and the fields parsed out of it,
+    // rather than pairing one write's raw text with another's fields.
+    Stmt dcf(db_, "DELETE FROM comment_fields WHERE symbol_usr = ?;");
+    std::unordered_set<std::string> replaced;
+    for (const auto& field : module.comment_fields) {
+      if (!replaced.insert(field.symbol_usr).second) continue;
+      dcf.reset();
+      dcf.bind(1, field.symbol_usr);
+      dcf.step();
+    }
+
     Stmt cf(db_,
             "INSERT INTO comment_fields(symbol_usr, name, arg, value, ordinal) "
             "VALUES(?,?,?,?,?);");
@@ -560,6 +590,22 @@ void SqliteStore::insert_rows(const model::ParsedModule& module,
   }
 
   {
+    // Replaced per member, for the reason the comment_fields delete above
+    // spells out: a membership row has no key either, and it is registered
+    // from the member's *own* `\ingroup`, so a symbol documented by two writes
+    // contributed its membership twice and the group listed it twice. Keyed on
+    // the member rather than the group so a write only clears the memberships
+    // of the symbols it carries, leaving the rest of the group alone.
+    Stmt dgm(db_, "DELETE FROM group_members WHERE member_usr = ?;");
+    std::unordered_set<std::string> replaced;
+    for (const auto& member : module.group_members) {
+      if (member.member_usr.empty()) continue;
+      if (!replaced.insert(member.member_usr).second) continue;
+      dgm.reset();
+      dgm.bind(1, member.member_usr);
+      dgm.step();
+    }
+
     Stmt gm(db_,
             "INSERT INTO group_members(group_id, member_usr, ordinal) "
             "VALUES(?,?,?);");

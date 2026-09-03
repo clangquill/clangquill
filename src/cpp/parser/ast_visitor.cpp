@@ -180,6 +180,20 @@ void register_symbol_groups(VisitCtx& ctx, const std::string& usr,
 
 CXChildVisitResult visit(CXCursor c, CXCursor parent, CXClientData data);
 
+// The Doxygen structural command a comment block opens with, and the entity it
+// names: `\def TUPLE_TYPEDEFS_2_TUPLE(t_, s_)` is {"def",
+// "TUPLE_TYPEDEFS_2_TUPLE"}. An empty command means the block opens with
+// anything else, i.e. it documents whatever it is attached to.
+struct StructuralTarget {
+  std::string command;  ///< The command word, without its `\` or `@`.
+  std::string target;   ///< The entity it names, normalized by structural_name().
+};
+
+StructuralTarget structural_target(const std::string& raw);
+bool structural_block_claims(const StructuralTarget& block,
+                             model::SymbolKind kind,
+                             const std::string& qualified);
+
 // First whitespace-delimited token of a string (e.g. a group id from
 // "mygroup My Title").
 std::string first_token(const std::string& s) {
@@ -386,7 +400,25 @@ std::string handle_symbol(CXCursor c, model::SymbolKind kind, VisitCtx& ctx,
     auto it = ctx.doc_above_line->find(cursor_file_line(c));
     if (it != ctx.doc_above_line->end()) raw = it->second;
   }
-  if (!raw.empty()) record_comment(ctx, usr, raw, c);
+  if (!raw.empty()) {
+    // A block that opens with a structural command documents the entity that
+    // command names, wherever the block was written -- so it must not also
+    // become the documentation of the declaration that happens to follow it.
+    // dune-gdt writes the `\def TUPLE_TYPEDEFS_2_TUPLE` block below the
+    // `#define` and above `namespace Dune::XT::Common`, and libclang duly
+    // handed a macro's documentation to the `Dune` namespace.
+    //
+    // attach_structural_blocks() puts the block on its actual target after the
+    // visit, so this only declines to *also* put it here. A block naming the
+    // very declaration it sits on (the usual `\class Foo` above `class Foo`)
+    // claims this cursor and is recorded as normal, which keeps it the first
+    // writer for its own USR.
+    const StructuralTarget claimed = structural_target(raw);
+    if (claimed.command.empty() ||
+        structural_block_claims(claimed, kind, qualified_name(c))) {
+      record_comment(ctx, usr, raw, c);
+    }
+  }
 
   // De-dup symbols: keep the first row, but let a definition supersede a prior
   // forward declaration.
@@ -868,7 +900,7 @@ void register_symbol_groups(VisitCtx& ctx, const std::string& usr,
 bool is_structural(const std::string& cmd) {
   return cmd == "class" || cmd == "struct" || cmd == "union" ||
          cmd == "enum" || cmd == "namespace" || cmd == "fn" || cmd == "var" ||
-         cmd == "typedef";
+         cmd == "typedef" || cmd == "def";
 }
 
 // Reduces a structural command's argument to a qualified name.
@@ -910,7 +942,25 @@ bool structural_kind_matches(const std::string& cmd, model::SymbolKind k) {
   if (cmd == "typedef") {
     return k == model::SymbolKind::Typedef || k == model::SymbolKind::TypeAlias;
   }
+  if (cmd == "def") return k == model::SymbolKind::Macro;
   return false;
+}
+
+// Whether @p block names the entity a cursor of kind @p kind and qualified name
+// @p qualified is -- the same test attach_structural_blocks() applies when it
+// looks for the block's target, minus the file check its caller already made.
+bool structural_block_claims(const StructuralTarget& block,
+                             model::SymbolKind kind,
+                             const std::string& qualified) {
+  if (!structural_kind_matches(block.command, kind)) return false;
+  if (qualified == block.target) return true;
+  // The block may name the target by a shorter qualification than the one
+  // built from cursor spellings (`\fn DenseBase::minCoeff` for
+  // `Eigen::DenseBase::minCoeff`), so a `::`-delimited suffix counts.
+  const std::string suffix = "::" + block.target;
+  return qualified.size() > suffix.size() &&
+         qualified.compare(qualified.size() - suffix.size(), suffix.size(),
+                           suffix) == 0;
 }
 
 // One `\defgroup` / `\addtogroup` block, accumulated on its own before being
@@ -956,6 +1006,76 @@ void merge_group_block(model::Group& g, const GroupBlock& b) {
   g.is_definition = g.is_definition || b.defining;
 }
 
+// Strips one comment decoration from the front of a line, and no more:
+// consuming every leading `/ * ! <` would eat a line's own markdown, turning
+// `**Bold** start` into `Bold** start`.
+std::string strip_decoration(const std::string& s) {
+  std::size_t m = 0;
+  if (s.compare(0, 2, "/*") == 0) {
+    m = 2;
+    if (m < s.size() && (s[m] == '*' || s[m] == '!')) ++m;
+  } else if (s.compare(0, 2, "//") == 0) {
+    m = 2;
+    if (m < s.size() && (s[m] == '/' || s[m] == '!')) ++m;
+  } else if (!s.empty() && s[0] == '*') {
+    // The continuation marker of a block comment. Only when it stands alone:
+    // `**Bold**` and `*italic*` open a line with markdown, not decoration,
+    // and a `*/` terminator is left for the trailing strip below.
+    if (s.size() == 1 || s[1] == ' ' || s[1] == '\t' || s[1] == '\r') m = 1;
+  }
+  // The `<` of an after-member comment (`///<`, `/**<`) belongs to the
+  // decoration it follows.
+  if (m > 0 && m < s.size() && s[m] == '<') ++m;
+  return s.substr(m);
+}
+
+// One raw comment line reduced to its text: decoration off the front, the
+// block terminator and surrounding whitespace off the back.
+std::string clean_comment_line(std::string s) {
+  std::size_t a = s.find_first_not_of(" \t\r");
+  if (a == std::string::npos) return std::string{};
+  s = strip_decoration(s.substr(a));
+  // Trim trailing whitespace first so a trailing `*/` is stripped even when
+  // followed by spaces or a carriage return (e.g. ` * text */ `).
+  std::size_t b = s.find_last_not_of(" \t\r");
+  if (b != std::string::npos) s = s.substr(0, b + 1);
+  if (s.size() >= 2 && s.compare(s.size() - 2, 2, "*/") == 0) {
+    s.erase(s.size() - 2);
+  }
+  a = s.find_first_not_of(" \t\r");
+  b = s.find_last_not_of(" \t\r");
+  return a == std::string::npos ? std::string{} : s.substr(a, b - a + 1);
+}
+
+// See the declaration above. Only the block's first non-blank line is read:
+// Doxygen lets a structural command sit anywhere in a block, but a block that
+// *belongs* to another entity opens with it, and reading no further keeps a
+// `\see`-style mention further down from disowning a comment that documents
+// the declaration it sits on.
+StructuralTarget structural_target(const std::string& raw) {
+  std::size_t i = 0;
+  while (i < raw.size()) {
+    const std::size_t eol = raw.find('\n', i);
+    std::string line = clean_comment_line(
+        raw.substr(i, eol == std::string::npos ? eol : eol - i));
+    if (!line.empty()) {
+      if (line[0] != '@' && line[0] != '\\') return {};
+      const std::size_t e = line.find_first_of(" \t", 1);
+      std::string cmd =
+          line.substr(1, (e == std::string::npos ? line.size() : e) - 1);
+      if (!is_structural(cmd)) return {};
+      const std::string rest =
+          e == std::string::npos ? std::string{} : line.substr(e + 1);
+      std::string target = structural_name(rest);
+      if (target.empty()) return {};
+      return {std::move(cmd), std::move(target)};
+    }
+    if (eol == std::string::npos) break;
+    i = eol + 1;
+  }
+  return {};
+}
+
 void scan_group_definitions(const std::string& raw, const std::string& file,
                             VisitCtx& ctx) {
   std::string line;
@@ -988,47 +1108,9 @@ void scan_group_definitions(const std::string& raw, const std::string& file,
     block = GroupBlock{};
     paragraph_break = false;
   };
-  // Strips one comment decoration from the front of a line, and no more:
-  // consuming every leading `/ * ! <` would eat a line's own markdown, turning
-  // `**Bold** start` into `Bold** start`.
-  auto strip_decoration = [](const std::string& s) {
-    std::size_t m = 0;
-    if (s.compare(0, 2, "/*") == 0) {
-      m = 2;
-      if (m < s.size() && (s[m] == '*' || s[m] == '!')) ++m;
-    } else if (s.compare(0, 2, "//") == 0) {
-      m = 2;
-      if (m < s.size() && (s[m] == '/' || s[m] == '!')) ++m;
-    } else if (!s.empty() && s[0] == '*') {
-      // The continuation marker of a block comment. Only when it stands alone:
-      // `**Bold**` and `*italic*` open a line with markdown, not decoration,
-      // and a `*/` terminator is left for the trailing strip below.
-      if (s.size() == 1 || s[1] == ' ' || s[1] == '\t' || s[1] == '\r') m = 1;
-    }
-    // The `<` of an after-member comment (`///<`, `/**<`) belongs to the
-    // decoration it follows.
-    if (m > 0 && m < s.size() && s[m] == '<') ++m;
-    return s.substr(m);
-  };
-
-  auto clean = [&strip_decoration](std::string s) {
-    std::size_t a = s.find_first_not_of(" \t\r");
-    if (a == std::string::npos) return std::string{};
-    s = strip_decoration(s.substr(a));
-    // Trim trailing whitespace first so a trailing `*/` is stripped even when
-    // followed by spaces or a carriage return (e.g. ` * text */ `).
-    std::size_t b = s.find_last_not_of(" \t\r");
-    if (b != std::string::npos) s = s.substr(0, b + 1);
-    if (s.size() >= 2 && s.compare(s.size() - 2, 2, "*/") == 0) {
-      s.erase(s.size() - 2);
-    }
-    a = s.find_first_not_of(" \t\r");
-    b = s.find_last_not_of(" \t\r");
-    return a == std::string::npos ? std::string{} : s.substr(a, b - a + 1);
-  };
 
   auto handle_line = [&](const std::string& rawline) {
-    std::string l = clean(rawline);
+    std::string l = clean_comment_line(rawline);
     if (!l.empty() && (l[0] == '@' || l[0] == '\\')) {
       std::size_t e = l.find_first_of(" \t", 1);
       std::string cmd = l.substr(1, (e == std::string::npos ? l.size() : e) - 1);
@@ -1457,6 +1539,18 @@ void visit_translation_unit(CXCursor tu_cursor,
   ctx.comment_parser = &comment_parser;
   ctx.main_ids = &main_ids;
   ctx.extract_anonymous_namespaces = options.extract_anonymous_namespaces;
+
+  // record_comment()'s guard has to span the whole module, not just this unit.
+  // One ParsedModule can collect several translation units -- parse_batch()
+  // falls back to parsing the members one by one when the umbrella fails to
+  // build -- and clang_Cursor_getRawCommentText answers for a redeclaration
+  // with the comment written on another one, so a namespace reopened in every
+  // member is documented again in each of them. Seeding the set from what the
+  // module already carries keeps it to one comment (and one set of
+  // comment_fields, and one `\ingroup` membership) per USR, and still marks
+  // the later units' symbols is_documented.
+  documented.reserve(out.comments.size());
+  for (const auto& cm : out.comments) documented.insert(cm.symbol_usr);
 
   // Capture free-floating `\defgroup` blocks first so groups carry their title
   // and description before any `\ingroup` membership creates a stub for them.
