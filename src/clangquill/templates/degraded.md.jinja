@@ -5,7 +5,7 @@
    duplicate C++ domain object, which Sphinx's cpp domain crashes on. #}
 {% import "partials/signature.md.jinja" as sig %}
 {% set comment = gen.comment(symbol) %}
-{{ level | heading }} {{ gen.label(symbol) }} `{{ symbol.qualified_name }}`
+{{ level | heading }} {{ gen.label(symbol) }} `{{ gen.heading_name(symbol) }}`
 
 {% set argument = sig.directive_argument(symbol) %}
 {% set fence = gen.fence(argument) %}

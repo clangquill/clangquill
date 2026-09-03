@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from clangquill import _core
 from clangquill.comments import CommentModel, CommentParam
 from clangquill.generator import _DEP_FIELD_SEP, Generator, PagePlan, write_if_changed
 from clangquill.store import Reference, RefKind, SourceFile, Store, Symbol
@@ -91,6 +92,11 @@ GOLDEN_TREES = [
     ("ns_namespace", "ns_db", "namespace"),
     ("m7_symbol", "m7_db", "symbol"),
     ("degraded_symbol", "degraded_db", "symbol"),
+    # Class-template specializations under the grouping dune-gdt builds with:
+    # every one of them shares the primary's qualified_name, so this tree is
+    # what pins each to a page named, headed and listed for the specialization
+    # rather than for the template.
+    ("spec_namespace", "spec_db", "namespace"),
 ]
 
 
@@ -343,13 +349,32 @@ def test_wide_page_fingerprint_covers_what_content_hash_omits(gen: Generator, st
     assert gen.page_fingerprint(plan_for(symbol), wide=True) != gen.page_fingerprint(plan_for(moved), wide=True)
 
 
-def test_unique_stem_dedupes_case_insensitively() -> None:
-    # `Foo` and `foo` are the same file on macOS/Windows, so they must not
-    # share a stem.
-    seen: set[str] = set()
-    assert Generator._unique_stem("Foo", seen) == "Foo"  # noqa: SLF001
-    assert Generator._unique_stem("foo", seen) == "foo_"  # noqa: SLF001
-    assert Generator._unique_stem("FOO", seen) == "FOO__"  # noqa: SLF001
+def test_contested_stems_are_tagged_on_every_side(collision_db: Path) -> None:
+    # `Foo` and `foo` are distinct C++ names but the same file on macOS/Windows,
+    # so they must not share a stem -- and *neither* may keep the bare one.
+    # Letting the first-planned name have it would tie that page's URL to where
+    # the walk happened to reach its rival, so adding a name that sorted earlier
+    # would take the URL and rename the page that had it.
+    with Store.open(collision_db) as store:
+        gen = Generator(store)
+        stems = {p.stem for p in gen.plan_pages()}
+        again = {p.stem for p in Generator(store).plan_pages()}
+
+    assert stems == again  # deterministic across runs
+    assert len({s.casefold() for s in stems}) == 3
+    assert "Foo" not in stems
+    assert "foo" not in stems
+    assert {s for s in stems if s.casefold().startswith("foo")} == stems - {
+        s for s in stems if s.casefold().startswith("index")
+    }
+
+
+def test_an_uncontested_stem_stays_bare(spec_gen: Generator) -> None:
+    # The digest is only for names that actually collide; everything else keeps
+    # the readable slug, so this does not churn every URL in a project.
+    stems = {p.stem for p in spec_gen.plan_pages(group_by="namespace")}
+    assert "demo_AdaptationHelper" in stems
+    assert "demo_ContainerFactory_demo_DenseVector_S" in stems
 
 
 def test_conflicting_same_name_declarations_degrade_to_code_blocks(degraded_db: Path, tmp_path: Path) -> None:
@@ -391,14 +416,19 @@ def test_generate_avoids_root_document_and_case_collisions(collision_db: Path, t
     # A symbol named `index` must not collide with the toctree root document,
     # and `Foo`/`foo` must not collide with each other on a case-insensitive
     # filesystem.
-    assert sorted(pages) == ["Foo", "foo_", "index_"]
+    assert len(pages) == len(set(pages)) == 3
+    index_stem = next(p for p in pages if p.casefold().startswith("index"))
+    assert index_stem != "index"  # must not collide with the toctree root
     index = (out / "index.md").read_text()
     assert index.startswith("# API Reference")
-    assert "index_" in index
-    index_page = (out / "index_.md").read_text()
+    assert index_stem in index
+    index_page = (out / f"{index_stem}.md").read_text()
     assert index_page.startswith("# Function `index`")
     assert "{cpp:function} void index()" in index_page
-    assert "{cpp:function} void foo()" in (out / "foo_.md").read_text()
+    # `Foo` and `foo` both got a stem; the pages behind them are the right ones.
+    bodies = {(out / f"{p}.md").read_text() for p in pages if p.casefold().startswith("foo")}
+    assert any("{cpp:function} void foo()" in body for body in bodies)
+    assert any("{cpp:function} void Foo()" in body for body in bodies)
 
 
 def test_group_stem_matches_planned_stem_after_dedup(m7_db: Path) -> None:
@@ -408,8 +438,9 @@ def test_group_stem_matches_planned_stem_after_dedup(m7_db: Path) -> None:
         gen = Generator(store)
         plans = gen.plan_pages(reserved_stems=("group_grp",))
         group_plan = next(p for p in plans if p.group is not None)
-        assert group_plan.stem == "group_grp_"
-        assert gen.group_stem(group_plan.group) == "group_grp_"
+        assert group_plan.stem != "group_grp"  # the reserved stem is taken
+        assert group_plan.stem.startswith("group_grp_")
+        assert gen.group_stem(group_plan.group) == group_plan.stem
 
 
 def test_emitted_directives_cover_each_kind(gen: Generator, store: Store) -> None:
@@ -1104,6 +1135,152 @@ def _spec_symbol(store: Store, display_name: str) -> Symbol:
     return sym
 
 
+def test_each_specialization_pages_under_its_own_name(spec_gen: Generator) -> None:
+    # Every specialization shares the primary's qualified_name, so paging on that
+    # alone gave them one stem and a run of trailing underscores to tell them
+    # apart -- ContainerFactory, ContainerFactory_, ContainerFactory__ ... which
+    # names nothing, and slides onto a different specialization as soon as one is
+    # added. dune-gdt published a dozen such pages, all headed the same.
+    for group_by in ("symbol", "class", "namespace"):
+        stems = {p.stem for p in spec_gen.plan_pages(group_by=group_by)}
+        assert not any(stem.endswith("_") for stem in stems), (group_by, sorted(stems))
+
+    stems = {p.stem for p in spec_gen.plan_pages(group_by="namespace")}
+    # This fixture's primary carries no argument list of its own, so it keeps the
+    # plain stem; real libclang spells a primary class template's display_name
+    # with its *parameter* names, which the parse-backed test below pins.
+    assert "demo_ContainerFactory" in stems
+    assert "demo_ContainerFactory_demo_DenseVector_S" in stems
+    assert "demo_ContainerFactory_demo_FieldVector_S_4" in stems
+    assert "demo_ContainerFactory_double" in stems
+
+
+def test_specialization_pages_are_labelled_apart(spec_gen: Generator) -> None:
+    # The label is the toctree caption and the page's own heading; identical
+    # labels are what made a dozen distinct pages read as duplicates.
+    labels = [p.label for p in spec_gen.plan_pages(group_by="namespace")]
+    assert len(labels) == len(set(labels))
+    assert "demo::ContainerFactory<demo::DenseVector<S>>" in labels
+
+
+def test_specialization_heading_names_the_specialization(spec_gen: Generator, spec_store: Store) -> None:
+    dense = _spec_symbol(spec_store, "ContainerFactory<demo::DenseVector<S>>")
+    heading = spec_gen.render_symbol(dense).splitlines()[0]
+    assert heading == "# Class template `demo::ContainerFactory<demo::DenseVector<S>>`"
+
+    primary = _spec_symbol(spec_store, "ContainerFactory")
+    assert spec_gen.render_symbol(primary).splitlines()[0] == "# Class template `demo::ContainerFactory`"
+
+
+def test_an_overlong_stem_is_truncated_and_hashed() -> None:
+    # Template arguments nest without bound, and a filename does not. The digest
+    # is of the full name, so two names sharing a long prefix stay apart -- the
+    # collision the underscore run would otherwise be back to resolving.
+    from clangquill.generator import _MAX_STEM, _stem  # noqa: PLC0415 - private by design
+
+    prefix = "demo::Matrix<" + "Block<" * 40
+    first, second = _stem(prefix + "int>"), _stem(prefix + "long>")
+    assert len(first) == _MAX_STEM
+    assert first != second
+    assert _stem(prefix + "int>") == first  # stable across calls
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_a_new_colliding_name_leaves_the_others_stems_alone(tmp_path: Path) -> None:
+    # A name that goes from unique to contested must change stem -- there is no
+    # way to both give a lone name the readable slug and keep it when a rival
+    # turns up. What must *not* happen is the rest moving too: with the bare
+    # stem going to whichever name the walk reached first, adding one that came
+    # earlier took the URL and renamed the page that held it. Here `Zed` is
+    # declared ahead of both incumbents, which is that case exactly.
+    def stems(name: str, extra: str) -> dict[str, str]:
+        header = tmp_path / name
+        header.write_text(f"#pragma once\nnamespace t {{\n{extra}struct Foo {{}};\nstruct foo {{}};\n}}\n")
+        db = tmp_path / f"{name}.sqlite"
+        opts = _core.ParseOptions()
+        opts.std_flag = "c++17"
+        _core.parse_to_sqlite([str(header)], str(db), opts)
+        with Store.open(db) as store:
+            return {p.label: p.stem for p in Generator(store).plan_pages(group_by="namespace")}
+
+    before = stems("before.hpp", "")
+    after = stems("after.hpp", "struct FOO {};\n")
+
+    assert "t::FOO" in after  # the newcomer really is in the same collision set
+    assert set(after) - set(before) == {"t::FOO"}
+    for label, stem in before.items():
+        assert after[label] == stem, label
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_specializations_differing_only_in_punctuation_page_apart(tmp_path: Path) -> None:
+    # Slugging is lossy: `Duo<C>` and `Duo<C *>` both reduce to `t_Duo_C`, so
+    # carrying the arguments into the name is not on its own enough to keep two
+    # specializations apart. The collision has to break on the name's own
+    # content, or the second page is back to a positional underscore.
+    header = tmp_path / "duo.hpp"
+    header.write_text(
+        "#pragma once\n"
+        "namespace t {\n"
+        "/// Primary.\n"
+        "template <class C> class Duo { public: C get(); };\n"
+        "/// For pointers.\n"
+        "template <class C> class Duo<C *> { public: C *get(); };\n"
+        "}\n",
+    )
+    db = tmp_path / "out.sqlite"
+    opts = _core.ParseOptions()
+    opts.std_flag = "c++17"
+    _core.parse_to_sqlite([str(header)], str(db), opts)
+
+    with Store.open(db) as store:
+        plans = [p for p in Generator(store).plan_pages(group_by="namespace") if "Duo" in p.stem]
+
+    stems = {p.stem for p in plans}
+    assert len(stems) == 2
+    assert not any(stem.endswith("_") for stem in stems), sorted(stems)
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_real_specializations_page_apart(tmp_path: Path) -> None:
+    # The fixture database above is hand-built; this pins the same claim against
+    # what libclang actually reports, which is where the shared qualified_name
+    # comes from. Note the primary: its display_name carries the *parameter*
+    # name (`ContainerFactory<ContainerImp>`), which is already what the
+    # rendered declaration says, so its page is named to match.
+    header = tmp_path / "cf.hpp"
+    header.write_text(
+        "#pragma once\n"
+        "namespace la { template <class S> class Dense {}; template <class S> class Sparse {}; }\n"
+        "namespace t {\n"
+        "/// Primary.\n"
+        "template <class C> class Factory { public: static C create(); };\n"
+        "/// Dense.\n"
+        "template <class S> class Factory<la::Dense<S>> { public: static la::Dense<S> create(); };\n"
+        "/// Sparse.\n"
+        "template <class S> class Factory<la::Sparse<S>> { public: static la::Sparse<S> create(); };\n"
+        "}\n",
+    )
+    db = tmp_path / "out.sqlite"
+    opts = _core.ParseOptions()
+    opts.std_flag = "c++17"
+    _core.parse_to_sqlite([str(header)], str(db), opts)
+
+    with Store.open(db) as store:
+        plans = [p for p in Generator(store).plan_pages(group_by="namespace") if "Factory" in p.stem]
+
+    assert {p.stem for p in plans} == {
+        "t_Factory_C",
+        "t_Factory_la_Dense_S",
+        "t_Factory_la_Sparse_S",
+    }
+    assert {p.label for p in plans} == {
+        "t::Factory<C>",
+        "t::Factory<la::Dense<S>>",
+        "t::Factory<la::Sparse<S>>",
+    }
+
+
 def test_specialization_class_signature_carries_spec_args(spec_gen: Generator, spec_store: Store) -> None:
     # Each specialization names its argument list so the C++ domain does not see
     # every specialization as a duplicate of the bare template.
@@ -1310,7 +1487,10 @@ def _build_strict(src: Path, build_root: Path, project: str) -> None:
 
 
 @pytest.mark.parametrize("group_by", ["class", "namespace"])
-@pytest.mark.parametrize("fixture", ["gen", "m7_gen"])
+# spec_gen carries class-template specializations, whose page captions now hold
+# the argument list -- so a toctree entry reads `ContainerFactory<T<S>> <stem>`
+# and Sphinx has to still find the stem in it. A strict build is what says so.
+@pytest.mark.parametrize("fixture", ["gen", "m7_gen", "spec_gen"])
 def test_hierarchical_layouts_build_warning_free(
     request: pytest.FixtureRequest,
     tmp_path: Path,

@@ -286,6 +286,61 @@ def _slug(name: str) -> str:
     return slug or "global"
 
 
+def _page_name(symbol: Symbol) -> str:
+    """Return the name that identifies ``symbol``'s own page.
+
+    A class template's specializations share its ``qualified_name`` — libclang
+    builds that from cursor spellings, which carry no arguments — so paging on
+    it alone gives every specialization of ``ContainerFactory`` the same name,
+    and :meth:`Generator._unique_stem` tells them apart with a run of trailing
+    underscores. ``ContainerFactory____`` names nothing, sorts meaninglessly,
+    and shifts onto a different specialization as soon as one is added or
+    removed. Appending the specialization arguments (see :func:`_spec_suffix`,
+    empty for a primary template) is what makes the identity the reader's.
+
+    A *primary* class template's ``display_name`` carries its parameter names
+    (``ContainerFactory<ContainerImp>``) rather than an argument list, so its
+    page is named for those — which is already what the declaration rendered on
+    that page says.
+
+    Records only. A function template specialization's ``display_name`` carries
+    its parameter list too (``convert<int>(int)``), and overloads already page
+    together by name under every grouping — so widening this to functions would
+    rename pages without telling two of them apart.
+    """
+    name = symbol.qualified_name or symbol.spelling
+    return name + _spec_suffix(symbol) if symbol.kind in _RECORD_KINDS else name
+
+
+#: Longest page stem emitted before it is truncated and hashed. Template
+#: arguments nest without bound (``Matrix<Block<Transpose<...>>>``), and a
+#: filename has a hard limit — 255 bytes on ext4, and shorter once a build
+#: directory and Sphinx's own suffixes are prepended.
+_MAX_STEM = 96
+
+
+def _digest(name: str) -> str:
+    """Return a short, stable tag for ``name``, to tell two same-slug pages apart."""
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+
+
+def _stem(name: str, *, tag: str = "") -> str:
+    """Slug ``name`` into a page stem, truncating an overlong one stably.
+
+    ``tag`` is appended after a separator and always kept; the slug gives way to
+    it. Truncation puts a digest of the *full* name in the tail rather than more
+    of the slug: two names agreeing for the first ~90 characters are exactly
+    what truncation alone would collide.
+    """
+    slug = _slug(name)
+    suffix = f"_{tag}" if tag else ""
+    room = _MAX_STEM - len(suffix)
+    if len(slug) > room:
+        digest = _digest(name)
+        slug = slug[: room - len(digest) - 1].rstrip("_") + "_" + digest
+    return slug + suffix
+
+
 _MAX_HEADING_LEVEL = 6
 
 
@@ -452,6 +507,12 @@ class Generator:
         # :meth:`group_stem`): dedup can suffix the natural slug, and the
         # subgroup links templates render must point at the planned page.
         self._group_stems: dict[str, str] = {}
+        # Set while :meth:`plan_pages` runs its discovery pass: every bare stem
+        # asked for, mapped to the names that asked. Afterwards `_contested`
+        # holds the stems more than one name wanted, and stays set for the real
+        # pass. See :meth:`_unique_stem`.
+        self._stem_claims: dict[str, set[str]] | None = None
+        self._contested: frozenset[str] = frozenset()
         # Lazily built by `related`; None until a record page first asks.
         self._related_by_name: dict[str, list[Symbol]] | None = None
         # Template objects (and the two partial macros below) are immutable for
@@ -647,6 +708,17 @@ class Generator:
     def label(self, symbol: Symbol) -> str:
         """Return the human-readable kind label used in headings."""
         return _LABEL_FOR.get(symbol.kind, "Symbol")
+
+    def heading_name(self, symbol: Symbol) -> str:
+        """Return the name a heading shows for ``symbol``.
+
+        The specialization arguments belong here for the same reason they belong
+        in the page stem (see :func:`_page_name`): without them every
+        specialization of one class template is headed with the bare template
+        name, so a reader looking at a list of them — or at a browser tab —
+        cannot tell which is which. A no-op for everything else.
+        """
+        return _page_name(symbol)
 
     def fence(self, *content: str) -> str:
         """Return a backtick fence long enough to safely wrap ``content``.
@@ -1109,7 +1181,23 @@ class Generator:
         One ``seen`` set spans the symbol/file/class/namespace pages *and* the
         group pages, so no two planned pages can ever share a filename.
         """
-        seen = {stem.casefold() for stem in reserved_stems}
+        reserved = {stem.casefold() for stem in reserved_stems}
+        # Two passes, because which names collide is not knowable while walking:
+        # the first records what every page asks for and decides nothing, the
+        # second assigns. Without it the *first* name to want a contested stem
+        # keeps the bare one and the rest are tagged, so a page's URL depends on
+        # where its rival happened to fall in the walk -- and adding a
+        # specialization that sorts earlier would rename the page it displaced.
+        # Costs no queries: the walk reads the store's in-memory symbol index.
+        self._stem_claims = {}
+        self._contested = frozenset()
+        self._walk_pages(group_by, set(reserved))
+        self._contested = frozenset(stem for stem, names in self._stem_claims.items() if len(names) > 1)
+        self._stem_claims = None
+        return self._walk_pages(group_by, reserved)
+
+    def _walk_pages(self, group_by: str, seen: set[str]) -> list[PagePlan]:
+        """Run the planner ``group_by`` selects, threading one ``seen`` set."""
         if group_by == "file":
             plans = self._plan_file_pages(seen)
         elif group_by == "class":
@@ -1176,8 +1264,8 @@ class Generator:
         """Plan one page per visible root symbol."""
         plans: list[PagePlan] = []
         for root in self.roots():
-            stem = self._unique_stem(_slug(root.qualified_name or root.spelling), seen)
-            label = root.qualified_name or root.spelling
+            label = _page_name(root)
+            stem = self._unique_stem(label, seen)
             plans.append(PagePlan(stem, label, partial(self.render_symbol, root), subtree_seeds=(root,)))
         return plans
 
@@ -1197,7 +1285,7 @@ class Generator:
             # The IR stores resolved (absolute) paths; page on the basename so
             # filenames stay short and do not leak the build machine layout.
             name = Path(source_file.path).name
-            stem = self._unique_stem(_slug(name), seen)
+            stem = self._unique_stem(name, seen)
             plans.append(
                 PagePlan(
                     stem,
@@ -1228,11 +1316,11 @@ class Generator:
 
     def _emit_class_plans(self, symbol: Symbol, plans: list[PagePlan], seen: set[str]) -> None:
         """Append the class-granular page plan(s) for ``symbol`` and its subtree."""
-        name = symbol.qualified_name or symbol.spelling
+        name = _page_name(symbol)
         if symbol.kind != SymbolKind.NAMESPACE:
             # A record (or a non-container root, e.g. a global free function)
             # renders as one self-contained page.
-            stem = self._unique_stem(_slug(name), seen)
+            stem = self._unique_stem(name, seen)
             plans.append(PagePlan(stem, name, partial(self.render_symbol, symbol), subtree_seeds=(symbol,)))
             return
         # A namespace is transparent: each container child becomes its own page,
@@ -1243,7 +1331,7 @@ class Generator:
         # but keep one that carries leaf members or its own documentation.
         if leaves or symbol.is_documented:
             label = symbol.qualified_name or "(global namespace)"
-            stem = self._unique_stem(_slug(name), seen)
+            stem = self._unique_stem(name, seen)
             # The namespace node itself is read shallowly (heading + comment); its
             # leaves render in full here, while its container children page apart.
             plans.append(
@@ -1322,17 +1410,18 @@ class Generator:
         for ns in namespaces:
             self._emit_namespace_hub(ns, plans, seen, top_level=top_level, entries=entries)
         for record in records:
-            stem = self._unique_stem(_slug(record.qualified_name or record.spelling), seen)
+            label = _page_name(record)
+            stem = self._unique_stem(label, seen)
             plans.append(
                 PagePlan(
                     stem,
-                    record.qualified_name or record.spelling,
+                    label,
                     partial(self.render_symbol, record),
                     subtree_seeds=(record,),
                     top_level=top_level,
                 ),
             )
-            entries.append((stem, record.spelling))
+            entries.append((stem, record.spelling + _spec_suffix(record)))
         self._emit_function_pages(scope, functions, plans, seen, top_level=top_level, entries=entries)
         self._emit_lumped_page("types", "Types", scope, types, plans, seen, top_level=top_level, entries=entries)
         self._emit_lumped_page(
@@ -1367,7 +1456,7 @@ class Generator:
         sub_entries = self._emit_namespace_scope(ns, self.children(ns), plans, seen, top_level=False)
         if not sub_entries and not ns.is_documented:
             return
-        stem = self._unique_stem(_slug(ns.qualified_name or ns.spelling), seen)
+        stem = self._unique_stem(ns.qualified_name or ns.spelling, seen)
         plans.append(
             PagePlan(
                 stem,
@@ -1407,7 +1496,7 @@ class Generator:
         for name in sorted(named):
             overloads = sorted(named[name], key=lambda s: s.signature)
             qname = overloads[0].qualified_name or overloads[0].spelling
-            stem = self._unique_stem(_slug(qname), seen)
+            stem = self._unique_stem(qname, seen)
             plans.append(
                 PagePlan(
                     stem,
@@ -1452,7 +1541,7 @@ class Generator:
         members = sorted(members, key=lambda s: (s.spelling, s.signature))
         scope_name = scope.qualified_name if scope is not None else ""
         base = f"{scope_name}::{suffix}" if scope_name else suffix
-        stem = self._unique_stem(_slug(base), seen)
+        stem = self._unique_stem(base, seen)
         where = f"`{scope_name}`" if scope_name else "the global namespace"
         plans.append(
             PagePlan(
@@ -1480,7 +1569,7 @@ class Generator:
         ordered_ids = {g.id for g in ordered}
         ordered += [g for g in groups if g.id not in ordered_ids]
         for group in ordered:
-            stem = self._unique_stem(_slug(f"group_{group.id}"), seen)
+            stem = self._unique_stem(f"group_{group.id}", seen)
             self._group_stems[group.id] = stem
             plans.append(PagePlan(stem, group.title or group.id, partial(self.render_group, group), group=group))
         return plans
@@ -1657,15 +1746,33 @@ class Generator:
             for member in self.group_symbols(group)
         )
 
-    @staticmethod
-    def _unique_stem(stem: str, seen: set[str]) -> str:
-        """Disambiguate ``stem`` against ``seen``, recording the result.
+    def _unique_stem(self, name: str, seen: set[str]) -> str:
+        """Return a unique page stem for ``name``, recording it in ``seen``.
 
         ``seen`` holds casefolded stems and the comparison is case-insensitive:
         ``Foo`` and ``foo`` are distinct names but the same file on a
         case-insensitive filesystem (macOS/Windows), so they must not share a
         stem or the second page silently overwrites the first.
+
+        Contested stems are settled with a digest of each name, *all* of them —
+        nobody keeps the bare stem. Slugging is lossy (``Duo<C>`` and
+        ``Duo<C*>`` both reduce to ``Duo_C``), and letting one of them keep the
+        bare stem would make that page's URL depend on the order the walk
+        reached it: adding a specialization that came earlier would take the
+        URL and rename the page that had it. A digest is a property of the name
+        alone, so every page keeps its stem across rebuilds whatever else is
+        planned. Which stems are contested is settled before this runs, by
+        :meth:`plan_pages`' discovery pass.
+
+        The loop below is the last resort: a name colliding with a *reserved*
+        stem (deterministic, since the caller fixes those), and the vanishingly
+        unlikely digest collision.
         """
+        stem = _stem(name)
+        if self._stem_claims is not None:  # discovery pass: record, decide nothing
+            self._stem_claims.setdefault(stem.casefold(), set()).add(name)
+        elif stem.casefold() in self._contested:
+            stem = _stem(name, tag=_digest(name))
         while stem.casefold() in seen:
             stem += "_"
         seen.add(stem.casefold())
