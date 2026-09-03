@@ -125,8 +125,10 @@ vendors that libclang.so (plus libstdc++/libgcc).
 Consequences:
 
 * That libclang requires **GLIBC_2.34**, so the wheels are built in the
-  **manylinux_2_34** image (`CIBW_MANYLINUX_*_IMAGE`) — still the newest image
-  pypa publishes for x86_64/aarch64.
+  **manylinux_2_34** image (`CIBW_MANYLINUX_*_IMAGE`) — the newest image
+  cibuildwheel names for x86_64/aarch64. (pypa does publish
+  `manylinux_2_39_aarch64`, but cibuildwheel 4.2.0's `manylinux_2_39` shorthand
+  covers riscv64 only, and no 2_39 image exists for x86_64.)
 * From **LLVM 23** the release libclang also imports
   `std::condition_variable::wait` at **GLIBCXX_3.4.30** (GCC 12's libstdc++),
   above the 3.4.29 cap of auditwheel's `manylinux_2_34` policy, so the wheels are
@@ -140,12 +142,15 @@ Consequences:
   libclang.so is ~200 MB uncompressed), but still avoids the monolithic shared
   `libLLVM`.
 * `CLANGQUILL_WITH_LIBCLANG=ON` is set in the wheel build so a missing libclang
-  fails loudly; `CIBW_TEST_COMMAND` asserts `have_libclang()`, and a separate
-  `smoke_test` job installs the repaired wheel in a clean `python:*-slim-bookworm`
-  image (no system LLVM, no `LD_LIBRARY_PATH`) and parses a header to prove the
-  bundled libclang is self-sufficient. Debian 12 rather than a manylinux image
-  because pip in the 2_34 image would refuse a manylinux_2_35 wheel, and pypa
-  publishes no 2_35 image for these arches.
+  fails loudly. cibuildwheel's own in-image test cannot run the
+  `have_libclang()` assert any more — pip inside the manylinux_2_34 build image
+  rejects a manylinux_2_35 wheel — so it is skipped (`CIBW_TEST_SKIP`) and the
+  assert runs in an adjacent `python:3.13-slim-bookworm` container instead. A
+  separate `smoke_test` job then installs the repaired wheel in a clean
+  `python:*-slim-bookworm` image (no system LLVM, no `LD_LIBRARY_PATH`) and
+  parses a header to prove the bundled libclang is self-sufficient. Debian 12
+  rather than a manylinux image for the same tag reason, and because pypa
+  publishes no 2_35 image for these arches (2_35 is armv7l-only).
 * The LLVM license ships in the wheel as `LICENSE-LLVM.txt`. It is **not** tracked
   in git: `tools/ci/fetch-libclang.sh` downloads `clang/LICENSE.TXT` from the
   matching LLVM source tag (`llvmorg-<LLVM_VERSION>`) into the libclang prefix, and

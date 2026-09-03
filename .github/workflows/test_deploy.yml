@@ -58,10 +58,12 @@ jobs:
                   # which auditwheel's manylinux_2_34 policy caps at 3.4.29, so
                   # the wheel is repaired to manylinux_2_35 -- the lowest policy
                   # that allows it (see ADR-0001). The *build* image stays
-                  # manylinux_2_34: it is the newest pypa publishes for
-                  # x86_64/aarch64, and the bundled libclang is a prebuilt
-                  # binary the image's own GCC never touches. Only the declared
-                  # floor moves, glibc 2.34 -> 2.35.
+                  # manylinux_2_34: it is the newest image cibuildwheel 4.2.0
+                  # names for x86_64/aarch64 (its manylinux_2_39 shorthand is
+                  # riscv64-only, and pypa publishes no 2_39 for x86_64 at all),
+                  # and the bundled libclang is a prebuilt binary the image's
+                  # own GCC never touches. Only the declared floor moves,
+                  # glibc 2.34 -> 2.35.
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
             auditwheel repair --plat manylinux_2_35_${{ matrix.arch }}
             -w {dest_dir} {wheel}
