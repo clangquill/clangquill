@@ -73,14 +73,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends doxygen
-      - name: Install build dependencies (LLVM 23)
+      - name: Install build dependencies (pinned LLVM)
         # The benchmark must measure the code being tagged, not a previously
-        # published wheel, so the core is built from this checkout. LLVM 23
-        # matches the libclang major bundled into release wheels (the distro
-        # libclang is older and would skew parse coverage/timings).
+        # published wheel, so the core is built from this checkout. The pinned
+        # LLVM major matches the libclang bundled into release wheels (the
+        # distro libclang is older and would skew parse coverage/timings).
         # Use the repository-controlled installer (pinned key fingerprint +
-        # pinned llvm-toolchain-<codename>-23 suite) rather than executing the
-        # mutable upstream helper script.
+        # pinned llvm-toolchain-<codename>-<major> suite) rather than executing
+        # the mutable upstream helper script. It reads the major from
+        # tools/ci/llvm-version.txt and exports it as LLVM_MAJOR for the steps
+        # below, so a bump stays a one-line change to that file.
         # sqlite3 and nlohmann-json are not installed from apt: they come from
         # vcpkg, which the CMake build bootstraps itself.
         run: |
@@ -100,7 +102,7 @@ jobs:
         # checkout build installed is recorded so the run step can verify the
         # benchmark actually measures it (see below).
         env:
-          SKBUILD_CMAKE_DEFINE: CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/usr/lib/llvm-23
+          SKBUILD_CMAKE_DEFINE: CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/usr/lib/llvm-${{ env.LLVM_MAJOR }}
           # sqlite.org 403s vcpkg's default downloader, so distfiles go through
           # a browser-User-Agent script (SHA512 is still checked by vcpkg).
           X_VCPKG_ASSET_SOURCES: >-
@@ -109,7 +111,7 @@ jobs:
         run: |
           uv sync --frozen --project benchmarks
           uv pip install --python benchmarks/.venv/bin/python --reinstall-package clangquill .
-          benchmarks/.venv/bin/python -c "from clangquill._libclang import libclang_major; assert (libclang_major() or 0) >= 23, libclang_major()"
+          benchmarks/.venv/bin/python -c "from clangquill._libclang import libclang_major; assert (libclang_major() or 0) >= ${LLVM_MAJOR:?}, libclang_major()"
           built=$(benchmarks/.venv/bin/python -c "import importlib.metadata as m; print(m.version('clangquill'))")
           echo "Built clangquill $built from the checkout"
           echo "CLANGQUILL_BUILT_VERSION=$built" >> "$GITHUB_ENV"

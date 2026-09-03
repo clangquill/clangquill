@@ -46,3 +46,11 @@ APT_SOURCE
 
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends "libclang-${major}-dev" "llvm-${major}-dev"
+
+# Hand the resolved major back to the calling workflow. Steps downstream need it
+# for LibClang_ROOT (/usr/lib/llvm-<major>) and for the assertion that the core
+# really linked the pinned libclang; reading it from here rather than spelling it
+# out again keeps llvm-version.txt the only place a bump has to touch.
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "LLVM_MAJOR=${major}" >>"${GITHUB_ENV}"
+fi
