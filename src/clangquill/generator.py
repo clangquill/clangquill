@@ -320,7 +320,7 @@ _MAX_STEM = 96
 
 
 def _digest(name: str) -> str:
-    """A short, stable tag for ``name``, for telling two same-slug pages apart."""
+    """Return a short, stable tag for ``name``, to tell two same-slug pages apart."""
     return hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
 
 
