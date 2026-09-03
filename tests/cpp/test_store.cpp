@@ -7,6 +7,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include "store/schema.hpp"
 #include "store/sqlite_raii.hpp"
@@ -1205,6 +1206,220 @@ TEST_CASE("SqliteStore still updates a group from its own re-parsed defgroup",
   CHECK(got.groups[0].title == "Geometry, renamed");
   CHECK(got.groups[0].brief == "Now about points only.");
   CHECK(got.groups[0].detail.empty());
+
+  std::remove(path.c_str());
+}
+
+TEST_CASE("SqliteStore replaces a symbol's comment fields, never adds to them",
+          "[store]") {
+  // A namespace reopened in many headers is documented once, in one of them --
+  // but libclang answers with that comment for every redeclaration, so every
+  // unit that reaches the documented one writes the same fields again. The
+  // symbol row is keyed on the USR and the raw comment replaces, so only
+  // comment_fields could pile up; it must not.
+  //
+  // Nor does the per-file delete catch it: the namespace row stays anchored to
+  // whichever file declared it first, and the later writes name a different
+  // file. That is what rendered dune-gdt's `Dune` namespace brief 198 times.
+  auto documented_namespace = [](const std::string& file) {
+    model::Symbol s;
+    s.usr = "c:@N@Dune";
+    s.kind = model::SymbolKind::Namespace;
+    s.spelling = "Dune";
+    s.qualified_name = "Dune";
+    s.display_name = "Dune";
+    s.is_documented = true;
+    s.location.file_path = file;
+    return s;
+  };
+  auto unit = [&documented_namespace](const std::string& file, char hash) {
+    model::ParsedModule m;
+    model::SourceFile f;
+    f.path = file;
+    f.sha256 = std::string(64, hash);
+    m.files.push_back(f);
+    m.symbols.push_back(documented_namespace(file));
+
+    model::RawComment c;
+    c.symbol_usr = "c:@N@Dune";
+    c.text = "/// The Dune namespace.";
+    m.comments.push_back(c);
+
+    model::CommentField brief;
+    brief.symbol_usr = "c:@N@Dune";
+    brief.name = "brief";
+    brief.value = "The Dune namespace.";
+    m.comment_fields.push_back(brief);
+
+    model::GroupMember member;
+    member.group_id = "geometry";
+    member.member_usr = "c:@N@Dune";
+    m.group_members.push_back(member);
+    return m;
+  };
+
+  std::string path = temp_db_path();
+  {
+    store::SqliteStore writer(path);
+    model::ParsedModule first = unit("/tmp/na.hpp", 'a');
+    first.groups.push_back(titled_group());
+    writer.write(first, store::Meta::current());
+  }
+
+  // Three more units, each declaring the namespace in a file of its own and
+  // each carrying the same inherited documentation.
+  const std::pair<std::string, char> more[] = {
+      {"/tmp/nb.hpp", 'b'}, {"/tmp/nc.hpp", 'c'}, {"/tmp/nd.hpp", 'd'}};
+  for (const auto& [file, hash] : more) {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(
+        writer.write_tus(unit(file, hash), store::Meta::current(), {file}));
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  CHECK(got.comment_fields.size() == 1);
+  CHECK(got.comment_fields[0].symbol_usr == "c:@N@Dune");
+  CHECK(got.comment_fields[0].value == "The Dune namespace.");
+  CHECK(got.group_members.size() == 1);
+  // The group the memberships point at is untouched by the member-scoped
+  // delete that keeps them from piling up.
+  REQUIRE(got.groups.size() == 1);
+  CHECK(got.groups[0].title == "Geometry helpers");
+
+  std::remove(path.c_str());
+}
+
+TEST_CASE("SqliteStore clears the projections of a comment that lost them",
+          "[store]") {
+  // The delete set comes from the raw comments a write records, not from the
+  // rows they project to. A comment edited down -- its `\ingroup` dropped, or
+  // emptied altogether -- projects to no comment_fields and no group_members
+  // row at all, so a set built from the projections would skip the one symbol
+  // whose stored rows are now wrong and leave the new raw text sitting next to
+  // them.
+  //
+  // The per-file delete in write_tus() does not cover this either: the symbol
+  // is anchored to nb.hpp, which this write does not replace. That is the
+  // ordinary case for a namespace, whose anchor is whichever file declared it
+  // first.
+  model::Symbol ns;
+  ns.usr = "c:@N@demo";
+  ns.kind = model::SymbolKind::Namespace;
+  ns.spelling = "demo";
+  ns.qualified_name = "demo";
+  ns.display_name = "demo";
+  ns.is_documented = true;
+  ns.location.file_path = "/tmp/nb.hpp";
+
+  model::ParsedModule first;
+  model::SourceFile fb;
+  fb.path = "/tmp/nb.hpp";
+  fb.sha256 = std::string(64, 'b');
+  first.files.push_back(fb);
+  first.symbols.push_back(ns);
+  first.groups.push_back(titled_group());
+
+  model::RawComment documented;
+  documented.symbol_usr = ns.usr;
+  documented.text = "/** \\brief Demo.\n *  \\ingroup geometry\n */";
+  first.comments.push_back(documented);
+
+  model::CommentField brief;
+  brief.symbol_usr = ns.usr;
+  brief.name = "brief";
+  brief.value = "Demo.";
+  first.comment_fields.push_back(brief);
+  first.group_members.push_back(membership(ns.usr));
+
+  std::string path = temp_db_path();
+  {
+    store::SqliteStore writer(path);
+    writer.write(first, store::Meta::current());
+  }
+
+  // na.hpp is re-parsed and its comment now carries neither: one raw comment
+  // row, no fields, no membership. Its symbol is anchored to na.hpp, the file
+  // it declares the namespace in -- so the delete-by-file above runs against
+  // na.hpp while the stored row still says nb.hpp, and misses it. That
+  // ordering is what leaves a namespace's rows behind in a real re-parse.
+  model::ParsedModule reparse;
+  model::SourceFile fa;
+  fa.path = "/tmp/na.hpp";
+  fa.sha256 = std::string(64, 'a');
+  reparse.files.push_back(fa);
+  model::Symbol reopened = ns;
+  reopened.location.file_path = "/tmp/na.hpp";
+  reparse.symbols.push_back(reopened);
+
+  model::RawComment bare;
+  bare.symbol_usr = ns.usr;
+  bare.text = "/** */";
+  reparse.comments.push_back(bare);
+
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(
+        writer.write_tus(reparse, store::Meta::current(), {"/tmp/na.hpp"}));
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  REQUIRE(got.comments.size() == 1);
+  CHECK(got.comments[0].text == "/** */");
+  CHECK(got.comment_fields.empty());
+  CHECK(got.group_members.empty());
+  // The group itself is untouched: only the member's own rows were cleared.
+  REQUIRE(got.groups.size() == 1);
+  CHECK(got.groups[0].title == "Geometry helpers");
+
+  std::remove(path.c_str());
+}
+
+TEST_CASE("SqliteStore leaves the comment fields of symbols a write omits",
+          "[store]") {
+  // The replace above is scoped to the USRs the write actually documents: an
+  // incremental re-parse of one file must not blank out what another file's
+  // symbols carry.
+  std::string path = temp_db_path();
+  {
+    store::SqliteStore writer(path);
+    writer.write(make_module(), store::Meta::current());
+  }
+
+  model::ParsedModule reparse;
+  model::SourceFile f;
+  f.path = "/tmp/other.hpp";
+  f.sha256 = std::string(64, 'b');
+  reparse.files.push_back(f);
+  reparse.symbols.push_back(group_symbol("c:@F@other", "/tmp/other.hpp"));
+
+  model::CommentField brief;
+  brief.symbol_usr = "c:@F@other";
+  brief.name = "brief";
+  brief.value = "Something else.";
+  reparse.comment_fields.push_back(brief);
+
+  {
+    store::SqliteStore writer(path);
+    REQUIRE_NOTHROW(
+        writer.write_tus(reparse, store::Meta::current(), {"/tmp/other.hpp"}));
+  }
+
+  store::SqliteStore reader(path);
+  model::ParsedModule got = reader.read();
+
+  bool has_widget = false;
+  bool has_other = false;
+  for (const auto& field : got.comment_fields) {
+    if (field.symbol_usr == "c:@S@Widget") has_widget = true;
+    if (field.symbol_usr == "c:@F@other") has_other = true;
+  }
+  CHECK(has_widget);
+  CHECK(has_other);
+  CHECK(got.comment_fields.size() == 2);
 
   std::remove(path.c_str());
 }

@@ -460,6 +460,112 @@ def test_structural_block_resolves_the_same_under_any_batching(tmp_path: Path) -
 
 
 @pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_a_shared_namespace_comment_is_recorded_once(tmp_path: Path) -> None:
+    # libclang answers clang_Cursor_getRawCommentText for a redeclaration with
+    # the comment written on another one, so every unit that reaches the header
+    # documenting a namespace sees that comment on its own reopening of it. The
+    # documentation must land in the database once all the same: dune-gdt's
+    # `Dune` page rendered the same block 198 times, once per unit.
+    shared = tmp_path / "shared.hpp"
+    shared.write_text(
+        "#pragma once\n/** \\brief The shared namespace. */\nnamespace shared { struct Thing {}; }\n",
+    )
+    users = []
+    for i in range(6):
+        user = tmp_path / f"user{i}.hpp"
+        user.write_text(f'#pragma once\n#include "shared.hpp"\nnamespace shared {{ int f{i}(); }}\n')
+        users.append(user)
+
+    def briefs(db_name: str, tu_batch: int) -> list[str]:
+        opts = _core.ParseOptions()
+        opts.tu_batch = tu_batch
+        db = tmp_path / db_name
+        _core.parse_to_sqlite([str(shared), *(str(u) for u in users)], str(db), opts)
+        with Store.open(db) as store:
+            usr = next(s.usr for s in store.symbols() if s.qualified_name == "shared")
+            with sqlite3.connect(db) as con:
+                rows = con.execute(
+                    "SELECT value FROM comment_fields WHERE symbol_usr = ? AND name = 'brief'",
+                    (usr,),
+                ).fetchall()
+        return [row[0] for row in rows]
+
+    # tu_batch=1 is the interesting one (a write per header, which is how
+    # dune-gdt builds), but the umbrella path must not regress either.
+    assert briefs("isolated.sqlite", 1) == ["The shared namespace."]
+    assert briefs("batched.sqlite", 0) == ["The shared namespace."]
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_dropping_ingroup_drops_the_membership(tmp_path: Path) -> None:
+    # A namespace is anchored to whichever file declared it first, so an
+    # incremental re-parse of the file that *documents* it does not replace its
+    # symbol row and the per-file delete never reaches its group memberships.
+    # Removing the `\ingroup` then has to clear the membership by itself --
+    # a re-parse contributes no membership row for it, so the write has to know
+    # to clear from the raw comment it recorded, not from the rows it projects.
+    a = tmp_path / "a.hpp"
+    b = tmp_path / "b.hpp"
+    b.write_text("#pragma once\nnamespace demo { int b(); }\n")
+
+    def write_a(*, grouped: bool) -> None:
+        a.write_text(
+            "#pragma once\n"
+            "/** \\defgroup grp Group title\n *  Description.\n */\n"
+            "/** \\brief The demo namespace.\n"
+            + (" *  \\ingroup grp\n" if grouped else "")
+            + " */\nnamespace demo { int a(); }\n",
+        )
+
+    opts = _core.ParseOptions()
+    opts.tu_batch = 1
+    db = tmp_path / "out.sqlite"
+    write_a(grouped=True)
+    _core.parse_to_sqlite([str(a), str(b)], str(db), opts)
+
+    def memberships() -> list[tuple[str, str]]:
+        with sqlite3.connect(db) as con:
+            return [(g, m) for g, m in con.execute("SELECT group_id, member_usr FROM group_members")]
+
+    assert memberships() == [("grp", "c:@N@demo")]
+
+    write_a(grouped=False)
+    _core.parse_tus_to_sqlite([str(a)], str(db), opts)
+    assert memberships() == []
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_a_def_block_is_retargeted_onto_the_macro_it_names(tmp_path: Path) -> None:
+    # `\def` names the macro it documents, so a block carrying it belongs to
+    # that macro wherever it was written -- here below the `#define`, which is
+    # out of reach of the doc-comment-above-the-line scan that macros otherwise
+    # rely on. dune-gdt writes exactly this shape and its macro came out
+    # undocumented.
+    header = tmp_path / "tuple.hpp"
+    header.write_text(
+        "#pragma once\n"
+        "#define TUPLE_TYPEDEFS_2_TUPLE(t_, s_) int\n"
+        "\n"
+        "/**\n"
+        " * \\def TUPLE_TYPEDEFS_2_TUPLE( t_, s_ )\n"
+        " *\n"
+        " * \\brief extracts the types of a tuple's elements.\n"
+        " */\n"
+        "\n"
+        "namespace outer::inner { struct Thing {}; }\n",
+    )
+    db = tmp_path / "out.sqlite"
+    _core.parse_to_sqlite([str(header)], str(db), _core.ParseOptions())
+
+    with Store.open(db) as store:
+        macro = next(s for s in store.symbols() if s.qualified_name == "TUPLE_TYPEDEFS_2_TUPLE")
+        assert macro.kind == SymbolKind.MACRO
+        comment = store.comment(macro.usr)
+        assert comment is not None
+        assert comment.brief == "extracts the types of a tuple's elements."
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
 def test_parse_releases_the_gil(tmp_path: Path) -> None:
     """Another Python thread must keep running while a parse is in flight.
 

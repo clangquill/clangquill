@@ -89,10 +89,11 @@ Doxygen's `ALIASES` are likewise unsupported: an aliased command reaches
 A few Doxygen commands name an entity rather than describe the one they are
 attached to, and clangquill treats them specially.
 
-`\class`, `\struct`, `\union`, `\enum`, `\namespace`, `\fn`, `\var` and
-`\typedef` **retarget** a free-floating block onto the entity they name, which
-is how a library documents a class from a block sitting some distance above it.
-The entity is looked up **within the file the block was written in**, by
+`\class`, `\struct`, `\union`, `\enum`, `\namespace`, `\fn`, `\var`,
+`\typedef` and `\def` **retarget** a free-floating block onto the entity they
+name, which is how a library documents a class from a block sitting some
+distance above it, and how a `\def` block below its `#define` still reaches the
+macro. The entity is looked up **within the file the block was written in**, by
 qualified name and then by unique suffix, filtered to the kind the command
 implies. A name that matches nothing, or more than one thing — a bare `\fn`
 naming an overload set — attaches nothing rather than guessing, and an entity

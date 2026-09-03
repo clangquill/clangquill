@@ -868,7 +868,7 @@ void register_symbol_groups(VisitCtx& ctx, const std::string& usr,
 bool is_structural(const std::string& cmd) {
   return cmd == "class" || cmd == "struct" || cmd == "union" ||
          cmd == "enum" || cmd == "namespace" || cmd == "fn" || cmd == "var" ||
-         cmd == "typedef";
+         cmd == "typedef" || cmd == "def";
 }
 
 // Reduces a structural command's argument to a qualified name.
@@ -910,6 +910,7 @@ bool structural_kind_matches(const std::string& cmd, model::SymbolKind k) {
   if (cmd == "typedef") {
     return k == model::SymbolKind::Typedef || k == model::SymbolKind::TypeAlias;
   }
+  if (cmd == "def") return k == model::SymbolKind::Macro;
   return false;
 }
 
@@ -1457,6 +1458,18 @@ void visit_translation_unit(CXCursor tu_cursor,
   ctx.comment_parser = &comment_parser;
   ctx.main_ids = &main_ids;
   ctx.extract_anonymous_namespaces = options.extract_anonymous_namespaces;
+
+  // record_comment()'s guard has to span the whole module, not just this unit.
+  // One ParsedModule can collect several translation units -- parse_batch()
+  // falls back to parsing the members one by one when the umbrella fails to
+  // build -- and clang_Cursor_getRawCommentText answers for a redeclaration
+  // with the comment written on another one, so a namespace reopened in every
+  // member is documented again in each of them. Seeding the set from what the
+  // module already carries keeps it to one comment (and one set of
+  // comment_fields, and one `\ingroup` membership) per USR, and still marks
+  // the later units' symbols is_documented.
+  documented.reserve(out.comments.size());
+  for (const auto& cm : out.comments) documented.insert(cm.symbol_usr);
 
   // Capture free-floating `\defgroup` blocks first so groups carry their title
   // and description before any `\ingroup` membership creates a stub for them.

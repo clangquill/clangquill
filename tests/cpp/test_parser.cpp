@@ -317,6 +317,65 @@ TEST_CASE("an alias records its underlying type", "[parser]") {
   CHECK(ptr->to_spelling == "T *");
 }
 
+TEST_CASE("one module documents a shared namespace once", "[parser]") {
+  namespace fs = std::filesystem;
+  // Two units both reopen a namespace a third header documents.
+  // clang_Cursor_getRawCommentText answers for a redeclaration with the
+  // comment written on another one, so each unit sees that comment on its own
+  // reopening -- and a module collects more than one unit whenever an umbrella
+  // batch falls back to parsing its members one by one. Recording the comment
+  // per unit put a second copy of the namespace's brief (and of its `\ingroup`
+  // membership) in the module, and everything downstream reads all of them.
+  const fs::path dir = unique_temp_dir("clangquill-shared-namespace-test");
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  std::ofstream(dir / "shared.hpp")
+      << "#pragma once\n"
+      << "/** \\brief The shared namespace.\n"
+      << " *  \\ingroup shared_grp\n"
+      << " */\n"
+      << "namespace shared { struct Thing {}; }\n";
+  std::ofstream(dir / "one.hpp") << "#pragma once\n#include \"shared.hpp\"\n"
+                                 << "namespace shared { int one(); }\n";
+  std::ofstream(dir / "two.hpp") << "#pragma once\n#include \"shared.hpp\"\n"
+                                 << "namespace shared { int two(); }\n";
+
+  parser::ParseOptions opts;
+  parser::Parser p(opts);
+  model::ParsedModule mod;
+  REQUIRE(p.parse_file((dir / "one.hpp").string(), mod));
+  REQUIRE(p.parse_file((dir / "two.hpp").string(), mod));
+
+  const auto* ns = find(mod, "shared");
+  REQUIRE(ns != nullptr);
+  CHECK(ns->is_documented);
+
+  int comments = 0;
+  for (const auto& c : mod.comments) {
+    if (c.symbol_usr == ns->usr) ++comments;
+  }
+  CHECK(comments == 1);
+
+  int briefs = 0;
+  for (const auto& f : mod.comment_fields) {
+    if (f.symbol_usr == ns->usr && f.name == "brief") ++briefs;
+  }
+  CHECK(briefs == 1);
+
+  int memberships = 0;
+  for (const auto& m : mod.group_members) {
+    if (m.member_usr == ns->usr) ++memberships;
+  }
+  CHECK(memberships == 1);
+
+  // Both units' own symbols are still there -- the guard is about the shared
+  // comment, not about the second unit.
+  CHECK(find(mod, "shared::one") != nullptr);
+  CHECK(find(mod, "shared::two") != nullptr);
+
+  fs::remove_all(dir);
+}
+
 TEST_CASE("declarations inside extern \"C\" reach the IR", "[parser]") {
   // extern "C" { ... } is CXCursor_LinkageSpec, which map_kind has no case for
   // and which visit() used to prune -- along with everything declared inside
