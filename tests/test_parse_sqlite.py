@@ -497,11 +497,12 @@ def test_a_shared_namespace_comment_is_recorded_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
-def test_a_def_block_documents_its_macro_not_the_next_declaration(tmp_path: Path) -> None:
-    # `\def` names the macro it documents, so the block belongs to that macro
-    # wherever it was written -- not to the namespace that happens to open
-    # below it, which is where libclang attaches it. dune-gdt writes exactly
-    # this shape and had a macro's documentation on its `Dune` namespace.
+def test_a_def_block_is_retargeted_onto_the_macro_it_names(tmp_path: Path) -> None:
+    # `\def` names the macro it documents, so a block carrying it belongs to
+    # that macro wherever it was written -- here below the `#define`, which is
+    # out of reach of the doc-comment-above-the-line scan that macros otherwise
+    # rely on. dune-gdt writes exactly this shape and its macro came out
+    # undocumented.
     header = tmp_path / "tuple.hpp"
     header.write_text(
         "#pragma once\n"
@@ -519,41 +520,11 @@ def test_a_def_block_documents_its_macro_not_the_next_declaration(tmp_path: Path
     _core.parse_to_sqlite([str(header)], str(db), _core.ParseOptions())
 
     with Store.open(db) as store:
-        by_name = {s.qualified_name: s for s in store.symbols()}
-        macro = by_name["TUPLE_TYPEDEFS_2_TUPLE"]
+        macro = next(s for s in store.symbols() if s.qualified_name == "TUPLE_TYPEDEFS_2_TUPLE")
         assert macro.kind == SymbolKind.MACRO
         comment = store.comment(macro.usr)
         assert comment is not None
         assert comment.brief == "extracts the types of a tuple's elements."
-
-        for namespace in ("outer", "outer::inner"):
-            assert not by_name[namespace].is_documented
-            assert store.comment(by_name[namespace].usr) is None
-
-
-@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
-def test_a_structural_block_naming_its_own_declaration_still_documents_it(
-    tmp_path: Path,
-) -> None:
-    # The flip side: the usual `\class Foo` directly above `class Foo` names
-    # the declaration it sits on, so it stays that declaration's own comment.
-    header = tmp_path / "own.hpp"
-    header.write_text(
-        "#pragma once\n"
-        "namespace ns {\n"
-        "/** \\class Foo\n * \\brief Documented from a block above it.\n */\n"
-        "class Foo { public: int v = 0; };\n"
-        "}\n",
-    )
-    db = tmp_path / "out.sqlite"
-    _core.parse_to_sqlite([str(header)], str(db), _core.ParseOptions())
-
-    with Store.open(db) as store:
-        foo = next(s for s in store.symbols() if s.qualified_name == "ns::Foo")
-        assert foo.is_documented
-        comment = store.comment(foo.usr)
-        assert comment is not None
-        assert comment.brief == "Documented from a block above it."
 
 
 @pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")

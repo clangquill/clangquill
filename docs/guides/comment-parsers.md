@@ -92,20 +92,12 @@ attached to, and clangquill treats them specially.
 `\class`, `\struct`, `\union`, `\enum`, `\namespace`, `\fn`, `\var`,
 `\typedef` and `\def` **retarget** a free-floating block onto the entity they
 name, which is how a library documents a class from a block sitting some
-distance above it. The entity is looked up **within the file the block was
-written in**, by qualified name and then by unique suffix, filtered to the kind
-the command implies. A name that matches nothing, or more than one thing — a
-bare `\fn` naming an overload set — attaches nothing rather than guessing, and
-an entity that carries its own comment always keeps it.
-
-A block that opens with one of these commands documents *only* the entity it
-names: it is not also taken as the documentation of whatever declaration
-happens to follow it. That matters because libclang attaches a comment to the
-next declaration regardless of what the comment says, so a `\def FOO` block
-written between the `#define` and the next `namespace` would otherwise document
-that namespace as well as the macro. A block naming the very declaration it
-sits on — the usual `\class Foo` above `class Foo` — is that declaration's own
-comment as before.
+distance above it, and how a `\def` block below its `#define` still reaches the
+macro. The entity is looked up **within the file the block was written in**, by
+qualified name and then by unique suffix, filtered to the kind the command
+implies. A name that matches nothing, or more than one thing — a bare `\fn`
+naming an overload set — attaches nothing rather than guessing, and an entity
+that carries its own comment always keeps it.
 
 `\relates` is different: it stays on the free function it is written on and
 lists that function under the named class. Because the class is usually in
