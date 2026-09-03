@@ -349,23 +349,32 @@ def test_wide_page_fingerprint_covers_what_content_hash_omits(gen: Generator, st
     assert gen.page_fingerprint(plan_for(symbol), wide=True) != gen.page_fingerprint(plan_for(moved), wide=True)
 
 
-def test_unique_stem_dedupes_case_insensitively() -> None:
-    # `Foo` and `foo` are the same file on macOS/Windows, so they must not
-    # share a stem. The loser is tagged with a digest of its own name, so it
-    # keeps that stem however many other pages are planned and in what order.
-    seen: set[str] = set()
-    assert Generator._unique_stem("Foo", seen) == "Foo"  # noqa: SLF001
-    lower = Generator._unique_stem("foo", seen)  # noqa: SLF001
-    upper = Generator._unique_stem("FOO", seen)  # noqa: SLF001
-    assert lower.startswith("foo_")
-    assert upper.startswith("FOO_")
-    assert len({"foo", lower.casefold(), upper.casefold()}) == 3
+def test_contested_stems_are_tagged_on_every_side(collision_db: Path) -> None:
+    # `Foo` and `foo` are distinct C++ names but the same file on macOS/Windows,
+    # so they must not share a stem -- and *neither* may keep the bare one.
+    # Letting the first-planned name have it would tie that page's URL to where
+    # the walk happened to reach its rival, so adding a name that sorted earlier
+    # would take the URL and rename the page that had it.
+    with Store.open(collision_db) as store:
+        gen = Generator(store)
+        stems = {p.stem for p in gen.plan_pages()}
+        again = {p.stem for p in Generator(store).plan_pages()}
 
-    # Order-independent: planning them the other way round leaves each with the
-    # same stem, minus which one got the bare slug.
-    other: set[str] = set()
-    assert Generator._unique_stem("foo", other) == "foo"  # noqa: SLF001
-    assert Generator._unique_stem("FOO", other) == upper  # noqa: SLF001
+    assert stems == again  # deterministic across runs
+    assert len({s.casefold() for s in stems}) == 3
+    assert "Foo" not in stems
+    assert "foo" not in stems
+    assert {s for s in stems if s.casefold().startswith("foo")} == stems - {
+        s for s in stems if s.casefold().startswith("index")
+    }
+
+
+def test_an_uncontested_stem_stays_bare(spec_gen: Generator) -> None:
+    # The digest is only for names that actually collide; everything else keeps
+    # the readable slug, so this does not churn every URL in a project.
+    stems = {p.stem for p in spec_gen.plan_pages(group_by="namespace")}
+    assert "demo_AdaptationHelper" in stems
+    assert "demo_ContainerFactory_demo_DenseVector_S" in stems
 
 
 def test_conflicting_same_name_declarations_degrade_to_code_blocks(degraded_db: Path, tmp_path: Path) -> None:
@@ -408,8 +417,6 @@ def test_generate_avoids_root_document_and_case_collisions(collision_db: Path, t
     # and `Foo`/`foo` must not collide with each other on a case-insensitive
     # filesystem.
     assert len(pages) == len(set(pages)) == 3
-    assert "Foo" in pages
-    lower = next(p for p in pages if p != "Foo" and p.casefold().startswith("foo"))
     index_stem = next(p for p in pages if p.casefold().startswith("index"))
     assert index_stem != "index"  # must not collide with the toctree root
     index = (out / "index.md").read_text()
@@ -418,7 +425,10 @@ def test_generate_avoids_root_document_and_case_collisions(collision_db: Path, t
     index_page = (out / f"{index_stem}.md").read_text()
     assert index_page.startswith("# Function `index`")
     assert "{cpp:function} void index()" in index_page
-    assert "{cpp:function} void foo()" in (out / f"{lower}.md").read_text()
+    # `Foo` and `foo` both got a stem; the pages behind them are the right ones.
+    bodies = {(out / f"{p}.md").read_text() for p in pages if p.casefold().startswith("foo")}
+    assert any("{cpp:function} void foo()" in body for body in bodies)
+    assert any("{cpp:function} void Foo()" in body for body in bodies)
 
 
 def test_group_stem_matches_planned_stem_after_dedup(m7_db: Path) -> None:
@@ -1173,6 +1183,33 @@ def test_an_overlong_stem_is_truncated_and_hashed() -> None:
     assert len(first) == _MAX_STEM
     assert first != second
     assert _stem(prefix + "int>") == first  # stable across calls
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_a_new_colliding_name_leaves_the_others_stems_alone(tmp_path: Path) -> None:
+    # A name that goes from unique to contested must change stem -- there is no
+    # way to both give a lone name the readable slug and keep it when a rival
+    # turns up. What must *not* happen is the rest moving too: with the bare
+    # stem going to whichever name the walk reached first, adding one that came
+    # earlier took the URL and renamed the page that held it. Here `Zed` is
+    # declared ahead of both incumbents, which is that case exactly.
+    def stems(name: str, extra: str) -> dict[str, str]:
+        header = tmp_path / name
+        header.write_text(f"#pragma once\nnamespace t {{\n{extra}struct Foo {{}};\nstruct foo {{}};\n}}\n")
+        db = tmp_path / f"{name}.sqlite"
+        opts = _core.ParseOptions()
+        opts.std_flag = "c++17"
+        _core.parse_to_sqlite([str(header)], str(db), opts)
+        with Store.open(db) as store:
+            return {p.label: p.stem for p in Generator(store).plan_pages(group_by="namespace")}
+
+    before = stems("before.hpp", "")
+    after = stems("after.hpp", "struct FOO {};\n")
+
+    assert "t::FOO" in after  # the newcomer really is in the same collision set
+    assert set(after) - set(before) == {"t::FOO"}
+    for label, stem in before.items():
+        assert after[label] == stem, label
 
 
 @pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")

@@ -507,6 +507,12 @@ class Generator:
         # :meth:`group_stem`): dedup can suffix the natural slug, and the
         # subgroup links templates render must point at the planned page.
         self._group_stems: dict[str, str] = {}
+        # Set while :meth:`plan_pages` runs its discovery pass: every bare stem
+        # asked for, mapped to the names that asked. Afterwards `_contested`
+        # holds the stems more than one name wanted, and stays set for the real
+        # pass. See :meth:`_unique_stem`.
+        self._stem_claims: dict[str, set[str]] | None = None
+        self._contested: frozenset[str] = frozenset()
         # Lazily built by `related`; None until a record page first asks.
         self._related_by_name: dict[str, list[Symbol]] | None = None
         # Template objects (and the two partial macros below) are immutable for
@@ -1175,7 +1181,23 @@ class Generator:
         One ``seen`` set spans the symbol/file/class/namespace pages *and* the
         group pages, so no two planned pages can ever share a filename.
         """
-        seen = {stem.casefold() for stem in reserved_stems}
+        reserved = {stem.casefold() for stem in reserved_stems}
+        # Two passes, because which names collide is not knowable while walking:
+        # the first records what every page asks for and decides nothing, the
+        # second assigns. Without it the *first* name to want a contested stem
+        # keeps the bare one and the rest are tagged, so a page's URL depends on
+        # where its rival happened to fall in the walk -- and adding a
+        # specialization that sorts earlier would rename the page it displaced.
+        # Costs no queries: the walk reads the store's in-memory symbol index.
+        self._stem_claims = {}
+        self._contested = frozenset()
+        self._walk_pages(group_by, set(reserved))
+        self._contested = frozenset(stem for stem, names in self._stem_claims.items() if len(names) > 1)
+        self._stem_claims = None
+        return self._walk_pages(group_by, reserved)
+
+    def _walk_pages(self, group_by: str, seen: set[str]) -> list[PagePlan]:
+        """Run the planner ``group_by`` selects, threading one ``seen`` set."""
         if group_by == "file":
             plans = self._plan_file_pages(seen)
         elif group_by == "class":
@@ -1724,8 +1746,7 @@ class Generator:
             for member in self.group_symbols(group)
         )
 
-    @staticmethod
-    def _unique_stem(name: str, seen: set[str]) -> str:
+    def _unique_stem(self, name: str, seen: set[str]) -> str:
         """Return a unique page stem for ``name``, recording it in ``seen``.
 
         ``seen`` holds casefolded stems and the comparison is case-insensitive:
@@ -1733,17 +1754,24 @@ class Generator:
         case-insensitive filesystem (macOS/Windows), so they must not share a
         stem or the second page silently overwrites the first.
 
-        A collision is broken with a digest of the colliding *name*, not by
-        appending to the stem. Slugging is lossy — ``Duo<C>`` and ``Duo<C*>``
-        both reduce to ``Duo_C`` — and a positional tie-break gives the second
-        page a name that says nothing and, worse, belongs to whichever page
-        happens to be planned second: adding one specialization would then
-        rename its siblings and break every link to them. The digest is a
-        property of the name alone, so a page keeps its stem no matter what
-        else is planned. The loop below remains as a last resort.
+        Contested stems are settled with a digest of each name, *all* of them —
+        nobody keeps the bare stem. Slugging is lossy (``Duo<C>`` and
+        ``Duo<C*>`` both reduce to ``Duo_C``), and letting one of them keep the
+        bare stem would make that page's URL depend on the order the walk
+        reached it: adding a specialization that came earlier would take the
+        URL and rename the page that had it. A digest is a property of the name
+        alone, so every page keeps its stem across rebuilds whatever else is
+        planned. Which stems are contested is settled before this runs, by
+        :meth:`plan_pages`' discovery pass.
+
+        The loop below is the last resort: a name colliding with a *reserved*
+        stem (deterministic, since the caller fixes those), and the vanishingly
+        unlikely digest collision.
         """
         stem = _stem(name)
-        if stem.casefold() in seen:
+        if self._stem_claims is not None:  # discovery pass: record, decide nothing
+            self._stem_claims.setdefault(stem.casefold(), set()).add(name)
+        elif stem.casefold() in self._contested:
             stem = _stem(name, tag=_digest(name))
         while stem.casefold() in seen:
             stem += "_"
