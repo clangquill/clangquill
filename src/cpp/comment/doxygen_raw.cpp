@@ -165,6 +165,12 @@ std::string fenced_block(const std::string& kind, const std::string& language,
 // one-line summary, so it must not be promoted to the brief.
 bool is_fenced_block(const std::string& s) { return s.rfind("```", 0) == 0; }
 
+// A lead paragraph that is a block rather than a sentence: a fenced code block
+// or a bullet list. Neither is ever a one-line summary.
+bool is_block_paragraph(const std::string& s) {
+  return is_fenced_block(s) || s.rfind("- ", 0) == 0;
+}
+
 // Doxygen's inline commands: markup that decorates the next word inside a
 // sentence rather than opening a block. Each maps to the MyST that says the
 // same thing -- `\c x` is a code span, `\ref X` a cross-reference role -- so the
@@ -394,14 +400,20 @@ bool takes_line(const std::string& cmd) {
 }
 
 // Commands that take no argument at all. `\internal` marks the text after it as
-// internal documentation and `\li` is a list marker, so everything following
-// them is the entity's own prose.
+// internal documentation, so everything following it is the entity's own prose.
 bool takes_nothing(const std::string& cmd) {
   // `\code`/`\verbatim` are NOT here: they open a block that parse_raw reads
   // line by line, and their `\end...` is consumed by that block. These entries
   // only catch a stray terminator with no block open.
   return cmd == "internal" || cmd == "endinternal" || cmd == "endcode" ||
-         cmd == "endverbatim" || cmd == "li" || cmd == "arg";
+         cmd == "endverbatim";
+}
+
+// Doxygen's bullet-list item commands. Each takes the rest of its paragraph as
+// the item text, and a run of them is one list (issue #344), which parse_raw
+// collects into a single Markdown detail entry.
+bool is_list_item(const std::string& cmd) {
+  return cmd == "li" || cmd == "arg";
 }
 
 bool takes_single_name(const std::string& cmd) {
@@ -418,8 +430,8 @@ bool raw_has_unroutable_command(const std::string& raw) {
   static const char* const kCmds[] = {
       "ingroup",   "defgroup", "addtogroup",  "class",       "struct",
       "union",     "enum",     "namespace",   "fn",          "var",
-      "typedef",   "relates",  "internal",    "li",          "copydoc",
-      "copybrief", "copydetails"};
+      "typedef",   "relates",  "internal",    "li",          "arg",
+      "copydoc",   "copybrief", "copydetails"};
   // The copy commands are here for a third reason: libclang's tree models
   // `\copydoc other::f` as *inline* markup, so the command disappears and the
   // entity it names is left sitting in the middle of the prose ("Sorts a range
@@ -567,15 +579,15 @@ void route_command(model::CommentModel& m, const std::string& name,
 
 // Promotes the leading free-text paragraphs into brief/detail. With an explicit
 // @brief the lead paragraphs are all detail; otherwise the first prose
-// paragraph is the brief. A verbatim block is skipped over rather than
-// promoted: it is never a one-line summary, and a comment that opens with a
-// code example would otherwise have no brief at all.
+// paragraph is the brief. A verbatim block or a bullet list is skipped over
+// rather than promoted: neither is a one-line summary, and a comment that opens
+// with a code example or a `\li` run would otherwise have no brief at all.
 void apply_lead(model::CommentModel& m, const std::vector<std::string>& lead,
                 bool explicit_brief) {
   std::size_t brief_at = lead.size();
   if (!explicit_brief) {
     for (std::size_t i = 0; i < lead.size(); ++i) {
-      if (!is_fenced_block(lead[i])) {
+      if (!is_block_paragraph(lead[i])) {
         brief_at = i;
         break;
       }
@@ -687,9 +699,33 @@ model::CommentModel parse_raw(const std::string& raw) {
   std::string verbatim_language;
   std::vector<std::string> verbatim_lines;
 
+  std::vector<std::string> items;  // open run of `\li`/`\arg` (empty => none)
+
+  // Emits the collected items as one Markdown bullet list, in its place among
+  // the prose paragraphs. Doxygen ends the list at a blank line or a command
+  // that is not another item, so every caller that breaks the run calls this.
+  auto close_list = [&]() {
+    if (items.empty()) return;
+    std::string block;
+    for (const std::string& item : items) {
+      if (!block.empty()) block += '\n';
+      block += "- ";
+      block += item;
+    }
+    lead.push_back(std::move(block));
+    items.clear();
+  };
+
   auto flush = [&]() {
     std::string text = render_inline_markup(normalize_ws(buf));
     buf.clear();
+    if (is_list_item(cmd)) {
+      if (!text.empty()) items.push_back(text);
+      cmd.clear();
+      dir.clear();
+      return;
+    }
+    close_list();
     if (cmd.empty()) {
       if (!text.empty()) lead.push_back(text);
       have_lead_para = false;
@@ -801,6 +837,7 @@ model::CommentModel parse_raw(const std::string& raw) {
         // `\param` -- letting them run on put a symbol's entire detailed
         // description inside its one-line summary.
         if (!cmd.empty() || have_lead_para) flush();
+        close_list();
         continue;
       }
       // A command that does not take a paragraph already has its argument, so
@@ -814,6 +851,7 @@ model::CommentModel parse_raw(const std::string& raw) {
   // An unterminated block still carries documentation; keep what it holds.
   if (!verbatim.empty()) close_verbatim();
   flush();
+  close_list();
 
   apply_lead(m, lead, explicit_brief);
   return m;
