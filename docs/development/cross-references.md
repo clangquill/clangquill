@@ -53,6 +53,42 @@ for a nested class, a member type alias and a static data member, and the
 qualification has to be applied at every enclosing level, not just the innermost
 (`template<typename T> void xr::Outer<T>::Inner::go()`).
 
+**An enum is the exception, and gets a pushed scope instead.** `cpp:enum` accepts
+no template parameter list at all: with a head the directive is a parse error,
+without one the enum lands under that second, plain symbol. `cpp:namespace-push`
+*does* take a head, so clangquill pushes the enclosing scope, declares the enum
+by its bare name inside it, and pops:
+
+````{code-block} markdown
+:caption: what puts the enum in the class template's scope
+
+```{cpp:namespace-push} template<typename T> xr::Holder
+```
+
+```{cpp:enum} Mode
+```
+
+```{cpp:enumerator} Mode::Eager
+```
+
+```{cpp:namespace-pop}
+```
+````
+
+Two details are load-bearing. The pushed name **drops the argument list of its
+own last component** (`xr::Holder`, not `xr::Holder<T>`) when that component is a
+primary template: the domain rewrites a primary's arguments to nothing before
+filing it, but only for the *intermediate* components of a name, never the last,
+so a trailing `<T>` would open a second symbol — the very bug being avoided. A
+specialization is filed under its spelled-out name and therefore keeps its
+arguments (`template<> xr::Traits<int>`). Every *enclosing* level keeps its
+arguments as usual (`template<typename T> template<typename U> xr::Outer<T>::Inner`).
+
+And the push only merges into a class **declared before it**, for the same
+last-component reason in reverse. That holds because a nested enum renders on its
+parent's own page, below the parent's directive; an enum whose enclosing scopes
+are all plain is emitted under its qualified name as before, with no push at all.
+
 ## Known-unresolvable shapes
 
 These are the shapes no output clangquill could emit would make resolvable. The
@@ -84,12 +120,6 @@ rather than spelling out a head that moves with the LLVM version:
 ```python
 nitpick_ignore_regex = [("cpp:identifier", r"template<.*> my_ns::\w+<.*>::\w+(?:<.*>)?")]
 ```
-
-**An enum nested in a class template.** `cpp:enum` accepts no template parameter
-list, so such an enum cannot be declared in its real scope at all: with a head it
-is a parse error, without one it lands under a second, plain symbol, and neither
-the enum nor its enumerators can be linked to. clangquill emits the head-less
-form, which at least documents the enum on the page.
 
 **A conversion operator, as a `\ref` target.** Doxygen's `\ref` argument ends at
 the first space and `operator bool` has one, so the target can only ever be

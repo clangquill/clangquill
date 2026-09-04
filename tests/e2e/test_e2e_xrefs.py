@@ -73,6 +73,8 @@ HARD_TARGETS = {
     "xr::Buffer::Cursor": "class nested in a class template",
     "xr::Buffer::Cursor::offset": "member of that nested class",
     "xr::Buffer::Cursor::advance": "method of that nested class",
+    "xr::Buffer::Growth": "enum nested in a class template",
+    "xr::Buffer::Growth::Eager": "enumerator of that nested enum",
     "xr::Traits": "primary template that has specializations",
     "xr::Traits::describe": "method of that primary template",
     "xr::is_foo_v": "variable template",
@@ -94,6 +96,8 @@ HARD_TARGETS = {
     "xr::Outer::Inner": "class template nested in a class template",
     "xr::Outer::Inner::value": "member of that nested class template",
     "xr::Outer::Inner::get": "method of that nested class template",
+    "xr::Outer::Inner::Hold": "enum nested in a class template nested in a class template",
+    "xr::Outer::Inner::Hold::Value": "enumerator of that doubly nested enum",
 }
 
 CONF = """
