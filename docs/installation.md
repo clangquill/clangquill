@@ -25,7 +25,7 @@ you through the process.
 (from the official LLVM release), so parsing works out of the box with no system
 LLVM required — `c++20`/`c++23`/`c++26` are all supported (see the
 [`std` configuration note](guides/configuration.md)). Because that libclang
-needs **glibc ≥ 2.34** (manylinux_2_34), the wheels install on reasonably recent
+needs **glibc ≥ 2.35** (manylinux_2_35), the wheels install on reasonably recent
 Linux distributions; on older systems, build from source against your own
 libclang instead.
 ```

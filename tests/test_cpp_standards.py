@@ -34,7 +34,7 @@ struct Widget {
 """
 
 # A function template using C++26 pack indexing, which needs a recent clang. We
-# gate on the project's target of version twenty-two to match the docs dogfood.
+# gate on the project's target of version twenty-three to match the docs dogfood.
 CPP26_SRC = """
 /// First element of a parameter pack (C++26 pack indexing).
 template <typename... Ts>

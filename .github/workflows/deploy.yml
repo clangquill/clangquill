@@ -45,13 +45,25 @@ jobs:
                   # (cmake/VcpkgBootStrap.cmake), into a .vcpkg-checkout
                   # reused by every build in the container.
                   # libclang is now bundled from the official LLVM release per
-                  # ADR-0001 (self-contained libclang.so; needs manylinux_2_34).
+                  # ADR-0001 (self-contained libclang.so; needs manylinux_2_35).
           CIBW_BUILD: cp311-* cp312-* cp313-*
           CIBW_SKIP: '*-musllinux*'
           CIBW_ARCHS_LINUX: ${{ matrix.arch }}
           CIBW_BUILD_VERBOSITY: '1'
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_34
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_34
+                  # LLVM 23's release libclang imports
+                  # std::condition_variable::wait at GLIBCXX_3.4.30 (GCC 12),
+                  # which auditwheel's manylinux_2_34 policy caps at 3.4.29, so
+                  # the wheel is repaired to manylinux_2_35 -- the lowest policy
+                  # that allows it (see ADR-0001). The *build* image stays
+                  # manylinux_2_34: it is the newest pypa publishes for
+                  # x86_64/aarch64, and the bundled libclang is a prebuilt
+                  # binary the image's own GCC never touches. Only the declared
+                  # floor moves, glibc 2.34 -> 2.35.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            auditwheel repair --plat manylinux_2_35_${{ matrix.arch }}
+            -w {dest_dir} {wheel}
                   # manylinux_2_28 ships unzip/tar/curl but not zip, which
                   # vcpkg's bootstrap requires; install it (a vcpkg build
                   # prerequisite, not a C++ dependency) up front.
@@ -74,10 +86,25 @@ jobs:
             SKBUILD_CMAKE_DEFINE="CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/opt/libclang"
             X_VCPKG_ASSET_SOURCES="clear;x-script,/opt/vcpkg-asset-fetch.sh {url}
             {sha512} {dst}"
-          CIBW_TEST_COMMAND: >-
-            python -c "from clangquill import _core;
-            assert _core.have_libclang();
-            print(_core.__core_version__, _core.libclang_version())"
+          # A manylinux_2_35 wheel cannot be installed in the manylinux_2_34
+          # image that built it — pip there sees glibc 2.34 and rejects the tag,
+          # and the GLIBCXX_3.4.30 import would fail even if it did not. So the
+          # in-container test is skipped and the identical check runs in the
+          # step below instead.
+          CIBW_TEST_SKIP: '*-manylinux_*'
+      - name: Verify the repaired wheel outside the build image
+          # Debian 12 (glibc 2.36) clears the wheel's 2.35 floor and ships no
+          # system LLVM, so importing `_core` here proves the wheel carries a
+          # working libclang of its own before anything is published.
+        run: >-
+          docker run --rm -v "$PWD:/work" -w /work python:3.13-slim-bookworm
+          bash -ec '
+          for w in wheelhouse/*.whl; do
+          python -m pip install --force-reinstall "$w";
+          python -c "from clangquill import _core;
+          assert _core.have_libclang();
+          print(_core.__core_version__, _core.libclang_version())";
+          done'
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: wheels-linux-${{ matrix.arch }}

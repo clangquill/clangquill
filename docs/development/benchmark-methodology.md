@@ -164,7 +164,7 @@ tagged checkout** rather than installing a previously released wheel — an
 earlier setup that measured the last PyPI release would attribute stale numbers
 to a new tag and report the wrong version string entirely.
 
-The build links against LLVM 22 from `apt.llvm.org`, the same libclang major the
+The build links against LLVM 23 from `apt.llvm.org`, the same libclang major the
 release wheels bundle, so parse coverage and timing are representative of what
 users get; a fail-fast assertion rejects the run if the core silently linked an
 older distro libclang. The harness records the resolved tool versions, libclang

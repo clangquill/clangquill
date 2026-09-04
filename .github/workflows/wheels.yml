@@ -40,7 +40,7 @@ jobs:
                   # (cmake/VcpkgBootStrap.cmake), into a .vcpkg-checkout
                   # reused by every build in the container.
                   # libclang is now bundled from the official LLVM release per
-                  # ADR-0001 (self-contained libclang.so; needs manylinux_2_34).
+                  # ADR-0001 (self-contained libclang.so; needs manylinux_2_35).
                   # A single cp313 build covers every later interpreter: `_core`
                   # is built with nanobind STABLE_ABI, which nanobind pins to
                   # Py_LIMITED_API 3.12 regardless of the build interpreter, so
@@ -54,6 +54,18 @@ jobs:
           CIBW_BUILD_VERBOSITY: '1'
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_34
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_34
+                  # LLVM 23's release libclang imports
+                  # std::condition_variable::wait at GLIBCXX_3.4.30 (GCC 12),
+                  # which auditwheel's manylinux_2_34 policy caps at 3.4.29, so
+                  # the wheel is repaired to manylinux_2_35 -- the lowest policy
+                  # that allows it (see ADR-0001). The *build* image stays
+                  # manylinux_2_34: it is the newest pypa publishes for
+                  # x86_64/aarch64, and the bundled libclang is a prebuilt
+                  # binary the image's own GCC never touches. Only the declared
+                  # floor moves, glibc 2.34 -> 2.35.
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            auditwheel repair --plat manylinux_2_35_${{ matrix.arch }}
+            -w {dest_dir} {wheel}
                   # manylinux_2_28 ships unzip/tar/curl but not zip, which
                   # vcpkg's bootstrap requires; install it (a vcpkg build
                   # prerequisite, not a C++ dependency) up front.
@@ -76,20 +88,33 @@ jobs:
             SKBUILD_CMAKE_DEFINE="CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/opt/libclang"
             X_VCPKG_ASSET_SOURCES="clear;x-script,/opt/vcpkg-asset-fetch.sh {url}
             {sha512} {dst}"
+          # A manylinux_2_35 wheel cannot be installed in the manylinux_2_34
+          # image that built it — pip there sees glibc 2.34 and rejects the tag,
+          # and the GLIBCXX_3.4.30 import would fail even if it did not. So the
+          # in-container test is skipped and the identical suite runs in the
+          # step below instead.
+          CIBW_TEST_SKIP: '*-manylinux_*'
+      - name: Test the repaired wheel outside the build image
           # The wheel is tested by the real suite, not an import smoke:
           # aarch64 ships to users on the strength of this run, and a
           # parse-heavy suite is what exercises the paths that actually differ
           # per platform. The `_core` assert stays in front of it because every
           # parser test is skipped (not failed) when libclang is missing, so
           # pytest alone could go green on a wheel that bundles nothing.
-          CIBW_TEST_REQUIRES: >-
-            pytest pytest-cov pytest-datadir pytest-regressions sphinx
-            myst-parser
-          CIBW_TEST_COMMAND: >-
-            python -c "from clangquill import _core;
-            assert _core.have_libclang();
-            print(_core.__core_version__, _core.libclang_version())" &&
-            pytest {project}/tests
+          # Debian 12 (glibc 2.36) clears the wheel's 2.35 floor and ships no
+          # system LLVM, so this also proves the bundled libclang stands alone.
+          # The slim image also ships no git, which the benchmark-harness tests
+          # shell out to; the manylinux image had it, so it is installed here.
+        run: >-
+          docker run --rm -v "$PWD:/work" -w /work python:3.13-slim-bookworm
+          bash -ec '
+          apt-get -qq update && apt-get -qq install -y --no-install-recommends git;
+          python -m pip install wheelhouse/*.whl pytest pytest-cov
+          pytest-datadir pytest-regressions sphinx myst-parser;
+          python -c "from clangquill import _core;
+          assert _core.have_libclang();
+          print(_core.__core_version__, _core.libclang_version())";
+          pytest tests'
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: wheels-${{ matrix.os }}
@@ -190,32 +215,42 @@ jobs:
               # the wheel, so this one install lifts the metadata guard — it
               # tests the ABI claim, not the support claim.
         python: [cp312, cp313, cp314]
+              # Debian 12 (glibc 2.36), not a manylinux image: the wheel now
+              # declares manylinux_2_35, and pypa publishes no 2_35 image for
+              # x86_64/aarch64 (2_35 is armv7l-only, 2_39 aarch64/riscv64), so
+              # pip in the 2_34 image would refuse the wheel outright. 2.36 sits
+              # one notch above the declared floor rather than exactly on it —
+              # what this job proves is unchanged either way: a clean image with
+              # no system LLVM installs the wheel and parses with the libclang
+              # it bundles.
         include:
           - os: ubuntu-24.04
             arch: x86_64
-            image: quay.io/pypa/manylinux_2_34_x86_64
           - os: ubuntu-24.04-arm
             arch: aarch64
-            image: quay.io/pypa/manylinux_2_34_aarch64
           - python: cp312
+            image: python:3.12-slim-bookworm
             pip_flags: --ignore-requires-python
+          - python: cp313
+            image: python:3.13-slim-bookworm
+          - python: cp314
+            image: python:3.14-slim-bookworm
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/download-artifact@v8
         with:
           name: wheels-${{ matrix.os }}
           path: dist
-            # Install the wheel in a clean glibc-2.34 image that has no system
-            # LLVM and parse a header — proves the bundled libclang is
-            # self-contained (the build-time CIBW test runs with libclang still
-            # on LD_LIBRARY_PATH, which this deliberately does not).
+            # Install the wheel in a clean image that has no system LLVM and
+            # parse a header — proves the bundled libclang is self-contained
+            # (the build-time CIBW test runs with libclang still on
+            # LD_LIBRARY_PATH, which this deliberately does not).
       - name: Install wheel and parse in ${{ matrix.image }} (${{ matrix.python }})
         run: >-
           docker run --rm -v "$PWD:/work" -w /work ${{ matrix.image }}
           bash -ec '
-          py=/opt/python/${{ matrix.python }}-${{ matrix.python }}/bin/python;
-          "$py" -m pip install ${{ matrix.pip_flags }} dist/*.whl;
-          "$py" tools/ci/smoke_test.py'
+          python -m pip install ${{ matrix.pip_flags }} dist/*.whl;
+          python tools/ci/smoke_test.py'
   smoke_test_windows:
     name: Smoke-test wheel on windows/AMD64 (${{ matrix.python-version }})
     needs: build_wheels_windows

@@ -73,18 +73,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends doxygen
-      - name: Install build dependencies (LLVM 22)
+      - name: Install build dependencies (LLVM 23)
         # The benchmark must measure the code being tagged, not a previously
-        # published wheel, so the core is built from this checkout. LLVM 22
+        # published wheel, so the core is built from this checkout. LLVM 23
         # matches the libclang major bundled into release wheels (the distro
         # libclang is older and would skew parse coverage/timings).
         # Use the repository-controlled installer (pinned key fingerprint +
-        # pinned llvm-toolchain-<codename>-22 suite) rather than executing the
+        # pinned llvm-toolchain-<codename>-23 suite) rather than executing the
         # mutable upstream helper script.
         # sqlite3 and nlohmann-json are not installed from apt: they come from
         # vcpkg, which the CMake build bootstraps itself.
         run: |
-          bash tools/ci/install-llvm-22-apt.sh
+          bash tools/ci/install-llvm-apt.sh
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
       - name: Set up Python
@@ -100,7 +100,7 @@ jobs:
         # checkout build installed is recorded so the run step can verify the
         # benchmark actually measures it (see below).
         env:
-          SKBUILD_CMAKE_DEFINE: CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/usr/lib/llvm-22
+          SKBUILD_CMAKE_DEFINE: CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/usr/lib/llvm-23
           # sqlite.org 403s vcpkg's default downloader, so distfiles go through
           # a browser-User-Agent script (SHA512 is still checked by vcpkg).
           X_VCPKG_ASSET_SOURCES: >-
@@ -109,7 +109,7 @@ jobs:
         run: |
           uv sync --frozen --project benchmarks
           uv pip install --python benchmarks/.venv/bin/python --reinstall-package clangquill .
-          benchmarks/.venv/bin/python -c "from clangquill._libclang import libclang_major; assert (libclang_major() or 0) >= 22, libclang_major()"
+          benchmarks/.venv/bin/python -c "from clangquill._libclang import libclang_major; assert (libclang_major() or 0) >= 23, libclang_major()"
           built=$(benchmarks/.venv/bin/python -c "import importlib.metadata as m; print(m.version('clangquill'))")
           echo "Built clangquill $built from the checkout"
           echo "CLANGQUILL_BUILT_VERSION=$built" >> "$GITHUB_ENV"
