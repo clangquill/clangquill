@@ -1381,6 +1381,9 @@ def test_enum_outside_a_template_needs_no_pushed_scope(gen: Generator, store: St
         ("template<typename T, int N = 4>", ["T", "N"]),
         ("template<typename... Ts>", ["Ts"]),
         ("template<template<typename, typename> class C, class D = Pair<int, int>>", ["C", "D"]),
+        # A class-type non-type parameter may default to a braced initializer,
+        # whose comma is no more a separator than the ones inside the ``<>``.
+        ("template<class T, std::array<int, 2> A = {1, 2}>", ["T", "A"]),
         ("template<>", []),
     ],
 )
@@ -1388,6 +1391,25 @@ def test_template_param_names_splits_at_top_level_only(head: str, names: list[st
     from clangquill.generator import _template_param_names  # noqa: PLC0415
 
     assert _template_param_names(head) == names
+
+
+def test_braced_default_does_not_make_a_primary_template_look_specialized() -> None:
+    # A comma split out of a braced default leaves a phantom, unnamed parameter,
+    # so the parameter names no longer match the argument list and the primary
+    # template is mistaken for a specialization -- which would push its scope as
+    # ``Holder<T, A>`` and file the enum under a second symbol, the very bug
+    # issue #336 fixed.
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from clangquill.generator import _scope_suffix  # noqa: PLC0415
+
+    head = "template<class T, std::array<int, 2> A = {1, 2}>"
+
+    def holder(display_name: str) -> SimpleNamespace:
+        return SimpleNamespace(spelling="Holder", display_name=display_name, signature=head)
+
+    assert _scope_suffix(holder("Holder<T, A>")) == ""
+    assert _scope_suffix(holder("Holder<int, A>")) == "<int, A>"
 
 
 def test_variable_template_declaration_carries_its_head(spec_gen: Generator, spec_store: Store) -> None:

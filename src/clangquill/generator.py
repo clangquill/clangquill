@@ -215,19 +215,22 @@ def _spec_suffix(symbol: Symbol) -> str:
 
 
 def _split_top_level(text: str) -> list[str]:
-    """Split ``text`` on commas that are not inside ``<>``, ``()`` or ``[]``.
+    """Split ``text`` on commas that are not inside ``<>``, ``()``, ``[]`` or ``{}``.
 
     A template parameter list nests -- ``template<typename, typename> class C``
     is *one* parameter, ``= Pair<int, int>`` one default -- so a plain
-    ``str.split(",")`` cuts them in half.
+    ``str.split(",")`` cuts them in half. Braces count for the same reason: a
+    class-type non-type parameter may default to a braced initializer
+    (``std::array<int, 2> A = {1, 2}``), whose comma is no more a separator than
+    the one inside the ``<>``.
     """
     parts: list[str] = []
     depth = 0
     start = 0
     for i, ch in enumerate(text):
-        if ch in "<([":
+        if ch in "<([{":
             depth += 1
-        elif ch in ">)]":
+        elif ch in ">)]}":
             depth -= 1
         elif ch == "," and depth == 0:
             parts.append(text[start:i])
