@@ -21,6 +21,14 @@ class Buffer {
   /// Returns the first element.
   T front() const { return data[0]; }
 
+  /// How the buffer grows.
+  enum class Growth {
+    /// Grow eagerly.
+    Eager,
+    /// Grow lazily.
+    Lazy,
+  };
+
   /// A cursor into the buffer.
   struct Cursor {
     /// The current offset.
@@ -127,7 +135,8 @@ int overloaded(int a, int b);
 /// method \ref xr::Buffer::front, its member alias \ref xr::Buffer::value_type,
 /// its static member \ref xr::Buffer::capacity, its nested class
 /// \ref xr::Buffer::Cursor, that class's member \ref xr::Buffer::Cursor::offset
-/// and its method \ref xr::Buffer::Cursor::advance.
+/// and its method \ref xr::Buffer::Cursor::advance; its nested enum
+/// \ref xr::Buffer::Growth with \ref xr::Buffer::Growth::Eager.
 ///
 /// Primary template \ref xr::Traits and its member \ref xr::Traits::describe.
 ///
@@ -166,13 +175,20 @@ struct Outer {
 
     /// Returns the member.
     U get() const { return value; }
+
+    /// How the inner holds.
+    enum class Hold {
+      /// Hold by value.
+      Value,
+    };
   };
 };
 
 /// Links to the nested-template shapes.
 ///
 /// The outer \ref xr::Outer, the inner \ref xr::Outer::Inner, its member
-/// \ref xr::Outer::Inner::value and its method \ref xr::Outer::Inner::get.
+/// \ref xr::Outer::Inner::value, its method \ref xr::Outer::Inner::get and its
+/// nested enum \ref xr::Outer::Inner::Hold with \ref xr::Outer::Inner::Hold::Value.
 void nested_hub();
 
 }  // namespace xr

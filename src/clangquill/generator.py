@@ -214,6 +214,79 @@ def _spec_suffix(symbol: Symbol) -> str:
     return suffix if suffix.startswith("<") else ""
 
 
+def _split_top_level(text: str) -> list[str]:
+    """Split ``text`` on commas that are not inside ``<>``, ``()`` or ``[]``.
+
+    A template parameter list nests -- ``template<typename, typename> class C``
+    is *one* parameter, ``= Pair<int, int>`` one default -- so a plain
+    ``str.split(",")`` cuts them in half.
+    """
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(text):
+        if ch in "<([":
+            depth += 1
+        elif ch in ">)]":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+#: The trailing identifier of a template parameter, i.e. the name it declares.
+_PARAM_NAME_RE = re.compile(r"(\w+)\s*$")
+
+
+def _template_param_names(head: str) -> list[str]:
+    """Return the names a ``template<...>`` head declares, in order.
+
+    ``template<typename T, int N = 4>`` gives ``["T", "N"]``. A parameter names
+    itself with the last identifier before its default, whatever precedes it
+    (``typename``, a type, another ``template<...> class``), and a pack
+    (``typename... Ts``) names itself without the ellipsis. An unnamed parameter
+    contributes ``""``, which no argument list can match -- exactly the answer
+    :func:`_scope_suffix` wants there.
+    """
+    open_bracket = head.find("<")
+    close_bracket = head.rfind(">")
+    if open_bracket < 0 or close_bracket < open_bracket:
+        return []
+    names = []
+    for param in _split_top_level(head[open_bracket + 1 : close_bracket]):
+        declarator = param.split("=", 1)[0]
+        match = _PARAM_NAME_RE.search(declarator)
+        names.append(match.group(1) if match else "")
+    return names
+
+
+def _scope_suffix(symbol: Symbol) -> str:
+    """Return the ``<...>`` a *pushed* scope keeps for ``symbol``.
+
+    A specialization keeps its arguments (``Traits<int>``); a primary template
+    drops them (``Buffer``, not ``Buffer<T, N>``). That asymmetry is the C++
+    domain's: it stores a declaration whose arguments merely repeat its
+    parameter names under the bare name, and only a genuine specialization under
+    the spelled-out one -- but it applies that correction only to the
+    *intermediate* components of a name, never to the last. A ``cpp:namespace``
+    whose last component is a primary template must therefore be spelled without
+    the argument list, or it lands on a second symbol of the same name (see
+    :meth:`Generator.enum_scope`).
+
+    libclang spells a primary template's ``display_name`` with its parameter
+    names, so the two coincide there and differ for every partial (``Traits<U
+    *>``) or explicit (``Traits<int>``, whose head declares no parameters at
+    all) specialization.
+    """
+    suffix = _spec_suffix(symbol)
+    if not suffix:
+        return ""
+    args = [arg.removesuffix("...").strip() for arg in _split_top_level(suffix[1:-1])]
+    return "" if args == _template_param_names(symbol.signature) else suffix
+
+
 #: A default argument clang could not evaluate, emitted verbatim as
 #: ``<recovery-expr>`` (optionally followed by a balanced ``(...)`` of arguments).
 _RECOVERY_DEFAULT_RE = re.compile(r"\s*=\s*<recovery-expr>")
@@ -802,6 +875,11 @@ class Generator:
             target = self._underlying(symbol)
             declaration = f"{qualified} = {target}" if target else qualified
             return enclosing + declaration
+        if symbol.kind == SymbolKind.ENUM:
+            # Inside a pushed scope the enum is declared by its bare name; the
+            # qualified one would be looked up *relative* to that scope and
+            # create a whole shadow ``xr::Holder::`` path under it.
+            return symbol.spelling if self.enum_scope(symbol) else symbol.qualified_name
         if symbol.kind == SymbolKind.MACRO:
             # ``signature`` is the function-like macro's ``NAME(a, b)`` (or the
             # bare name for an object-like macro).
@@ -930,6 +1008,40 @@ class Generator:
             if parent.signature:
                 heads.append(f"{_repair_split_operators(parent.signature)} ")
         return "".join(reversed(heads)), qualified
+
+    def enum_scope(self, symbol: Symbol) -> str:
+        """Return the ``cpp:namespace-push`` argument an enum needs, or ``""``.
+
+        ``cpp:enum`` accepts no template parameter list, so an enum nested in a
+        class template cannot be declared out-of-line the way every other member
+        is: with a ``template<...>`` head the directive is a parse error, and
+        without one -- what clangquill used to emit -- the enum and its
+        enumerators land under a second, plain copy of the enclosing class that
+        no cross-reference reaches. Pushing the scope moves the head onto
+        ``cpp:namespace-push``, which *does* take one, leaving the enum to be
+        declared by its bare name inside it (see :meth:`signature`).
+
+        The pushed name carries every enclosing template's head and arguments,
+        the same qualification a member declaration needs (see
+        :meth:`_member_qualifier`) -- except on its own last component, which
+        keeps an argument list only when it is a specialization's (see
+        :func:`_scope_suffix`).
+
+        Returns ``""`` when no enclosing scope is templated, since the plain
+        qualified name already resolves there; the caller then emits no push at
+        all. The push is only sound because a nested enum renders on its parent
+        class's own page, below that class's directive: the domain merges a
+        pushed scope into a class *declared before it*, but not the other way
+        round.
+        """
+        parent = self.store.symbol(symbol.parent_usr) if symbol.parent_usr else None
+        if parent is None:
+            return ""
+        heads, qualified = self._member_qualifier(parent)
+        own = f"{_repair_split_operators(parent.signature)} " if parent.signature else ""
+        if not heads and not own:
+            return ""
+        return f"{heads}{own}{qualified}{_scope_suffix(parent)}"
 
     def _underlying(self, symbol: Symbol) -> str:
         """Return the typedef/alias target spelling, or ``""``."""

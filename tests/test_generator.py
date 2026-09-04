@@ -1329,21 +1329,65 @@ def test_member_of_full_specialization_carries_the_empty_head(spec_gen: Generato
     )
 
 
-def test_enum_nested_in_class_template_has_no_qualifying_head(spec_gen: Generator, spec_store: Store) -> None:
-    # Unlike `create` above, this member stays head-less on purpose: Sphinx's
-    # `cpp:enum` directive has no grammar for a leading `template<...>` head at
-    # all, so there is no spelling that would let the C++ domain re-attach it
-    # to the template rather than a second, plain `ContainerFactory` symbol.
-    # Do not "fix" this by extending `_member_qualifier` to enums -- see
-    # docs/development/cross-references.md and issue #336.
+def _spec_enum(spec_store: Store, parent_display: str) -> Symbol:
+    """Return the ``Mode`` enum nested in the ``ContainerFactory`` ``parent_display`` names."""
     from clangquill.store import SymbolKind  # noqa: PLC0415
 
-    mode = next(
-        s
-        for s in spec_store.symbols()
-        if s.kind == SymbolKind.ENUM and s.qualified_name == "demo::ContainerFactory::Mode"
-    )
-    assert spec_gen.signature(mode) == "demo::ContainerFactory::Mode"
+    parent = _spec_symbol(spec_store, parent_display)
+    return next(s for s in spec_store.symbols() if s.kind == SymbolKind.ENUM and s.parent_usr == parent.usr)
+
+
+def test_enum_nested_in_class_template_is_declared_inside_a_pushed_scope(
+    spec_gen: Generator,
+    spec_store: Store,
+) -> None:
+    # Unlike `create` above, this member cannot carry a head: Sphinx's `cpp:enum`
+    # directive has no grammar for one. `cpp:namespace-push` does, so the head
+    # goes there and the enum is declared by its bare name inside it -- which is
+    # what attaches it to the template rather than to a second, plain
+    # `ContainerFactory` symbol (issue #336).
+    mode = _spec_enum(spec_store, "ContainerFactory")
+    assert spec_gen.enum_scope(mode) == "template<class ContainerImp> demo::ContainerFactory"
+    assert spec_gen.signature(mode) == "Mode"
+
+
+def test_enum_nested_in_a_specialization_pushes_its_arguments(
+    spec_gen: Generator,
+    spec_store: Store,
+) -> None:
+    # The primary template's scope drops the argument list (`ContainerFactory`,
+    # not `ContainerFactory<ContainerImp>`) because the domain files a primary
+    # under its bare name; a specialization is filed under the spelled-out one,
+    # so its scope has to keep `<double>` or the push lands on a third symbol.
+    mode = _spec_enum(spec_store, "ContainerFactory<double>")
+    assert spec_gen.enum_scope(mode) == "template<> demo::ContainerFactory<double>"
+    assert spec_gen.signature(mode) == "Mode"
+
+
+def test_enum_outside_a_template_needs_no_pushed_scope(gen: Generator, store: Store) -> None:
+    # Nothing to re-attach: the qualified name already resolves, so the enum
+    # renders exactly as it did before pushed scopes existed.
+    from clangquill.store import SymbolKind  # noqa: PLC0415
+
+    plain = next(s for s in store.symbols() if s.kind == SymbolKind.ENUM)
+    assert gen.enum_scope(plain) == ""
+    assert gen.signature(plain) == plain.qualified_name
+
+
+@pytest.mark.parametrize(
+    ("head", "names"),
+    [
+        ("template<class ContainerImp>", ["ContainerImp"]),
+        ("template<typename T, int N = 4>", ["T", "N"]),
+        ("template<typename... Ts>", ["Ts"]),
+        ("template<template<typename, typename> class C, class D = Pair<int, int>>", ["C", "D"]),
+        ("template<>", []),
+    ],
+)
+def test_template_param_names_splits_at_top_level_only(head: str, names: list[str]) -> None:
+    from clangquill.generator import _template_param_names  # noqa: PLC0415
+
+    assert _template_param_names(head) == names
 
 
 def test_variable_template_declaration_carries_its_head(spec_gen: Generator, spec_store: Store) -> None:
