@@ -1,0 +1,30 @@
+{
+    "description": "`\\li`/`\\arg` are bullet-list items: a run of them is one Markdown list, and no item is promoted to the brief (issue #344).",
+    "raw": "/// @li first item\n/// @li second item\n/// continued on the next line\n///\n/// A closing paragraph.\n///\n/// @arg one\n/// @arg two\n",
+    "expected": {
+        "brief": "A closing paragraph.",
+        "detail": [
+            "- first item\n- second item continued on the next line",
+            "- one\n- two"
+        ],
+        "params": [],
+        "tparams": [],
+        "returns": "",
+        "retvals": [],
+        "throws": [],
+        "see": [],
+        "since": [],
+        "deprecated": [],
+        "note": [],
+        "warning": [],
+        "pre": [],
+        "post": [],
+        "invariant": [],
+        "todo": [],
+        "bug": [],
+        "author": [],
+        "version": [],
+        "date": [],
+        "custom": {}
+    }
+}
