@@ -2,7 +2,13 @@
 {% set comment = gen.comment(symbol) %}
 {% set body = render_comment(comment) %}
 {% set fence = gen.fence(body) %}
+{% set scope = gen.enum_scope(symbol) %}
 {{ level | heading }} {{ gen.label(symbol) }} `{{ symbol.qualified_name }}`
+{% if scope %}
+
+```{cpp:namespace-push} {{ scope }}
+```
+{% endif %}
 
 {{ fence }}{{ "{" ~ gen.directive(symbol) ~ "}" }} {{ sig.directive_argument(symbol) }}
 
@@ -13,10 +19,15 @@
 {% set ec_body = render_comment(ec) if ec else "" %}
 {% set ec_fence = gen.fence(ec_body) %}
 
-{{ ec_fence }}{cpp:enumerator} {{ symbol.qualified_name }}::{{ enumerator.name }}
+{{ ec_fence }}{cpp:enumerator} {{ sig.directive_argument(symbol) }}::{{ enumerator.name }}
 {% if ec %}
 
 {{ ec_body }}
 {% endif %}
 {{ ec_fence }}
 {% endfor %}
+{% if scope %}
+
+```{cpp:namespace-pop}
+```
+{% endif %}

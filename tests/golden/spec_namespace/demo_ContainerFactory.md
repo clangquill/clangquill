@@ -7,7 +7,13 @@ Container factory (primary template).
 
 ## Enum `demo::ContainerFactory::Mode`
 
-```{cpp:enum} demo::ContainerFactory::Mode
+```{cpp:namespace-push} template<class ContainerImp> demo::ContainerFactory
+```
+
+```{cpp:enum} Mode
 
 How the factory picks a container implementation.
+```
+
+```{cpp:namespace-pop}
 ```

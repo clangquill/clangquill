@@ -671,14 +671,23 @@ def _build_spec_db(path: Path) -> None:
             ),
             type_repr="void (GV &, const std::string &, const std::array<bool, 3> &)",
         )
-        # An enum nested in the *primary* template: `cpp:enum` has no grammar
-        # for a template head at all (issue #336), so unlike `create` above
-        # this member stays head-less on purpose -- see
-        # docs/development/cross-references.md.
+        # An enum nested in the *primary* template and one nested in the full
+        # specialization: `cpp:enum` has no grammar for a template head, so both
+        # are declared by their bare name inside a pushed scope -- which keeps
+        # the specialization's argument list and drops the primary's parameter
+        # names (issue #336, docs/development/cross-references.md).
         cf_mode = cf_primary + "@E@Mode"
         sym(
             cf_mode,
             cf_primary,
+            SymbolKind.ENUM,
+            "Mode",
+            "demo::ContainerFactory::Mode",
+        )
+        cf_double_mode = cf_double + "@E@Mode"
+        sym(
+            cf_double_mode,
+            cf_double,
             SymbolKind.ENUM,
             "Mode",
             "demo::ContainerFactory::Mode",
@@ -698,6 +707,7 @@ def _build_spec_db(path: Path) -> None:
             (helper, "Adaptation helper."),
             (helper_ctor, "Construct an adaptation helper."),
             (cf_mode, "How the factory picks a container implementation."),
+            (cf_double_mode, "How the double factory picks a container implementation."),
         ):
             con.execute(
                 "INSERT INTO comments(symbol_usr, raw_text, format) VALUES(?, '/// fixture', 'doxygen')",
