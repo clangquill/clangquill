@@ -64,6 +64,24 @@ def test_write_placeholder_leaves_unmanaged_files_alone(tmp_path: Path) -> None:
     assert (out / "handwritten.md").is_file()
 
 
+@pytest.mark.parametrize(
+    ("index_title", "expected"),
+    [("Geometry API", "# Geometry API\n\n"), ("", "")],
+)
+def test_write_placeholder_honours_index_title(tmp_path: Path, index_title: str, expected: str) -> None:
+    pytest.importorskip("sphinx")
+    from clangquill.sphinx_ext import _write_placeholder  # noqa: PLC0415
+
+    # The degraded page has to be titled the same way the real one would be,
+    # including the empty title that asks for no heading at all.
+    config = Config(input=["geo.hpp"], output_dir="api", index_title=index_title)
+    app = SimpleNamespace(srcdir=str(tmp_path))
+    _write_placeholder(app, config)
+
+    text = (tmp_path / "api" / "index.md").read_text(encoding="utf-8")
+    assert text == f"{expected}API generation was skipped (libclang unavailable).\n"
+
+
 def test_warn_unknown_config_survives_missing_raw_config() -> None:
     pytest.importorskip("sphinx")
     from clangquill.sphinx_ext import _warn_unknown_config  # noqa: PLC0415

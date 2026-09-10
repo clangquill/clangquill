@@ -456,6 +456,7 @@ libclang may not have.
 |-------|--------------|---------|-------------|
 | `toctree_maxdepth` | `clangquill_toctree_maxdepth` | `2` | `:maxdepth:` of the generated root toctree. |
 | `root_document` | `clangquill_root_document` | `"index"` | Stem of the generated index/toctree page within `output_dir`. |
+| `index_title` | `clangquill_index_title` | `"API Reference"` | Level-1 heading of the generated index page; `""` omits the heading. |
 
 ```{note}
 Doxygen `\defgroup` groups, when present, add one page per group after the

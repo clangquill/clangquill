@@ -15,7 +15,7 @@ import typer
 
 from clangquill import __version__, _core
 from clangquill._lock import BuildLockTimeoutError
-from clangquill.config import GROUP_BY_CHOICES, Config, ConfigError
+from clangquill.config import DEFAULT_INDEX_TITLE, GROUP_BY_CHOICES, Config, ConfigError
 from clangquill.pipeline import build as run_pipeline
 from clangquill.pipeline import warnings_or_worse
 
@@ -169,6 +169,10 @@ def build(  # noqa: PLR0913
         str,
         typer.Option("--root-document", help="Stem of the generated index/toctree page."),
     ] = "index",
+    index_title: Annotated[
+        str,
+        typer.Option("--index-title", help="Heading of the generated index page ('' omits the heading)."),
+    ] = DEFAULT_INDEX_TITLE,
     path_base: Annotated[
         Path | None,
         typer.Option("--path-base", help="Directory rendered file paths are shown relative to."),
@@ -213,6 +217,7 @@ def build(  # noqa: PLR0913
         group_by=group_by,
         toctree_maxdepth=toctree_maxdepth,
         root_document=root_document,
+        index_title=index_title,
         path_base=str(path_base) if path_base else None,
         jobs=jobs,
         tu_batch=tu_batch,

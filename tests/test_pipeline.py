@@ -458,6 +458,21 @@ def test_incremental_render_config_change_rerenders_without_reparse(project: Pat
 
 
 @requires_libclang
+def test_incremental_index_title_change_rerenders_the_index(project: Path) -> None:
+    # index_title only ever affects the index page, whose render is memoised on
+    # the page set — so without index_title in the render fingerprint the
+    # rebuild would replay the previous title verbatim.
+    config = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache")
+    build(config, base_dir=project)
+    assert (project / "api" / "index.md").read_text().startswith("# API Reference")
+
+    retitled = Config(input=["demo.hpp"], output_dir="api", cache_dir=".cache", index_title="Demo API")
+    result = build(retitled, base_dir=project)
+    assert not result.parsed
+    assert (project / "api" / "index.md").read_text().startswith("# Demo API")
+
+
+@requires_libclang
 def test_incremental_template_edit_busts_noop_skip(project: Path) -> None:
     templates = project / "templates"
     templates.mkdir()

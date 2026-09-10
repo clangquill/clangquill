@@ -678,6 +678,7 @@ def _render_fingerprint(config: Config, base_dir: Path) -> str:
             "group_by": config.group_by,
             "toctree_maxdepth": config.toctree_maxdepth,
             "root_document": config.root_document,
+            "index_title": config.index_title,
             "path_base": str((base_dir / config.path_base).resolve()) if config.path_base else "",
             "output_dir": str((base_dir / config.output_dir).resolve()),
             "core_version": getattr(_core, "__core_version__", ""),
@@ -815,7 +816,11 @@ def _rendered_files(
         index_text = cache.cached_page(index_stem, index_key)
         stems.append(index_stem)
     if index_text is None:
-        index_text = generator.render_index(plans, toctree_maxdepth=config.toctree_maxdepth)
+        index_text = generator.render_index(
+            plans,
+            toctree_maxdepth=config.toctree_maxdepth,
+            index_title=config.index_title,
+        )
         if memoize:
             records[index_stem] = (index_key, index_text)
     rendered.append((f"{index_stem}.md", index_text))
@@ -889,6 +894,7 @@ def _full_build(
                 group_by=config.group_by,
                 toctree_maxdepth=config.toctree_maxdepth,
                 root_document=config.root_document,
+                index_title=config.index_title,
             )
         succeeded = True
     finally:

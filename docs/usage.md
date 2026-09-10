@@ -80,7 +80,9 @@ an anonymous entity — only when asked for),
 `namespace` — the last builds a browsable index → namespace → per-symbol
 hierarchy; recommended for libraries rooted in a single namespace, which would
 otherwise collapse onto one giant page) and the
-`clangquill_toctree_maxdepth` / `clangquill_root_document` toctree options. The
+`clangquill_toctree_maxdepth` / `clangquill_root_document` /
+`clangquill_index_title` toctree options (the last titles the generated index
+page — set it to `""` to leave the page headingless). The
 generated `cpp:` domain objects appear in `objects.inv` and cross-reference like
 any hand-written page.
 

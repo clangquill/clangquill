@@ -27,6 +27,7 @@ def test_defaults_match_issue_contract():
     assert cfg.std == "c++20"
     assert cfg.toctree_maxdepth == 2
     assert cfg.root_document == "index"
+    assert cfg.index_title == "API Reference"
     assert cfg.jobs == 0
     assert cfg.tu_batch == 0
     # Anonymous-namespace contents are internal linkage, so they are hidden
@@ -60,6 +61,7 @@ def test_config_fields_cover_every_documented_value():
         "clangquill_warnings_as_errors",
         "clangquill_toctree_maxdepth",
         "clangquill_root_document",
+        "clangquill_index_title",
     }
     assert expected <= names
     assert all(name.startswith(CONFIG_PREFIX) for name in names)
@@ -158,7 +160,7 @@ def test_validate_rejects_bool_for_int_fields(field: str):
         cfg.validate()
 
 
-@pytest.mark.parametrize("field", ["std", "output_dir", "root_document", "group_by"])
+@pytest.mark.parametrize("field", ["std", "output_dir", "root_document", "group_by", "index_title"])
 def test_validate_rejects_non_str_fields(field: str):
     cfg = Config(input=["a.hpp"], **{field: 123})
     with pytest.raises(ConfigError, match=f"{field} must be a string"):
@@ -259,6 +261,13 @@ def test_validate_rejects_root_document_with_path_separators(value: str):
 def test_validate_accepts_bare_root_document():
     cfg = Config(input=["a.hpp"], root_document="my-index").validate()
     assert cfg.root_document == "my-index"
+
+
+def test_validate_accepts_empty_index_title():
+    # Unlike root_document (which names a file), an empty index_title is
+    # meaningful: it asks for an index page with no heading of its own.
+    cfg = Config(input=["a.hpp"], index_title="").validate()
+    assert cfg.index_title == ""
 
 
 @pytest.mark.parametrize("value", ["../api", "sub/../../escape", "docs/../../escape"])
