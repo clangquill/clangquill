@@ -901,6 +901,29 @@ def test_root_document_renames_index(gen: Generator, tmp_path: Path) -> None:
     assert not (out / "index.md").exists()
 
 
+def test_index_title_defaults_and_overrides(gen: Generator, tmp_path: Path) -> None:
+    out = tmp_path / "api"
+    gen.generate(out)
+    assert (out / "index.md").read_text().startswith("# API Reference\n")
+
+    gen.generate(out, index_title="Geometry API")
+    text = (out / "index.md").read_text()
+    assert text.startswith("# Geometry API\n")
+    assert "API Reference" not in text
+    # Only the heading changed: the toctree body is untouched.
+    assert "```{toctree}" in text
+
+
+def test_empty_index_title_omits_the_heading(gen: Generator, tmp_path: Path) -> None:
+    # An index page with no heading of its own is the shape wanted when a
+    # hand-written document `include`s it under a title it supplies itself.
+    out = tmp_path / "api"
+    gen.generate(out, index_title="")
+    text = (out / "index.md").read_text()
+    assert text.startswith("```{toctree}")
+    assert not text.lstrip().startswith("#")
+
+
 @pytest.fixture
 def m7_store(m7_db: Path) -> Iterator[Store]:
     with Store.open(m7_db) as opened:

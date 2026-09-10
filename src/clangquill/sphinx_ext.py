@@ -221,9 +221,10 @@ def _write_placeholder(app: Sphinx, config: Config) -> None:
     out = Path(app.srcdir) / config.output_dir
     out.mkdir(parents=True, exist_ok=True)
     root_name = f"{config.root_document}.md"
+    heading = f"# {config.index_title}\n\n" if config.index_title else ""
     write_if_changed(
         out / root_name,
-        "# API Reference\n\nAPI generation was skipped (libclang unavailable).\n",
+        f"{heading}API generation was skipped (libclang unavailable).\n",
     )
     prune_stale(out, [root_name])
 

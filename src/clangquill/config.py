@@ -27,6 +27,11 @@ CONFIG_PREFIX = "clangquill_"
 # Permitted values for ``group_by`` (how generated pages are partitioned).
 GROUP_BY_CHOICES = ("symbol", "file", "class", "namespace")
 
+#: Level-1 heading put on the generated index page when nothing overrides it.
+#: Lives here so the :class:`Config` field, the :class:`~clangquill.generator.Generator`
+#: keyword argument and the libclang-less placeholder page all say the same thing.
+DEFAULT_INDEX_TITLE = "API Reference"
+
 
 # ``bool`` is an ``int`` subclass, but an int config field is never a flag.
 def _is_int(value: object) -> bool:
@@ -86,6 +91,7 @@ _TYPE_CHECKS: tuple[tuple[str, Callable[[object], bool], str], ...] = (
     ("std", _is_str, "a string"),
     ("output_dir", _is_str, "a string"),
     ("root_document", _is_str, "a string"),
+    ("index_title", _is_str, "a string"),
     ("group_by", _is_str, "a string"),
     ("compile_commands", _is_optional_str, "a string or None"),
     ("clang_resource_dir", _is_optional_str, "a string or None"),
@@ -212,6 +218,10 @@ class Config:
     toctree_maxdepth: int = 2
     #: Stem of the generated index/toctree page within ``output_dir``.
     root_document: str = "index"
+    #: Level-1 heading of the generated index/toctree page. The empty string
+    #: omits the heading entirely, which is what a project wants when the page
+    #: is pulled into a hand-written document that supplies its own title.
+    index_title: str = DEFAULT_INDEX_TITLE
 
     def validate(self) -> Config:
         """Validate the configuration in place, returning ``self``.
@@ -338,6 +348,7 @@ CONFIG_FIELDS = tuple(config_specs())
 __all__ = [
     "CONFIG_FIELDS",
     "CONFIG_PREFIX",
+    "DEFAULT_INDEX_TITLE",
     "GROUP_BY_CHOICES",
     "Config",
     "ConfigError",

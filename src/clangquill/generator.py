@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from jinja2 import ChoiceLoader, Environment, FileSystemLoader, PackageLoader, StrictUndefined
 
 from clangquill.comments import split_xref_target
+from clangquill.config import DEFAULT_INDEX_TITLE
 from clangquill.store import AccessKind, RefKind, SymbolKind
 
 _logger = logging.getLogger(__name__)
@@ -1328,6 +1329,7 @@ class Generator:
         pages: Sequence[RenderedPage | PagePlan],
         *,
         toctree_maxdepth: int = 2,
+        index_title: str = DEFAULT_INDEX_TITLE,
     ) -> str:
         """Render the toctree index page that links ``pages`` in order.
 
@@ -1336,10 +1338,14 @@ class Generator:
         interchangeably. Pages flagged not ``top_level`` are omitted: under a
         hierarchical grouping they are reached through a parent's toctree, so the
         root index lists only the top namespaces rather than every page.
+
+        ``index_title`` is the page's level-1 heading; the empty string omits
+        the heading, leaving a bare toctree for a hand-written document that
+        supplies its own title.
         """
         index = self._template("index.md.jinja")
         entries = [(p.stem, p.label) for p in pages if getattr(p, "top_level", True)]
-        return index.render(pages=entries, maxdepth=toctree_maxdepth)
+        return index.render(pages=entries, maxdepth=toctree_maxdepth, title=index_title)
 
     def generate(
         self,
@@ -1348,6 +1354,7 @@ class Generator:
         group_by: str = "symbol",
         toctree_maxdepth: int = 2,
         root_document: str = "index",
+        index_title: str = DEFAULT_INDEX_TITLE,
     ) -> list[str]:
         """Render the IR into ``out_dir`` and write a toctree index.
 
@@ -1355,8 +1362,8 @@ class Generator:
         per top-level symbol, ``"file"`` one page per parsed source file,
         ``"class"`` one page per documented class/namespace, and ``"namespace"``
         a browsable index → namespace → per-symbol hierarchy.
-        ``toctree_maxdepth`` and ``root_document`` shape the generated index
-        page (written as ``<root_document>.md``). Returns the page stems
+        ``toctree_maxdepth``, ``root_document`` and ``index_title`` shape the
+        generated index page (written as ``<root_document>.md``). Returns the page stems
         (excluding the index), in toctree order — every planned page, whether or
         not it had to be written.
 
@@ -1371,7 +1378,7 @@ class Generator:
             write_if_changed(out / f"{page.stem}.md", page.text)
         write_if_changed(
             out / f"{root_document}.md",
-            self.render_index(pages, toctree_maxdepth=toctree_maxdepth),
+            self.render_index(pages, toctree_maxdepth=toctree_maxdepth, index_title=index_title),
         )
         return [page.stem for page in pages]
 
