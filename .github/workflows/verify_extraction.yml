@@ -59,6 +59,17 @@ jobs:
     # no pull request.
     permissions:
       contents: read
+    # sqlite.org 403s vcpkg's default downloader, so distfiles go through a
+    # browser-User-Agent script (SHA512 is still checked by vcpkg, which falls
+    # back to the authoritative URL if the script comes back empty-handed).
+    # Job-scoped rather than attached to the checkout build alone: dune-gdt's
+    # `cmake --preset` drives a second, far larger vcpkg install, and routing
+    # its distfiles through the same script buys them the script's `curl
+    # --retry` on 5xx — the ftpmirror.gnu.org failure mode of issue 357.
+    env:
+      X_VCPKG_ASSET_SOURCES: >-
+        clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh {url}
+        {sha512} {dst}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -103,11 +114,6 @@ jobs:
         # the run step can verify it is still the one being exercised.
         env:
           SKBUILD_CMAKE_DEFINE: CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/usr/lib/llvm-23
-          # sqlite.org 403s vcpkg's default downloader, so distfiles go through
-          # a browser-User-Agent script (SHA512 is still checked by vcpkg).
-          X_VCPKG_ASSET_SOURCES: >-
-            clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
-            {url} {sha512} {dst}
         run: |
           uv sync --frozen --project benchmarks
           uv pip install --python benchmarks/.venv/bin/python --reinstall-package clangquill .
