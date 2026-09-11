@@ -17,7 +17,7 @@
 # forward-declaration and comment-swallowing bugs this workflow exists for.
 # The weekly run (Mondays) and manual dispatch cover every configured
 # project, dune-gdt included: its config drives a `cmake --preset` that
-# bootstraps the whole DUNE stack through vcpkg, on the order of an hour, which
+# bootstraps the whole DUNE stack through vcpkg, ~25 minutes cold, which
 # is fine unattended overnight and not fine blocking a PR. Weekly also catches
 # the slower drift a per-push run can't: an upstream project moving, a
 # libclang upgrade changing what parses, or a regression a green parse would
@@ -59,16 +59,32 @@ jobs:
     # no pull request.
     permissions:
       contents: read
+    # sqlite.org 403s vcpkg's default downloader, so distfiles go through a
+    # browser-User-Agent script (SHA512 is still checked by vcpkg, which falls
+    # back to the authoritative URL if the script comes back empty-handed).
+    # Job-scoped rather than attached to the checkout build alone: dune-gdt's
+    # `cmake --preset` drives a second, far larger vcpkg install, and routing
+    # its distfiles through the same script buys them the script's `curl
+    # --retry` on 5xx — the ftpmirror.gnu.org failure mode of issue 357.
+    env:
+      X_VCPKG_ASSET_SOURCES: >-
+        clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh {url}
+        {sha512} {dst}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # The harness only does local git ops against its own clones.
           persist-credentials: false
-      - name: Install doxygen
+      - name: Install doxygen and ninja
+        # ninja: every dune-gdt CMake preset names the Ninja generator, and that
+        # config runs `cmake --preset` before either tool sees a header. The
+        # hosted image does not ship ninja, so the configure died with "CMake
+        # was unable to find a build program corresponding to Ninja" regardless
+        # of how the dependency downloads went (see issue 357).
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends doxygen
+          sudo apt-get install -y --no-install-recommends doxygen ninja-build
       - name: Install build dependencies (LLVM 23)
         # The verification must judge the code on this branch, not a previously
         # published wheel, so the core is built from this checkout. LLVM 23
@@ -98,11 +114,6 @@ jobs:
         # the run step can verify it is still the one being exercised.
         env:
           SKBUILD_CMAKE_DEFINE: CLANGQUILL_WITH_LIBCLANG=ON;LibClang_ROOT=/usr/lib/llvm-23
-          # sqlite.org 403s vcpkg's default downloader, so distfiles go through
-          # a browser-User-Agent script (SHA512 is still checked by vcpkg).
-          X_VCPKG_ASSET_SOURCES: >-
-            clear;x-script,${{ github.workspace }}/tools/ci/vcpkg-asset-fetch.sh
-            {url} {sha512} {dst}
         run: |
           uv sync --frozen --project benchmarks
           uv pip install --python benchmarks/.venv/bin/python --reinstall-package clangquill .
@@ -110,6 +121,31 @@ jobs:
           built=$(benchmarks/.venv/bin/python -c "import importlib.metadata as m; print(m.version('clangquill'))")
           echo "Built clangquill $built from the checkout"
           echo "CLANGQUILL_BUILT_VERSION=$built" >> "$GITHUB_ENV"
+      - name: Restore the vcpkg binary cache
+        # dune-gdt's `cmake --preset` builds the whole DUNE stack — plus boost,
+        # lapack, suitesparse … — from source through vcpkg, which is both the
+        # bulk of this job's wall clock and, port by port, its exposure to an
+        # upstream mirror 502ing or rate-limiting us (see issue 357: first
+        # ftpmirror.gnu.org, then a 429 from gitlab.dune-project.org on the
+        # dune-uggrid fetch). vcpkg writes every package it builds into
+        # ~/.cache/vcpkg/archives under its own ABI hash, so restoring that
+        # directory turns the next configure into an unpack. A stale entry
+        # cannot be picked up by mistake — the hash covers the port version,
+        # triplet and compiler — it simply misses and is rebuilt.
+        # The key is unique per run so every run writes a fresh entry; the
+        # restore-keys then pull the newest one that exists, including whatever
+        # a *failed* run left behind, which is how a dependency install that
+        # died halfway through a flaky fetch resumes instead of starting over.
+        # Shared with the other workflow that drives the same configs, so a
+        # weekly verify-extraction run warms this job and vice versa.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-archives-${{ runner.os }}-${{ hashFiles('benchmarks/configs/*.toml')
+            }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-archives-${{ runner.os }}-${{ hashFiles('benchmarks/configs/*.toml') }}-
+            vcpkg-archives-${{ runner.os }}-
       - name: Verify extraction
         # `uv run` puts the project's venv bin on PATH, so the harness resolves
         # `clangquill` by name; `doxygen` comes from apt. `--no-sync` is
@@ -123,7 +159,7 @@ jobs:
           # Push/PR/merge_group get every config except dune-gdt: cheap enough
           # to run on every change, and none of them clone-and-build the DUNE
           # stack through vcpkg. Schedule and dispatch get everything —
-          # dune-gdt's ~1h `cmake --preset` build is fine unattended overnight
+          # dune-gdt's ~25min `cmake --preset` build is fine unattended overnight
           # but not fine blocking a PR — unless a dispatch narrows the scope
           # itself via its `repos` input. Order matters here: an empty
           # `inputs.repos` is falsy, so it must sit before the final `''`
@@ -151,6 +187,29 @@ jobs:
           # otherwise leave no trace of how far it got in the CI log.
           uv run --no-sync --project benchmarks python -u benchmarks/verify.py \
             --repos "$VERIFY_REPOS" $fresh
+      - name: Check whether the vcpkg binary cache has anything to save
+        # Only a config that names a preset populates it (today: dune-gdt), so a
+        # run narrowed to the other configs never creates the directory at all
+        # and actions/cache/save would warn about the missing path. Decide here
+        # instead of making the save step guess at the scope.
+        id: vcpkg-archives
+        if: always()
+        run: |
+          if [ -n "$(find ~/.cache/vcpkg/archives -type f -print -quit 2>/dev/null)" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Save the vcpkg binary cache
+        # always(), deliberately: a run that died partway through the dependency
+        # install still leaves every package it did finish in the archive, and
+        # that partial stack is exactly what the next run needs.
+        if: always() && steps.vcpkg-archives.outputs.present == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-archives-${{ runner.os }}-${{ hashFiles('benchmarks/configs/*.toml')
+            }}-${{ github.run_id }}
       - name: Publish results to job summary
         if: always()
         run: |
