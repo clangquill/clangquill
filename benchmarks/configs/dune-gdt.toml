@@ -20,7 +20,9 @@ std = "c++20"
 # The harness runs this before parsing. vcpkg pulls in the DUNE stack the deep
 # include tree needs, and configure generates config.h + dune-gdt-config.hh;
 # without it libclang cannot resolve dune/common/*, which is what this project
-# used to fail on. Cold, it builds the whole stack and takes about an hour.
+# used to fail on. Cold, it builds the whole stack: 25 minutes on a hosted
+# 4-vCPU runner (measured 2026-09-11), which the workflows' vcpkg binary
+# cache turns into an unpack on every run after the first.
 # `debug`, not the `clang22-debug` this used to name: that preset pins
 # CMAKE_C[XX]_COMPILER to clang-22/clang++-22, which upstream's CI installs from
 # apt.llvm.org and our runners do not have (tools/ci/install-llvm-apt.sh

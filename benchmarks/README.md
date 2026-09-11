@@ -209,7 +209,8 @@ tolerated**. A dependency-heavy project fails until its config grows the
 `inputs` to a subset that parses — a recorded "expected noise" list would make
 the whole run decorative. `dune-gdt` is the worked example: it only parses against a
 configured build tree, so its config names a CMake preset and the harness runs
-it, which on a cold vcpkg cache takes about an hour.
+it, which on a cold vcpkg cache takes about 25 minutes on a 4-vCPU hosted
+runner.
 Strict mode also re-parses everything every run: a verdict on the whole input
 set can only come from a parse of the whole input set, so the harness starts
 each project from a wiped cache.

@@ -17,7 +17,7 @@
 # forward-declaration and comment-swallowing bugs this workflow exists for.
 # The weekly run (Mondays) and manual dispatch cover every configured
 # project, dune-gdt included: its config drives a `cmake --preset` that
-# bootstraps the whole DUNE stack through vcpkg, on the order of an hour, which
+# bootstraps the whole DUNE stack through vcpkg, ~25 minutes cold, which
 # is fine unattended overnight and not fine blocking a PR. Weekly also catches
 # the slower drift a per-push run can't: an upstream project moving, a
 # libclang upgrade changing what parses, or a regression a green parse would
@@ -159,7 +159,7 @@ jobs:
           # Push/PR/merge_group get every config except dune-gdt: cheap enough
           # to run on every change, and none of them clone-and-build the DUNE
           # stack through vcpkg. Schedule and dispatch get everything —
-          # dune-gdt's ~1h `cmake --preset` build is fine unattended overnight
+          # dune-gdt's ~25min `cmake --preset` build is fine unattended overnight
           # but not fine blocking a PR — unless a dispatch narrows the scope
           # itself via its `repos` input. Order matters here: an empty
           # `inputs.repos` is falsy, so it must sit before the final `''`
