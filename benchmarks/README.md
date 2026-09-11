@@ -119,6 +119,16 @@ By default it benchmarks every config under `configs/` (the external repos are
 cloned blobless); a manual dispatch can narrow `--repos` or change `--tools` via
 the workflow inputs.
 
+Both this workflow and `verify-extraction` install `ninja-build` (every
+dune-gdt preset names the Ninja generator) and keep `~/.cache/vcpkg/archives`
+in the Actions cache under a shared key. That cache is what keeps `dune-gdt`'s
+`cmake --preset` affordable and survivable: cold, it builds the whole DUNE
+stack from source, and each port is another upstream mirror that can 502 or
+rate-limit the runner. Every package that finished is saved even when the run
+failed, so a dependency install cut short by a flaky fetch resumes on the next
+run rather than starting over. A stale entry is never used by mistake — vcpkg
+keys each package on an ABI hash covering its version, triplet and compiler.
+
 ## Verifying extraction
 
 `verify.py` runs the same projects to ask whether the extraction is *correct*.
@@ -307,7 +317,12 @@ the file exists, making the edit deterministic without shipping brittle diffs.
 - **dune-gdt** used to be in that list and no longer is: its config names a
   CMake preset, so the harness configures the project first and parses against
   the real build tree. That is the pattern to copy for a project whose headers
-  cannot resolve from a bare checkout.
+  cannot resolve from a bare checkout — but pick a preset the machine running
+  the harness can actually satisfy. This config names upstream's generic
+  `debug` preset rather than the `clang22-debug` its CI uses, because the
+  latter pins compilers (`clang-22`/`clang++-22`) that our runners do not
+  install; the two are otherwise the same generator, standard, triplet and
+  dependency set.
 - Things this headless harness cannot control are left to the operator: pin the
   CPU governor to `performance`, run on an otherwise-idle, thermally-stable
   machine, and prefer more `--repeat` passes for stable medians.

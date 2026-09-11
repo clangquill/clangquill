@@ -65,10 +65,15 @@ jobs:
         with:
           # The harness only does local git ops against its own clones.
           persist-credentials: false
-      - name: Install doxygen
+      - name: Install doxygen and ninja
+        # ninja: every dune-gdt CMake preset names the Ninja generator, and that
+        # config runs `cmake --preset` before either tool sees a header. The
+        # hosted image does not ship ninja, so the configure died with "CMake
+        # was unable to find a build program corresponding to Ninja" regardless
+        # of how the dependency downloads went (see issue 357).
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends doxygen
+          sudo apt-get install -y --no-install-recommends doxygen ninja-build
       - name: Install build dependencies (LLVM 23)
         # The verification must judge the code on this branch, not a previously
         # published wheel, so the core is built from this checkout. LLVM 23
@@ -110,6 +115,31 @@ jobs:
           built=$(benchmarks/.venv/bin/python -c "import importlib.metadata as m; print(m.version('clangquill'))")
           echo "Built clangquill $built from the checkout"
           echo "CLANGQUILL_BUILT_VERSION=$built" >> "$GITHUB_ENV"
+      - name: Restore the vcpkg binary cache
+        # dune-gdt's `cmake --preset` builds the whole DUNE stack — plus boost,
+        # lapack, suitesparse … — from source through vcpkg, which is both the
+        # bulk of this job's wall clock and, port by port, its exposure to an
+        # upstream mirror 502ing or rate-limiting us (see issue 357: first
+        # ftpmirror.gnu.org, then a 429 from gitlab.dune-project.org on the
+        # dune-uggrid fetch). vcpkg writes every package it builds into
+        # ~/.cache/vcpkg/archives under its own ABI hash, so restoring that
+        # directory turns the next configure into an unpack. A stale entry
+        # cannot be picked up by mistake — the hash covers the port version,
+        # triplet and compiler — it simply misses and is rebuilt.
+        # The key is unique per run so every run writes a fresh entry; the
+        # restore-keys then pull the newest one that exists, including whatever
+        # a *failed* run left behind, which is how a dependency install that
+        # died halfway through a flaky fetch resumes instead of starting over.
+        # Shared with the other workflow that drives the same configs, so a
+        # weekly verify-extraction run warms this job and vice versa.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-archives-${{ runner.os }}-${{ hashFiles('benchmarks/configs/*.toml')
+            }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-archives-${{ runner.os }}-${{ hashFiles('benchmarks/configs/*.toml') }}-
+            vcpkg-archives-${{ runner.os }}-
       - name: Verify extraction
         # `uv run` puts the project's venv bin on PATH, so the harness resolves
         # `clangquill` by name; `doxygen` comes from apt. `--no-sync` is
@@ -151,6 +181,29 @@ jobs:
           # otherwise leave no trace of how far it got in the CI log.
           uv run --no-sync --project benchmarks python -u benchmarks/verify.py \
             --repos "$VERIFY_REPOS" $fresh
+      - name: Check whether the vcpkg binary cache has anything to save
+        # Only a config that names a preset populates it (today: dune-gdt), so a
+        # run narrowed to the other configs never creates the directory at all
+        # and actions/cache/save would warn about the missing path. Decide here
+        # instead of making the save step guess at the scope.
+        id: vcpkg-archives
+        if: always()
+        run: |
+          if [ -n "$(find ~/.cache/vcpkg/archives -type f -print -quit 2>/dev/null)" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Save the vcpkg binary cache
+        # always(), deliberately: a run that died partway through the dependency
+        # install still leaves every package it did finish in the archive, and
+        # that partial stack is exactly what the next run needs.
+        if: always() && steps.vcpkg-archives.outputs.present == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-archives-${{ runner.os }}-${{ hashFiles('benchmarks/configs/*.toml')
+            }}-${{ github.run_id }}
       - name: Publish results to job summary
         if: always()
         run: |

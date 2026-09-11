@@ -6,15 +6,30 @@
 # parseable straight out of its checkout.
 name = "dune-gdt"
 repo = "https://github.com/dune-gdt/dune-gdt.git"
-ref = "26587316c443e89a54a99afd532a8a6b679ef872" # main @ 2026-08-25
-# The clang22-debug preset builds at C++20; parsing at c++17 would not be the
-# code the compiler sees.
+# main @ 2026-09-10, deliberately past dune-gdt/dune-gdt#471: that PR added a
+# gmp vcpkg overlay port preferring ftp.gnu.org over the ftpmirror.gnu.org
+# redirector, which 502/504'd the dependency install on two benchmark runs in a
+# row (issue #357). The mirror is not the only flaky source in this dependency
+# set — dune-uggrid is fetched from gitlab.dune-project.org, which has answered
+# 429 to a hosted runner — so the workflows also keep a vcpkg binary cache and
+# a partially-built stack survives into the next run.
+ref = "9cbfebcb9cdd5ab0e1ed09c07568de2bc6bad8e0"
+# The preset builds at C++20; parsing at c++17 would not be the code the
+# compiler sees.
 std = "c++20"
 # The harness runs this before parsing. vcpkg pulls in the DUNE stack the deep
 # include tree needs, and configure generates config.h + dune-gdt-config.hh;
 # without it libclang cannot resolve dune/common/*, which is what this project
 # used to fail on. Cold, it builds the whole stack and takes about an hour.
-cmake_preset = "clang22-debug"
+# `debug`, not the `clang22-debug` this used to name: that preset pins
+# CMAKE_C[XX]_COMPILER to clang-22/clang++-22, which upstream's CI installs from
+# apt.llvm.org and our runners do not have (tools/ci/install-llvm-apt.sh
+# installs the libclang clangquill links against, not a clang driver), so it
+# could not configure here whatever the dependency mirrors did. The two are
+# otherwise identical — Ninja, C++20, the x64-linux-shared triplet, the same
+# dependency set, which vcpkg builds with the runner's default toolchain either
+# way — so `debug` configures the same tree without inheriting their clang pin.
+cmake_preset = "debug"
 # dune-gdt resolves its interpreter with `uv python find` from the source dir
 # (CMakeLists.txt), which walks *up* and finds benchmarks/.venv — the harness's
 # own environment, holding the clangquill build under test — then FORCEs it and
@@ -28,9 +43,9 @@ cmake_args = [
 # spelled out because the harness has no reason to guess it.
 include_dirs = [
     ".",
-    "build/clang22-debug/vcpkg_installed/x64-linux-shared/include",
-    "build/clang22-debug",
-    "build/clang22-debug/include",
+    "build/debug/vcpkg_installed/x64-linux-shared/include",
+    "build/debug",
+    "build/debug/include",
 ]
 # dune-common's indices.hh uses `operator"" _ic` with a space, which clang 22
 # deprecated. Upstream code we cannot fix, and --warnings-as-errors is fatal.
