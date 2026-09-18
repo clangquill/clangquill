@@ -45,17 +45,19 @@ class ScopedCXString {
 inline std::string to_string(CXString s) { return ScopedCXString(s).str(); }
 
 /// @brief Returns a cursor's spelling (unqualified name).
+///
+/// A constructor's or destructor's injected-class-name template arguments are
+/// dropped, so a class template's members are spelled `Matrix`/`~Matrix` rather
+/// than libclang's `Matrix<F>`/`~Matrix<F>` (see the note in `cursor_utils.cpp`).
 /// @param c The cursor to inspect.
 /// @return The spelling text.
-inline std::string spelling(CXCursor c) {
-  return to_string(clang_getCursorSpelling(c));
-}
+std::string spelling(CXCursor c);
 /// @brief Returns a cursor's display name (includes parameters for overloads).
+///
+/// Carries the same constructor/destructor correction as `spelling()`.
 /// @param c The cursor to inspect.
 /// @return The display-name text.
-inline std::string display_name(CXCursor c) {
-  return to_string(clang_getCursorDisplayName(c));
-}
+std::string display_name(CXCursor c);
 /// @brief Returns a cursor's USR (unified symbol resolution string).
 /// @param c The cursor to inspect.
 /// @return The USR text.

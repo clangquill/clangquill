@@ -121,6 +121,70 @@ std::string canonical_usr(CXCursor c) {
 
 namespace {
 
+// Whether @p c declares a constructor or destructor, however it is templated.
+//
+// A constructor *template* is reported as CXCursor_FunctionTemplate, so the
+// cursor kind alone misses it; clang_getTemplateCursorKind answers with the
+// kind an instantiation of that template would have.
+bool is_constructor_or_destructor(CXCursor c) {
+  CXCursorKind kind = clang_getCursorKind(c);
+  if (kind == CXCursor_FunctionTemplate) kind = clang_getTemplateCursorKind(c);
+  return kind == CXCursor_Constructor || kind == CXCursor_Destructor;
+}
+
+// Drops the injected-class-name template-id from a constructor/destructor name.
+//
+// libclang names a constructor after the *type* it constructs, and inside a
+// class template that type is the injected-class-name -- so a cursor spells
+// itself `Matrix<F>` and `~Matrix<F>` rather than `Matrix` and `~Matrix`
+// (clang's own SuppressTemplateArgsInCXXConstructors printing policy, which
+// pretty_signature() below sets and clang_getCursorSpelling has no way to take,
+// is what drops them). That is not the entity's C++ name: neither a constructor
+// nor a destructor takes template arguments of its own, and only the enclosing
+// class scope may carry them. qualified_name() builds on the spelling, so
+// leaving the id in names the constructor `Matrix::Matrix<F>`, which the
+// generator then qualifies into `Matrix<F>::Matrix<F>` -- two argument lists
+// under one `template<...>` head, which the Sphinx C++ domain rejects as
+// "Argument lists: 2, Parameter lists: 1".
+//
+// Only an id that is the whole tail of the name (a spelling) or is followed by
+// the parameter list (a display name) is removed, and only when its angle
+// brackets balance. Any other shape is a name this was not written against and
+// is returned exactly as libclang spelled it rather than truncated.
+std::string without_injected_template_id(const std::string& name) {
+  const std::size_t open = name.find('<');
+  // A constructor or destructor name never *starts* with `<`; one that does is
+  // some other entity libclang spells with angle brackets, left alone.
+  if (open == std::string::npos || open == 0) return name;
+  int depth = 0;
+  for (std::size_t i = open; i < name.size(); ++i) {
+    if (name[i] == '<') {
+      ++depth;
+    } else if (name[i] == '>' && --depth == 0) {
+      const std::string rest = name.substr(i + 1);
+      if (!rest.empty() && rest.front() != '(') return name;
+      return name.substr(0, open) + rest;
+    }
+  }
+  return name;
+}
+
+}  // namespace
+
+std::string spelling(CXCursor c) {
+  std::string name = to_string(clang_getCursorSpelling(c));
+  if (!is_constructor_or_destructor(c)) return name;
+  return without_injected_template_id(name);
+}
+
+std::string display_name(CXCursor c) {
+  std::string name = to_string(clang_getCursorDisplayName(c));
+  if (!is_constructor_or_destructor(c)) return name;
+  return without_injected_template_id(name);
+}
+
+namespace {
+
 // The name a scope contributes to a qualified name.
 //
 // An anonymous namespace has no spelling of its own, and eliding it would name
@@ -165,6 +229,19 @@ std::string pretty_signature(CXCursor c) {
   clang_PrintingPolicy_setProperty(policy, CXPrintingPolicy_TerseOutput, 1);
   clang_PrintingPolicy_setProperty(policy, CXPrintingPolicy_PolishForDeclaration,
                                    1);
+  // Print a constructor as `Matrix(...)`, not `Matrix<F>(...)`: the
+  // injected-class-name template-id is not part of its name, and the qualifier
+  // the generator prepends already carries the class's arguments (see
+  // without_injected_template_id above). This is what covers the constructor
+  // *template*, whose cursor is a CXCursor_FunctionTemplate printed with a head
+  // of its own -- the generator's own repair keys on the constructor and
+  // destructor symbol kinds, so it never sees one.
+  //
+  // Despite its name the property is not consulted for a destructor, which
+  // keeps its `~Matrix<F>()` spelling here; the generator strips that, and can,
+  // because no destructor is ever a template.
+  clang_PrintingPolicy_setProperty(
+      policy, CXPrintingPolicy_SuppressTemplateArgsInCXXConstructors, 1);
   std::string out = to_string(clang_getCursorPrettyPrinted(c, policy));
   clang_PrintingPolicy_dispose(policy);
   return out;
