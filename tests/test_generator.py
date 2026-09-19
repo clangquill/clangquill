@@ -1504,6 +1504,37 @@ def test_strip_recovery_defaults_removes_both_forms() -> None:
     assert _strip_recovery_defaults("void g(int n = 0, T *p = nullptr)") == "void g(int n = 0, T *p = nullptr)"
 
 
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_class_template_ctor_dtor_carry_no_template_id(tmp_path: Path) -> None:
+    from clangquill.store import SymbolKind  # noqa: PLC0415
+
+    # libclang names class-template special members after the injected-class-name
+    # (`Mini<F>`/`~Mini<F>`); rendering that id after the `::` puts two argument
+    # lists under one `template<...>` head, which Sphinx rejects.
+    header = tmp_path / "mini.hpp"
+    header.write_text(
+        "/// A vector.\n"
+        "template <typename F = double>\n"
+        "struct Mini {\n"
+        "  /// Create one.\n"
+        "  explicit Mini(int sz = 0);\n"
+        "  /// Destroy one.\n"
+        "  ~Mini();\n"
+        "};\n",
+    )
+    db = tmp_path / "mini.sqlite"
+    options = _core.ParseOptions()
+    options.std_flag = "c++20"
+    _core.parse_to_sqlite([str(header)], str(db), options)
+
+    with Store.open(db) as store:
+        gen = Generator(store)
+        sigs = [gen.signature(s) for s in store.symbols() if s.kind in (SymbolKind.CONSTRUCTOR, SymbolKind.DESTRUCTOR)]
+
+    assert "template<typename F = double> explicit Mini<F>::Mini(int sz = 0)" in sigs
+    assert "template<typename F = double> Mini<F>::~Mini()" in sigs
+
+
 def test_specialization_pages_build_without_duplicate_or_parse_warnings(
     spec_gen: Generator,
     tmp_path: Path,
