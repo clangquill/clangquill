@@ -291,6 +291,19 @@ def _scope_suffix(symbol: Symbol) -> str:
     return "" if args == _template_param_names(symbol.signature) else suffix
 
 
+#: Leading specifiers the Sphinx C/C++ domains ignore for declaration
+#: identity: two declarations differing only in these name the same entity,
+#: so the domain warns ``duplicate_declaration`` on the second. ``static``
+#: is deliberately absent — at namespace scope it means internal linkage, a
+#: genuinely separate entity per translation unit.
+_IDENTITY_SPECIFIERS_RE = re.compile(r"^(?:(?:constexpr|consteval|constinit|inline)\s+)+")
+
+
+def _declaration_identity_text(text: str) -> str:
+    """Normalize a rendered declaration for duplicate comparison."""
+    return _IDENTITY_SPECIFIERS_RE.sub("", text)
+
+
 #: A default argument clang could not evaluate, emitted verbatim as
 #: ``<recovery-expr>`` (optionally followed by a balanced ``(...)`` of arguments).
 _RECOVERY_DEFAULT_RE = re.compile(r"\s*=\s*<recovery-expr>")
@@ -332,6 +345,132 @@ def _strip_recovery_defaults(signature: str) -> str:
     return "".join(out)
 
 
+#: Multi-character comparison operators that may appear as template arguments.
+#: A bare ``>`` closes the argument list in the Sphinx C++ domain's grammar,
+#: so ``conditional_t<sizeof(int) >= sizeof(char), ...>`` misparses (the domain
+#: reads ``>`` as the list end and fails on the ``= ...`` that follows), while
+#: the parenthesized form parses as a value expression. ``<=``/``==``/``!=``
+#: parse unparenthesized today, but ride along so every comparison renders
+#: unambiguously. Single ``<``/``>`` are never touched: they are
+#: indistinguishable from nested template brackets without a full parse.
+_COMPARISON_OP_RE = re.compile(r">=|<=|==|!=")
+
+
+def _has_top_level_comparison(arg: str) -> bool:
+    """Whether ``arg`` uses a comparison outside any bracket nesting.
+
+    Only operators at nesting depth zero count: an ``operator>=`` inside
+    ``decltype(...)`` ( or any parenthesized/braced/bracketed group, or a
+    nested ``<...>``) is left alone, since only a top-level ``>`` can close
+    the Sphinx template-argument list early.
+    """
+    depth = 0
+    i, end = 0, len(arg)
+    while i < end:
+        # The operator check comes first: `>=`/`<=` start with a bracket
+        # character, which the depth accounting below would otherwise consume
+        # before the comparison is ever tested.
+        if depth == 0 and _COMPARISON_OP_RE.match(arg, i):
+            return True
+        ch = arg[i]
+        if ch in "<([{":
+            depth += 1
+        elif ch in ">)}]":
+            depth = max(0, depth - 1)
+        i += 1
+    return False
+
+
+def _split_top_level_spans(text: str) -> list[tuple[int, int]]:
+    """Split ``text`` on top-level commas, yielding ``(start, end)`` spans.
+
+    Same bracket accounting as :func:`_split_top_level` (``<>``, ``()``,
+    ``[]``, ``{}`` all nest), but with offsets so callers can splice the
+    original text without normalizing its separators — and with ``<=``/``>=``
+    awareness (see :func:`_parenthesize_template_arg_comparisons`): a bracket
+    directly followed by ``=`` is a comparison, never list structure, so it
+    must not disturb the depth (or the ``>`` of a ``>=`` condition would hide
+    the commas that follow it from the split).
+    """
+    spans: list[tuple[int, int]] = []
+    depth = 0
+    start = 0
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "<([{" and not (ch == "<" and text[i + 1 : i + 2] == "="):
+            depth += 1
+        elif ch in ">)}]" and not (ch == ">" and text[i + 1 : i + 2] == "="):
+            depth -= 1
+        elif ch == "," and depth == 0:
+            if text[start:i].strip():
+                spans.append((start, i))
+            start = i + 1
+        i += 1
+    if text[start:].strip():
+        spans.append((start, len(text)))
+    return spans
+
+
+def _template_group_end(text: str, start: int) -> int | None:
+    """Return the index of the ``>`` closing the ``<`` at ``start``, or ``None``.
+
+    A bracket directly followed by ``=`` never opens or closes an argument
+    list: ``<=``/``>=`` are comparisons (a template-id cannot start with
+    ``<=``, nor can ``>=`` straddle a list end in a well-formed type).
+    Without this the ``>`` of a ``>=`` condition would end the group early
+    and the argument would never be shielded. Unbalanced input yields
+    ``None`` so the caller leaves the text verbatim rather than rewriting it.
+    """
+    depth = 0
+    j, n = start, len(text)
+    while j < n:
+        if text[j] == "<" and text[j + 1 : j + 2] != "=":
+            depth += 1
+        elif text[j] == ">" and text[j + 1 : j + 2] != "=":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return None
+
+
+def _parenthesize_template_arg_comparisons(target: str) -> str:
+    """Parenthesize bare comparisons used as template arguments in ``target``.
+
+    ``using X = std::conditional_t<sizeof(long double) >= sizeof(int), ...>``
+    is valid C++ but the Sphinx C++ domain cannot parse it: its grammar takes
+    the ``>`` for the end of the argument list. Wrapping the argument —
+    ``conditional_t<(sizeof(long double) >= sizeof(int)), ...>`` — is
+    semantically identical C++ and parses as a value expression. Arguments
+    already parenthesized need nothing (the domain tracks paren depth), and
+    text without a balancing ``>`` is left verbatim rather than rewritten.
+    """
+    spans_to_wrap: list[tuple[int, int]] = []
+
+    def visit(text: str, base: int) -> None:
+        i, n = 0, len(text)
+        while i < n:
+            if text[i] != "<":
+                i += 1
+                continue
+            end = _template_group_end(text, i)
+            if end is None:
+                return
+            for start, stop in _split_top_level_spans(text[i + 1 : end]):
+                arg = text[i + 1 + start : i + 1 + stop]
+                if _has_top_level_comparison(arg):
+                    spans_to_wrap.append((base + i + 1 + start, base + i + 1 + stop))
+                else:
+                    visit(arg, base + i + 1 + start)
+            i = end + 1
+
+    visit(target, 0)
+    for start, end in reversed(spans_to_wrap):
+        target = target[:start] + "(" + target[start:end] + ")" + target[end:]
+    return target
+
+
 #: A ``<...>`` template-argument list allowing one level of nested ``<...>``
 #: (covers the injected-class-name of the documented constructors, e.g.
 #: ``Foo<Bar<X>>``). Used as an f-string fragment of :func:`_ctor_template_id_re`.
@@ -355,6 +494,43 @@ def _ctor_template_id_re(name: str) -> re.Pattern[str]:
 def _spelling_before_call_re(spelling: str) -> re.Pattern[str]:
     """Pattern matching the bare ``spelling`` right before its parameter list."""
     return re.compile(rf"(?<![\w:]){re.escape(spelling)}(?=\s*\()")
+
+
+@lru_cache(maxsize=4096)
+def _scoped_spelling_re(spelling: str) -> re.Pattern[str]:
+    """Pattern matching an already-scoped ``Scope<...>::spelling(``.
+
+    The scope is a run of ``Component::`` parts (each an identifier with an
+    optional balanced template argument list), so a return type preceding the
+    scope — ``std::string StringMaker<int>::convert(`` — cannot be absorbed
+    into it: a component holds no spaces. Captures the scope so an out-of-line
+    definition's record can be recovered from the store.
+    """
+    component = rf"[~\w]+(?:\s*{_BALANCED_ANGLES})?"
+    return re.compile(rf"(?P<scope>(?:{component}\s*::)*{component})\s*::{re.escape(spelling)}(?=\s*\()")
+
+
+def _split_scope_args(scope: str) -> tuple[str, str]:
+    """Split an in-signature scope into ``(base, args)``.
+
+    ``args`` is the trailing balanced ``<...>`` group (``""`` when the scope
+    carries none); ``base`` is everything before it. A ``<`` whose group does
+    not run to the end of the scope (e.g. the ``<T>`` in ``Outer<T>::Inner``)
+    starts no trailing group, so nested scopes keep their inner arguments in
+    ``base``.
+    """
+    depth = 0
+    last_open = -1
+    for i, ch in enumerate(scope):
+        if ch == "<":
+            if depth == 0:
+                last_open = i
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+    if last_open >= 0 and depth == 0 and scope.endswith(">"):
+        return scope[:last_open].rstrip(), scope[last_open:]
+    return scope, ""
 
 
 def _slug(name: str) -> str:
@@ -592,6 +768,10 @@ class Generator:
         self._contested: frozenset[str] = frozenset()
         # Lazily built by `related`; None until a record page first asks.
         self._related_by_name: dict[str, list[Symbol]] | None = None
+        # Lazily built record index keyed by qualified name (see
+        # :meth:`_record_by_qualified_name`); None until an already-scoped
+        # out-of-line definition first needs its record recovered.
+        self._records_by_qname: dict[str, list[Symbol]] | None = None
         # Template objects (and the two partial macros below) are immutable for
         # the lifetime of the environment, but Environment.get_template — and
         # Template.module, which re-evaluates the module body on every access —
@@ -610,6 +790,11 @@ class Generator:
         # declarations degrade to plain code blocks, so one mis-extracted symbol
         # can never take down the whole Sphinx build.
         self._page_decls: dict[str, str] = {}
+        # Canonical first-declaration per duplicate-prone directive, mapping a
+        # declaration identity (see :meth:`_declaration_identity`) to the USR
+        # that keeps its directive; None until the first render builds it (see
+        # :meth:`_is_repeat_declaration`).
+        self._canonical_decls: dict[tuple[str, str], str] | None = None
         loaders: list[FileSystemLoader | PackageLoader] = []
         if template_dirs:
             loaders.append(FileSystemLoader([str(d) for d in template_dirs]))
@@ -877,6 +1062,12 @@ class Generator:
         if symbol.kind in (SymbolKind.TYPEDEF, SymbolKind.TYPE_ALIAS):
             enclosing, qualified = self._member_qualifier(symbol)
             target = self._underlying(symbol)
+            if target:
+                # A bare comparison inside a template argument list
+                # (``conditional_t<sizeof(int) >= sizeof(char), ...>``) is valid
+                # C++ but unparseable by the Sphinx C++ domain; parenthesizing
+                # it is semantically identical and parses as a value.
+                target = _parenthesize_template_arg_comparisons(target)
             declaration = f"{qualified} = {target}" if target else qualified
             return enclosing + declaration
         if symbol.kind == SymbolKind.ENUM:
@@ -965,6 +1156,13 @@ class Generator:
         ``template<...>`` head is prepended, so the out-of-line member declaration
         is unambiguous (every specialization's member would otherwise collide on
         the bare parent name).
+
+        An out-of-line definition (typically from a ``.cpp``) pretty-prints with
+        its scope already attached (``Scope<Args>::name(...)``), so the bare
+        spelling never matches; the record is then recovered from the store
+        (see :meth:`_recover_scoped_definition`) to prepend the same head and
+        namespace qualification. When the scope names no known record the
+        signature is returned untouched.
         """
         if not symbol.spelling:
             return signature
@@ -972,9 +1170,68 @@ class Generator:
         if qualified == symbol.spelling and not head:
             return signature
         new, count = _spelling_before_call_re(symbol.spelling).subn(qualified, signature, count=1)
-        if not count:
-            return signature
-        return f"{head}{new}" if head else new
+        if count:
+            return f"{head}{new}" if head else new
+        recovered_head, recovered = self._recover_scoped_definition(signature, symbol)
+        if recovered != signature:
+            return f"{recovered_head}{recovered}" if recovered_head else recovered
+        return signature
+
+    def _recover_scoped_definition(self, signature: str, symbol: Symbol) -> tuple[str, str]:
+        """Return ``(template_head, signature)`` for an already-scoped definition.
+
+        Out-of-line member definitions pretty-print as ``Scope<Args>::name(...)``
+        with neither the ``template<...>`` head nor the enclosing namespace, and
+        their symbol's parent link points at the namespace rather than the
+        record — so :meth:`_member_qualifier` contributes nothing and the bare
+        directive carries an argument list with no parameter list, which the
+        Sphinx C++ domain rejects ("Too many template argument lists...").
+
+        The scope's last component is matched against the symbol's own qualified
+        name to find the record in the store; its (possibly nested) template
+        heads and its namespace qualification are then applied to the signature.
+        Returns ``(head, new_signature)`` with ``new_signature`` unchanged when
+        the scope names no known record.
+        """
+        if "::" not in symbol.qualified_name:
+            return "", signature
+        matches = list(_scoped_spelling_re(symbol.spelling).finditer(signature))
+        if not matches:
+            return "", signature
+        scope = matches[-1].group("scope").strip()
+        base, args = _split_scope_args(scope)
+        expected = symbol.qualified_name.rsplit("::", 1)[0]
+        if not expected or expected.rsplit("::", 1)[-1] != base.rsplit("::", 1)[-1]:
+            return "", signature
+        candidate = self._record_by_qualified_name(expected, scope, base, args)
+        if candidate is None:
+            return "", signature
+        heads, qualified = self._member_qualifier(candidate)
+        own = f"{_repair_split_operators(candidate.signature)} " if candidate.signature else ""
+        start, end = matches[-1].span("scope")
+        return heads + own, signature[:start] + qualified + args + signature[end:]
+
+    def _record_by_qualified_name(self, expected: str, scope: str, base: str, args: str) -> Symbol | None:
+        """Return the record ``scope`` names, or ``None`` when unknown.
+
+        ``expected`` is the qualified name the symbol record implies for its
+        parent scope; among the records sharing it, the one whose display name
+        spells ``scope`` (a specialization's ``display_name`` carries its
+        arguments, a primary template's its parameters) is the definition's
+        record. Anything else — an external record never parsed, an ambiguous
+        scope — resolves to ``None`` and the signature is left untouched.
+        """
+        if self._records_by_qname is None:
+            index: dict[str, list[Symbol]] = {}
+            for sym in self.store.symbols():
+                if sym.kind in _RECORD_KINDS and sym.qualified_name:
+                    index.setdefault(sym.qualified_name, []).append(sym)
+            self._records_by_qname = index
+        base_last = base.rsplit("::", 1)[-1]
+        for candidate in self._records_by_qname.get(expected, ()):
+            if candidate.display_name in (scope, base_last + args):
+                return candidate
+        return None
 
     def _member_qualifier(self, symbol: Symbol) -> tuple[str, str]:
         """Return ``(template_head, qualified_name)`` for a member declaration.
@@ -1147,14 +1404,18 @@ class Generator:
         page-root call renders at level 1 (recursive calls from the container
         templates go deeper), which is what scopes the duplicate-declaration
         registry to one page. A symbol whose declaration conflicts with one the
-        page already emitted (see :meth:`_register_declaration`) renders through
-        ``degraded.md.jinja`` — a plain code block instead of a ``cpp:*``
-        directive — so mis-extracted duplicates cannot crash Sphinx's C++
-        domain.
+        page already emitted (see :meth:`_register_declaration`), or repeats a
+        declaration emitted anywhere in this run (see
+        :meth:`_is_repeat_declaration`), renders through ``degraded.md.jinja``
+        — a plain code block instead of a ``cpp:*`` directive — so mis-extracted
+        duplicates cannot crash Sphinx's C++ domain.
         """
         if level == 1:
             self._page_decls.clear()
-        name = "degraded" if not self._register_declaration(symbol) else self.template_name(symbol)
+        if self._is_repeat_declaration(symbol):
+            name = "degraded"
+        else:
+            name = "degraded" if not self._register_declaration(symbol) else self.template_name(symbol)
         template = self._template(f"{name}.md.jinja")
         return _normalize(template.render(symbol=symbol, level=level))
 
@@ -1188,6 +1449,63 @@ class Generator:
             self._page_decls[name] = conflict_class
             return True
         return seen == conflict_class == "function"
+
+    def _declaration_identity(self, symbol: Symbol) -> tuple[str, str] | None:
+        """Return the duplicate-identity key for ``symbol``, or ``None``.
+
+        Two function symbols share an identity when their rendered directives
+        are textually identical modulo leading ``constexpr``/``inline``-style
+        specifiers (which the Sphinx domain ignores: it warns
+        ``duplicate_declaration`` on a ``constexpr``/plain pair). Two macros
+        share one when their qualified names match — C has no overloading, so
+        same-name macros from different headers always collide in the domain,
+        even with different parameter lists. Every other kind returns ``None``
+        (the page-local :meth:`_register_declaration` already covers those).
+        """
+        if symbol.kind == SymbolKind.MACRO:
+            name = symbol.qualified_name or symbol.spelling
+            return ("c:macro", name) if name else None
+        if symbol.kind in _FUNCTION_KINDS:
+            return (self.directive(symbol), _declaration_identity_text(self.signature(symbol)))
+        return None
+
+    def _canonical_declarations(self) -> dict[tuple[str, str], str]:
+        """Map each duplicate-identity key to the USR that keeps its directive.
+
+        Built once per generator from the whole store, so the choice is stable
+        no matter which pages render (or re-render) in which order — including
+        incremental rebuilds that replay some pages from cache. Documented
+        symbols win over undocumented ones, then source order decides, so the
+        surviving declaration is deterministic for a given database.
+        """
+        if self._canonical_decls is None:
+            first: dict[tuple[str, str], str] = {}
+            ordered = sorted(
+                self.store.symbols(),
+                key=lambda s: (not s.is_documented, s.file_id or -1, s.line, s.usr),
+            )
+            for sym in ordered:
+                key = self._declaration_identity(sym)
+                if key is not None and key not in first:
+                    first[key] = sym.usr
+            self._canonical_decls = first
+        return self._canonical_decls
+
+    def _is_repeat_declaration(self, symbol: Symbol) -> bool:
+        """Whether ``symbol`` repeats an already-emitted declaration.
+
+        Friend declarations from several classes (whose ``ThisType``-style
+        aliases hide the distinct real types) and same-name macros from several
+        headers render to identical directives; the Sphinx domains can index
+        only one, warning ``duplicate_declaration`` on the rest (fatal under
+        ``-W``). Repeats render through ``degraded.md.jinja`` — a plain code
+        block that keeps the declaration and its comment visible without
+        registering a second domain object.
+        """
+        key = self._declaration_identity(symbol)
+        if key is None:
+            return False
+        return self._canonical_declarations().get(key) != symbol.usr
 
     def render_file(self, source_file: SourceFile, *, level: int = 1) -> str:
         """Render every top-of-file symbol declared in ``source_file``.
