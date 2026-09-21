@@ -48,7 +48,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libclang-dev
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.1.0
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:
@@ -66,7 +66,7 @@ jobs:
       # configured — has to skip the step rather than fail the run. Where the
       # token *is* set the upload is a real gate (fail_ci_if_error below).
         if: ${{ env.CODECOV_TOKEN != '' }}
-        uses: codecov/codecov-action@v7.0.0
+        uses: codecov/codecov-action@v7.1.0
         with:
           env_vars: OS,PYTHON
           # pytest writes coverage.xml (see pyproject addopts). Name it and
@@ -109,7 +109,7 @@ jobs:
       - name: Install LLVM 23 from apt.llvm.org
         run: bash tools/ci/install-llvm-apt.sh
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.1.0
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:
@@ -146,7 +146,7 @@ jobs:
       - name: Install LLVM 23 from apt.llvm.org
         run: bash tools/ci/install-llvm-apt.sh
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.1.0
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:
@@ -177,7 +177,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.1.0
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:
