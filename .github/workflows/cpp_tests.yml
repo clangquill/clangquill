@@ -75,7 +75,7 @@ jobs:
             # fork PR (or where the secret is unset), and codecov rejects a
             # tokenless upload.
         if: ${{ env.CODECOV_TOKEN != '' }}
-        uses: codecov/codecov-action@v7.0.0
+        uses: codecov/codecov-action@v7.1.0
         with:
           files: cpp-coverage.xml
           disable_search: true
