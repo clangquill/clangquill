@@ -834,6 +834,255 @@ def _build_degraded_db(path: Path) -> None:
         con.close()
 
 
+def _build_out_of_line_spec_member_db(path: Path) -> None:
+    """Populate ``path`` with an out-of-line definition of a spec member.
+
+    Mirrors the oasys-core shape that warned ``Too many template argument
+    lists``: ``Catch::StringMaker<int, void>::convert`` is *defined* in a
+    ``.cpp`` (pretty-printed with its scope attached), so its symbol's parent
+    link points at the ``Catch`` namespace rather than the explicit
+    specialization, and the bare-spelling substitution in ``_qualify`` cannot
+    fire. The record the scope names (an explicit specialization carrying a
+    ``template<>`` head) is present, so the generator must recover it.
+    """
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(_schema_ddl())
+        con.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(_core.SCHEMA_VERSION),))
+        con.execute("INSERT INTO files(id, path, sha256, size_bytes) VALUES(1, 'parameter.cpp', 'pp', 64)")
+
+        def sym(  # noqa: PLR0913
+            usr: str,
+            parent: str,
+            kind: SymbolKind,
+            spelling: str,
+            qname: str,
+            *,
+            display: str | None = None,
+            signature: str = "",
+            type_repr: str = "",
+            line: int = 0,
+        ) -> None:
+            con.execute(
+                "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, "
+                "display_name, signature, type_repr, access, is_definition, "
+                "is_documented, content_hash, file_id, line) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 1, ?, 1, ?)",
+                (
+                    usr,
+                    parent,
+                    kind,
+                    spelling,
+                    qname,
+                    display if display is not None else qname,
+                    signature,
+                    type_repr,
+                    "hash-" + usr,
+                    line,
+                ),
+            )
+
+        catch = "c:@N@Catch"
+        spec = "c:@N@Catch@CTS@StringMaker"
+        convert = spec + "@F@convert"
+
+        sym(catch, "", SymbolKind.NAMESPACE, "Catch", "Catch", line=1)
+        sym(
+            spec,
+            catch,
+            SymbolKind.CLASS_TEMPLATE,
+            "StringMaker",
+            "Catch::StringMaker",
+            display="StringMaker<int, void>",
+            signature="template<>",
+            type_repr="Catch::StringMaker<int, void>",
+            line=156,
+        )
+        # The .cpp definition: scoped pretty-print, parented at the namespace.
+        sym(
+            convert,
+            catch,
+            SymbolKind.METHOD,
+            "convert",
+            "Catch::StringMaker::convert",
+            display="convert(const int &)",
+            signature="std::string StringMaker<int, void>::convert(const int &value)",
+            type_repr="std::string (const int &)",
+            line=224,
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def _build_duplicate_functions_db(path: Path) -> None:
+    """Populate ``path`` with same-scope functions rendering identically.
+
+    Mirrors the oasys-core ``friend`` operators: two declarations from different
+    classes collapse to one rendered signature once ``ThisType``-style aliases
+    hide the distinct real types (one pair here differs only in ``constexpr``,
+    which the Sphinx domain ignores for identity), plus a genuine overload of
+    the same name that must keep its own directive.
+    """
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(_schema_ddl())
+        con.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(_core.SCHEMA_VERSION),))
+        con.execute("INSERT INTO files(id, path, sha256, size_bytes) VALUES(1, 'ops.hpp', 'oo', 64)")
+
+        def sym(usr: str, parent: str, spelling: str, qname: str, *, signature: str, line: int) -> None:  # noqa: PLR0913
+            con.execute(
+                "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, "
+                "display_name, signature, type_repr, access, is_definition, "
+                "is_documented, content_hash, file_id, line) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, '', 0, 1, 1, ?, 1, ?)",
+                (usr, parent, SymbolKind.FUNCTION, spelling, qname, spelling, signature, "hash-" + usr, line),
+            )
+
+        ns = "c:@N@oasys"
+        con.execute(
+            "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, "
+            "display_name, signature, type_repr, access, is_definition, "
+            "is_documented, content_hash, file_id, line) "
+            "VALUES(?, '', ?, 'oasys', 'oasys', 'oasys', '', '', 0, 1, 1, ?, 1, 1)",
+            (ns, SymbolKind.NAMESPACE, "hash-" + ns),
+        )
+        sym(
+            "c:@N@oasys@F@operator-#1",
+            ns,
+            "operator-",
+            "oasys::operator-",
+            signature="ThisType operator-(const ThisType &lhs, const ThisType &rhs)",
+            line=10,
+        )
+        sym(
+            "c:@N@oasys@F@operator-#2",
+            ns,
+            "operator-",
+            "oasys::operator-",
+            signature="constexpr ThisType operator-(const ThisType &lhs, const ThisType &rhs)",
+            line=20,
+        )
+        sym(
+            "c:@N@oasys@F@operator-#3",
+            ns,
+            "operator-",
+            "oasys::operator-",
+            signature="ThisType operator-(int n)",
+            line=30,
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def _build_duplicate_macros_db(path: Path) -> None:
+    """Populate ``path`` with two same-name macros carrying different parameters.
+
+    Mirrors the oasys-core test helpers defining ``GENERATE_MATCHER_CHECK_FUNCTION``
+    with two versus three parameters in different headers: C has no overloading,
+    so the Sphinx C domain can index only one ``c:macro`` object per name.
+    """
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(_schema_ddl())
+        con.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(_core.SCHEMA_VERSION),))
+        con.execute("INSERT INTO files(id, path, sha256, size_bytes) VALUES(1, 'matchers.hpp', 'mm', 64)")
+
+        def sym(usr: str, signature: str, line: int) -> None:
+            con.execute(
+                "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, "
+                "display_name, signature, type_repr, access, is_definition, "
+                "is_documented, content_hash, file_id, line) "
+                "VALUES(?, '', ?, 'GEN_FN', 'GEN_FN', 'GEN_FN', ?, '', 0, 1, 1, ?, 1, ?)",
+                (usr, SymbolKind.MACRO, signature, "hash-" + usr, line),
+            )
+
+        sym("c:@macro@GEN_FN#1", "GEN_FN(A, OP, EXTRA)", 5)
+        sym("c:@macro@GEN_FN#2", "GEN_FN(A, OP)", 9)
+        con.commit()
+    finally:
+        con.close()
+
+
+def _build_comparison_alias_db(path: Path) -> None:
+    """Populate ``path`` with an alias whose target compares inside ``<>``.
+
+    Mirrors the oasys-core ``largest_supported_fp_type`` alias to
+    ``std::conditional_t<sizeof(long double) >= sizeof(int), ...>``: valid C++
+    whose bare ``>`` the Sphinx C++ domain reads as the end of the template
+    argument list (``Invalid C++ declaration``).
+    """
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(_schema_ddl())
+        con.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(_core.SCHEMA_VERSION),))
+        con.execute("INSERT INTO files(id, path, sha256, size_bytes) VALUES(1, 'cast.hpp', 'cc', 64)")
+
+        ns = "c:@N@oasys"
+        alias = "c:@N@oasys@T@largest_t"
+        con.execute(
+            "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, "
+            "display_name, signature, type_repr, access, is_definition, "
+            "is_documented, content_hash, file_id, line) "
+            "VALUES(?, '', ?, 'oasys', 'oasys', 'oasys', '', '', 0, 1, 1, ?, 1, 1)",
+            (ns, SymbolKind.NAMESPACE, "hash-" + ns),
+        )
+        con.execute(
+            "INSERT INTO symbols(usr, parent_usr, kind, spelling, qualified_name, "
+            "display_name, signature, type_repr, access, is_definition, "
+            "is_documented, content_hash, file_id, line) "
+            "VALUES(?, ?, ?, 'largest_t', 'oasys::largest_t', 'largest_t', '', 'oasys::largest_t', "
+            "0, 1, 1, ?, 1, 54)",
+            (alias, ns, SymbolKind.TYPE_ALIAS, "hash-" + alias),
+        )
+        con.execute(
+            "INSERT INTO references_(from_usr, ref_kind, to_usr, to_spelling, is_resolved, access, ordinal) "
+            "VALUES(?, ?, '', ?, 0, ?, 0)",
+            (
+                alias,
+                RefKind.UNDERLYING_TYPE,
+                "std::conditional_t<sizeof(long double) >= sizeof(int), long double, int>",
+                AccessKind.NONE,
+            ),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+@pytest.fixture
+def out_of_line_spec_member_db(tmp_path: Path) -> Path:
+    """Return an IR database with an out-of-line explicit-spec member definition."""
+    path = tmp_path / "outline.sqlite"
+    _build_out_of_line_spec_member_db(path)
+    return path
+
+
+@pytest.fixture
+def duplicate_functions_db(tmp_path: Path) -> Path:
+    """Return an IR database with same-scope functions rendering identically."""
+    path = tmp_path / "dupfuncs.sqlite"
+    _build_duplicate_functions_db(path)
+    return path
+
+
+@pytest.fixture
+def duplicate_macros_db(tmp_path: Path) -> Path:
+    """Return an IR database with two same-name macros carrying different parameters."""
+    path = tmp_path / "dupmacros.sqlite"
+    _build_duplicate_macros_db(path)
+    return path
+
+
+@pytest.fixture
+def comparison_alias_db(tmp_path: Path) -> Path:
+    """Return an IR database with an alias comparing inside ``<>``."""
+    path = tmp_path / "cmpalias.sqlite"
+    _build_comparison_alias_db(path)
+    return path
+
+
 @pytest.fixture
 def collision_db(tmp_path: Path) -> Path:
     """Return an IR database whose symbols produce colliding page stems."""
