@@ -1689,3 +1689,137 @@ def test_page_fingerprints_read_symbols_and_references_in_bulk(fixture_db: Path)
     # have been built before the traced block and cost nothing inside it.
     assert sum("FROM symbols" in sql for sql in seen) <= 1
     assert sum("FROM references_" in sql for sql in seen) <= 1
+
+
+def test_out_of_line_definition_of_explicit_specialization_member_is_requalified(
+    out_of_line_spec_member_db: Path,
+) -> None:
+    # A member *defined* in a .cpp pretty-prints with its scope attached
+    # (`StringMaker<int, void>::convert(...)`) and its symbol's parent link
+    # points at the namespace rather than the explicit specialization, so the
+    # bare-spelling substitution cannot fire. The scope still names a known
+    # record, whose `template<>` head and namespace qualification the directive
+    # must carry -- otherwise Sphinx warns "Too many template argument lists".
+    with Store.open(out_of_line_spec_member_db) as store:
+        gen = Generator(store)
+        convert = next(s for s in store.symbols() if s.qualified_name == "Catch::StringMaker::convert")
+        assert (
+            gen.signature(convert) == "template<> std::string Catch::StringMaker<int, void>::convert(const int &value)"
+        )
+
+
+def test_duplicate_function_declarations_degrade_after_the_first(duplicate_functions_db: Path) -> None:
+    # Two friend-style declarations collapse to one rendered signature once
+    # aliases hide the distinct real types (and Sphinx ignores `constexpr` for
+    # identity, so the plain/`constexpr` pair collides too). The domain can
+    # index only one: the first keeps its directive, the repeat degrades to a
+    # code block, and a genuine overload of the same name is untouched.
+    with Store.open(duplicate_functions_db) as store:
+        ns = next(s for s in store.symbols() if s.qualified_name == "oasys")
+        page = Generator(store).render_symbol(ns, level=1)
+    assert "```{cpp:function} ThisType oasys::operator-(const ThisType &lhs, const ThisType &rhs)" in page
+    assert "```{cpp:function} ThisType oasys::operator-(int n)" in page
+    assert "```{cpp:function} constexpr ThisType oasys::operator-" not in page
+    assert "```cpp" in page
+    assert page.count("{cpp:function}") == 2
+
+
+def test_duplicate_macro_definitions_degrade_after_the_first(duplicate_macros_db: Path) -> None:
+    # C has no overloading: same-name macros from different headers collide in
+    # the C domain even with different parameter lists, so only the first keeps
+    # its `c:macro` directive while the repeat stays visible as a code block.
+    with Store.open(duplicate_macros_db) as store:
+        gen = Generator(store)
+        first, second = sorted(store.symbols(), key=lambda s: s.line)
+        first_rendered = gen.render_symbol(first)
+        second_rendered = gen.render_symbol(second)
+    assert "{c:macro}" in first_rendered
+    assert "GEN_FN(A, OP, EXTRA)" in first_rendered
+    assert "{c:macro}" not in second_rendered
+    assert "```cpp" in second_rendered
+    assert "GEN_FN(A, OP)" in second_rendered
+
+
+def test_alias_with_comparison_in_template_args_is_parenthesized(comparison_alias_db: Path) -> None:
+    # `conditional_t<sizeof(long double) >= sizeof(int), ...>` is valid C++,
+    # but Sphinx reads the `>` as the end of the argument list ("Invalid C++
+    # declaration"); the parenthesized condition parses as a value expression.
+    with Store.open(comparison_alias_db) as store:
+        gen = Generator(store)
+        alias = next(s for s in store.symbols() if s.qualified_name == "oasys::largest_t")
+        assert gen.signature(alias) == (
+            "oasys::largest_t = std::conditional_t<(sizeof(long double) >= sizeof(int)), long double, int>"
+        )
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("long double", "long double"),
+        (
+            "std::conditional_t<sizeof(long double) >= sizeof(int), long double, int>",
+            "std::conditional_t<(sizeof(long double) >= sizeof(int)), long double, int>",
+        ),
+        (
+            "std::conditional_t<std::is_same_v<int, int> == true, long double, int>",
+            "std::conditional_t<(std::is_same_v<int, int> == true), long double, int>",
+        ),
+        # Already parenthesized: Sphinx tracks paren depth, nothing to shield.
+        (
+            "std::conditional_t<(a >= b), long double, int>",
+            "std::conditional_t<(a >= b), long double, int>",
+        ),
+        # Nested templates, decltype and unbalanced input pass through untouched.
+        ("std::map<int, std::vector<int>>", "std::map<int, std::vector<int>>"),
+        (
+            "decltype(std::tuple_cat(std::declval<Tuples>()...))",
+            "decltype(std::tuple_cat(std::declval<Tuples>()...))",
+        ),
+        ("unbalanced < foo", "unbalanced < foo"),
+    ],
+)
+def test_parenthesize_template_arg_comparisons(target: str, expected: str) -> None:
+    from clangquill.generator import _parenthesize_template_arg_comparisons  # noqa: PLC0415
+
+    assert _parenthesize_template_arg_comparisons(target) == expected
+
+
+@pytest.mark.skipif(not _core.have_libclang(), reason="core built without libclang")
+def test_oasys_warning_shapes_build_warning_free(tmp_path: Path) -> None:
+    # End to end over the oasys-core warning shapes: inline-defined friend
+    # operators collapsing to one signature, same-name macros with different
+    # parameters, and an alias comparing inside `<>`. A strict Sphinx build
+    # over the generated pages must warn about none of them.
+    pytest.importorskip("sphinx")
+    pytest.importorskip("myst_parser")
+
+    header = tmp_path / "shapes.hpp"
+    header.write_text(
+        "#pragma once\n"
+        "#include <string>\n"
+        "#include <type_traits>\n"
+        "#define GEN_FN(A, OP, EXTRA) int A = 1\n"
+        "#define GEN_FN(A, OP) int A = 2\n"
+        "namespace oasys {\n"
+        "template <class F> struct DynVec {\n"
+        "  using ThisType = DynVec;\n"
+        "  friend ThisType operator+(const ThisType& lhs, const ThisType& rhs) { return lhs; }\n"
+        "};\n"
+        "template <class F> struct FixVec {\n"
+        "  using ThisType = FixVec;\n"
+        "  friend constexpr ThisType operator+(const ThisType& lhs, const ThisType& rhs) { return lhs; }\n"
+        "};\n"
+        "using largest_t =\n"
+        "    std::conditional_t<sizeof(long double) >= sizeof(int), long double, int>;\n"
+        "}\n",
+    )
+    db = tmp_path / "shapes.sqlite"
+    options = _core.ParseOptions()
+    options.std_flag = "c++20"
+    _core.parse_to_sqlite([str(header)], str(db), options)
+
+    with Store.open(db) as store:
+        gen = Generator(store)
+        src = tmp_path / "src"
+        gen.generate(src, group_by="class")
+    _build_strict(src, tmp_path, "shapes")
