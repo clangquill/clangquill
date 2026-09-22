@@ -639,6 +639,26 @@ TEST_CASE("a streamed parse hands over the IR the merge would have held",
   CHECK(diagnostic_texts(rest) == diagnostic_texts(merged));
 }
 
+TEST_CASE("an unmentioned -Wunused-template is switched back off", "[parser]") {
+  // Every translation unit here is parsed with function bodies skipped, so a
+  // helper template used only from those bodies is never instantiated in the
+  // parse -- and clang's -Wunused-template would report it as unused, an error
+  // under a replayed -Werror, for code that compiles perfectly well
+  // (oasys-core's Timer::elapsed helpers hit exactly this on newer libclang,
+  // whose warning fires where the older one stayed quiet). That analysis
+  // cannot be sound without bodies, so build_args appends -Wno-unused-template
+  // unless the command already says what to do about the warning: an explicit
+  // -Wunused-template (or its -Werror=/-Wno-error= spellings) is the project
+  // asking for it, and an explicit -Wno-unused-template needs no second copy.
+  CHECK_FALSE(parser::mentions_unused_template({"-Wall", "-Werror"}));
+  CHECK_FALSE(parser::mentions_unused_template({"-Wextra"}));
+  CHECK_FALSE(parser::mentions_unused_template({}));
+  CHECK(parser::mentions_unused_template({"-Wunused-template"}));
+  CHECK(parser::mentions_unused_template({"-Wall", "-Werror=unused-template"}));
+  CHECK(parser::mentions_unused_template({"-Wno-error=unused-template"}));
+  CHECK(parser::mentions_unused_template({"-Wno-unused-template"}));
+}
+
 TEST_CASE("a streamed parse arrives in the same order at any job count",
           "[parser]") {
   // The batches reach the sink in canonical order rather than in the order the
