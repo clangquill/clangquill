@@ -59,6 +59,16 @@ struct ParseOptions {
   int tu_batch = 0;
 };
 
+/// @brief Whether @p args already say what to do about `-Wunused-template`.
+///
+/// True for an explicit `-Wunused-template` (or its `-Werror=`/`-Wno-error=`
+/// spellings, which ask for the analysis at error/non-error severity) and for
+/// an explicit `-Wno-unused-template`. Anything else leaves `-Wall` free to
+/// imply the warning -- which `Parser::build_args` then switches back off,
+/// since every translation unit here is parsed with function bodies skipped
+/// and that analysis cannot be sound without them.
+bool mentions_unused_template(const std::vector<std::string>& args);
+
 /// @brief Drives libclang over one translation unit at a time.
 ///
 /// Appends extracted IR into a ParsedModule and owns a reusable CXIndex.

@@ -414,7 +414,28 @@ std::vector<std::string> Parser::build_args(const std::string& path,
   // above cannot see an extra argument's `-x`, and neither can the command:
   // append_extra_args drops those.
   if (!entry_sets_language) args.push_back(language_flag_for(language_of));
+
+  // Every translation unit here is parsed with function bodies skipped
+  // (CXTranslationUnit_SkipFunctionBodies), so a helper template used only
+  // from those bodies is never instantiated in the parse -- and clang's
+  // -Wunused-template then reports it as unused, an error under the -Werror a
+  // database entry replays, for code that compiles perfectly well. That
+  // analysis cannot be sound without bodies, so a -Wall-implied enablement is
+  // switched back off; an explicit -Wunused-template in the entry is the
+  // project asking for it and is left alone. (Same shape as the
+  // -Wpragma-once-outside-header failure language_flag_for exists to prevent.)
+  if (!mentions_unused_template(args)) {
+    args.push_back("-Wno-unused-template");
+  }
   return args;
+}
+
+bool mentions_unused_template(const std::vector<std::string>& args) {
+  const auto mentions = [](const std::string& a) {
+    return a == "-Wunused-template" || a == "-Werror=unused-template" ||
+           a == "-Wno-error=unused-template" || a == "-Wno-unused-template";
+  };
+  return std::any_of(args.begin(), args.end(), mentions);
 }
 
 void Parser::report_compile_db_failure(model::ParsedModule& out) const {
