@@ -37,7 +37,7 @@ jobs:
               # A plain `python -m build --wheel` tags the artefact
               # linux_<arch>, which PyPI rejects. cibuildwheel produces the
               # manylinux-tagged wheels PyPI accepts.
-        uses: pypa/cibuildwheel@v4.2.0
+        uses: pypa/cibuildwheel@v4.3.0
         env:
                   # The core links sqlite3 + nlohmann-json, sourced via vcpkg
                   # inside the manylinux image (apt is unavailable there).
@@ -105,7 +105,7 @@ jobs:
           assert _core.have_libclang();
           print(_core.__core_version__, _core.libclang_version())";
           done'
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: wheels-linux-${{ matrix.arch }}
           path: ./wheelhouse/*.whl
@@ -118,7 +118,7 @@ jobs:
                   # full history so setuptools_scm derives the version
           fetch-depth: 0
       - name: Build Windows wheels
-        uses: pypa/cibuildwheel@v4.2.0
+        uses: pypa/cibuildwheel@v4.3.0
         env:
                   # Mirrors the Linux job above: same libclang (fetched by the
                   # Windows counterpart of fetch-libclang.sh, see docs
@@ -159,7 +159,7 @@ jobs:
             python -c "from clangquill import _core;
             assert _core.have_libclang();
             print(_core.__core_version__, _core.libclang_version())"
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: wheels-windows-AMD64
           path: ./wheelhouse/*.whl
@@ -179,7 +179,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install build
           python -m build --sdist --outdir dist/
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: sdist
           path: ./dist/*.tar.gz
