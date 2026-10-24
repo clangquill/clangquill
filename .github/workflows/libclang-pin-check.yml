@@ -55,7 +55,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Fetch the newer libclang (${{ needs.check.outputs.latest }})
-        run: sudo FETCH_RESOURCE_HEADERS=1 tools/ci/fetch-libclang.sh /opt/libclang
+        run: >-
+          sudo LLVM_VERSION="$LLVM_VERSION" FETCH_RESOURCE_HEADERS=1
+          tools/ci/fetch-libclang.sh /opt/libclang
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:
