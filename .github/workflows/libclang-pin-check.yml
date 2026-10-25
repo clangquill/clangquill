@@ -55,7 +55,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Fetch the newer libclang (${{ needs.check.outputs.latest }})
-        run: sudo tools/ci/fetch-libclang.sh /opt/libclang
+        run: >-
+          sudo LLVM_VERSION="$LLVM_VERSION" FETCH_RESOURCE_HEADERS=1
+          tools/ci/fetch-libclang.sh /opt/libclang
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:
@@ -76,5 +78,12 @@ jobs:
           -DPython_EXECUTABLE="$(which python)"
       - name: Build
         run: cmake --build build
+        # A bare libclang.so finds its builtin headers (stddef.h, ...) at
+        # lib/clang/<major> relative to the working directory, and ctest runs
+        # every test from the build directory.
+      - name: Link the builtin headers into the tests' working directory
+        run: |
+          mkdir -p build/lib
+          ln -s /opt/libclang/lib/clang build/lib/clang
       - name: Test
         run: ctest --test-dir build --output-on-failure

@@ -13,6 +13,7 @@
 # Env:    LLVM_VERSION                     (defaults to the pinned version in the
 #                                           sibling llvm-version.txt — the single
 #                                           source of truth for the pin)
+#         FETCH_RESOURCE_HEADERS=1         (also unpack lib/clang/<major>/include)
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,9 +42,18 @@ echo "fetch-libclang: downloading ${url}" >&2
 # Extract only the shared library and the C API headers; the rest of the
 # release (clang/lld/etc.) is multiple GB unpacked and unused here. The binary
 # tarball ships no license file, so it is fetched separately below.
+#
+# FETCH_RESOURCE_HEADERS=1 also keeps lib/clang/<major>/include (stddef.h and
+# the other builtin headers). Wheels do not need them -- clangquill is handed a
+# resource directory -- but a bare libclang.so cannot parse <cstddef> without
+# them, which the pre-bump retest of the C++ suite does.
+members=('*/lib/libclang.so*' '*/include/clang-c/*')
+if [ "${FETCH_RESOURCE_HEADERS:-0}" = "1" ]; then
+  members+=('*/lib/clang/*/include/*')
+fi
 curl -fsSL --retry 3 --retry-delay 2 "$url" \
   | tar -xJ -C "$prefix" --strip-components=1 --wildcards --no-anchored \
-        '*/lib/libclang.so*' '*/include/clang-c/*'
+        "${members[@]}"
 
 # FindLibClang looks for a bare `libclang.so`; the release ships the versioned
 # names plus that symlink, but recreate it defensively if it is missing.
