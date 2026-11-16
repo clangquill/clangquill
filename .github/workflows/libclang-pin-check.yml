@@ -28,7 +28,7 @@ jobs:
       stale: ${{ steps.pin.outputs.stale }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: '3.13'
       - name: Check for a newer libclang with both Linux arches
@@ -59,7 +59,7 @@ jobs:
           sudo LLVM_VERSION="$LLVM_VERSION" FETCH_RESOURCE_HEADERS=1
           tools/ci/fetch-libclang.sh /opt/libclang
       - name: Set up Python
-        uses: actions/setup-python@v7.0.0
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: '3.13'
       - name: Install nanobind (build-time dependency)
