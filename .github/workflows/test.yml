@@ -48,7 +48,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libclang-dev
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.2
+        uses: astral-sh/setup-uv@v10.3.3
       - name: Set up Python
         uses: actions/setup-python@v7.1.0
         with:
@@ -109,7 +109,7 @@ jobs:
       - name: Install LLVM 23 from apt.llvm.org
         run: bash tools/ci/install-llvm-apt.sh
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.2
+        uses: astral-sh/setup-uv@v10.3.3
       - name: Set up Python
         uses: actions/setup-python@v7.1.0
         with:
@@ -146,7 +146,7 @@ jobs:
       - name: Install LLVM 23 from apt.llvm.org
         run: bash tools/ci/install-llvm-apt.sh
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.2
+        uses: astral-sh/setup-uv@v10.3.3
       - name: Set up Python
         uses: actions/setup-python@v7.1.0
         with:
@@ -177,7 +177,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.3.2
+        uses: astral-sh/setup-uv@v10.3.3
       - name: Set up Python
         uses: actions/setup-python@v7.1.0
         with:
